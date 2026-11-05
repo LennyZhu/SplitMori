@@ -3,11 +3,16 @@ import { migrations } from "./migrations.ts";
 
 export type SQLiteReader = Pick<SQLiteDatabase, "getFirstAsync" | "getAllAsync">;
 export type SQLiteConnection = SQLiteReader & Pick<SQLiteDatabase, "execAsync" | "runAsync">;
+export const backupSnapshotName = "splitmori-snapshot.sqlite";
+
+type SnapshotWriter = (directoryUri: string) => Promise<void>;
 
 export type LocalDatabase = {
   read<T>(task: (connection: SQLiteReader) => Promise<T>): Promise<T>;
   /** Use the supplied transaction for all queries inside the task. */
   write<T>(task: (transaction: SQLiteConnection) => Promise<T>): Promise<T>;
+  /** Writes a standalone SQLite snapshot in an empty, private directory. */
+  backupSnapshot(directoryUri: string): Promise<void>;
 };
 
 type InitializationStage = "open" | "configure" | "migration";
@@ -23,7 +28,7 @@ export class DatabaseInitializationError extends Error {
   }
 }
 
-function createDatabase(connection: SQLiteConnection): LocalDatabase {
+function createDatabase(connection: SQLiteConnection, snapshotWriter?: SnapshotWriter): LocalDatabase {
   let pending = Promise.resolve();
   let unusable: Error | undefined;
 
@@ -59,11 +64,16 @@ function createDatabase(connection: SQLiteConnection): LocalDatabase {
   return {
     read: (task) => transact("BEGIN DEFERRED", task),
     write: (task) => transact("BEGIN IMMEDIATE", task),
+    backupSnapshot: (directoryUri) => enqueue(async () => {
+      if (!snapshotWriter) throw new Error("SQLite snapshot writer is unavailable");
+      // The backup owns its SQLite read snapshot. Wait for queued work without opening a transaction.
+      await snapshotWriter(directoryUri);
+    }),
   };
 }
 
 /** Initialize a dedicated file connection before exposing it to readers and writers. */
-export async function initializeDatabase(connection: SQLiteConnection): Promise<LocalDatabase> {
+export async function initializeDatabase(connection: SQLiteConnection, snapshotWriter?: SnapshotWriter): Promise<LocalDatabase> {
   try {
     await connection.execAsync("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
     const journal = await connection.getFirstAsync<{ journal_mode: string }>("PRAGMA journal_mode = WAL");
@@ -75,7 +85,7 @@ export async function initializeDatabase(connection: SQLiteConnection): Promise<
     throw new DatabaseInitializationError("configure", error);
   }
 
-  const database = createDatabase(connection);
+  const database = createDatabase(connection, snapshotWriter);
   try {
     await database.write(async (transaction) => {
       const metadata = await transaction.getFirstAsync<{ user_version: number }>("PRAGMA user_version");
@@ -96,15 +106,25 @@ export async function initializeDatabase(connection: SQLiteConnection): Promise<
 
 async function openLocalDatabase(): Promise<LocalDatabase> {
   let connection: SQLiteDatabase;
+  let sqlite: typeof import("expo-sqlite");
   try {
-    const { openDatabaseAsync } = await import("expo-sqlite");
-    connection = await openDatabaseAsync("splitmori.db", { useNewConnection: true });
+    sqlite = await import("expo-sqlite");
+    connection = await sqlite.openDatabaseAsync("splitmori.db", { useNewConnection: true });
   } catch (error) {
     throw new DatabaseInitializationError("open", error);
   }
 
   try {
-    return await initializeDatabase(connection);
+    return await initializeDatabase(connection, async (directoryUri) => {
+      const destination = await sqlite.openDatabaseAsync(backupSnapshotName, { useNewConnection: true }, directoryUri);
+      try {
+        await sqlite.backupDatabaseAsync({ sourceDatabase: connection, destDatabase: destination });
+        const journal = await destination.getFirstAsync<{ journal_mode: string }>("PRAGMA journal_mode = DELETE");
+        if (journal?.journal_mode !== "delete") throw new Error("Backup snapshot requires a standalone journal mode");
+      } finally {
+        await destination.closeAsync();
+      }
+    });
   } catch (error) {
     // Retain the initialization error if the failing connection also cannot close.
     await connection.closeAsync().catch(() => undefined);

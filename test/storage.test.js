@@ -1,15 +1,20 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  closeSync, constants, copyFileSync, existsSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync,
+  writeFileSync, writeSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { basename, dirname, join } from "node:path";
+import { backup as sqliteBackup, DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { createActivityRepository } from "../src/data/activities.ts";
-import { DatabaseInitializationError, initializeDatabase } from "../src/data/database.ts";
+import { backupSnapshotName, DatabaseInitializationError, initializeDatabase } from "../src/data/database.ts";
 import { createFinanceRepository } from "../src/data/finance.ts";
 import { migrations } from "../src/data/migrations.ts";
 import { createQuickSplitRepository } from "../src/data/quickSplits.ts";
 import { splitEqual } from "../src/domain/split.ts";
+import { createBackupService } from "../src/services/backup.ts";
 import { createQuickSplitConversionService } from "../src/services/quickSplitConversion.ts";
 
 // Exercises the production SQL against a real file with Node's SQLite adapter.
@@ -24,6 +29,17 @@ function openTestConnection(path) {
     },
     getAllAsync: async (sql, ...params) => db.prepare(sql).all(...params).map((row) => ({ ...row })),
     close: () => db.close(),
+    closeAsync: async () => db.close(),
+    async writeSnapshot(directory) {
+      const target = join(directory, backupSnapshotName);
+      await sqliteBackup(db, target);
+      const snapshot = new DatabaseSync(target);
+      try {
+        assert.equal(snapshot.prepare("PRAGMA journal_mode = DELETE").get().journal_mode, "delete");
+      } finally {
+        snapshot.close();
+      }
+    },
   };
 }
 
@@ -128,7 +144,7 @@ function withFinance(task) {
   return withTestFile(async (path) => {
     let connection = openTestConnection(path);
     try {
-      const database = await initializeDatabase(connection);
+      const database = await initializeDatabase(connection, connection.writeSnapshot);
       const activities = createActivityRepository(database);
       await activities.createActivity({
         id: "trip", name: "Trip", currency: "HKD",
@@ -139,7 +155,7 @@ function withFinance(task) {
         connection = openTestConnection(path);
         return createFinanceRepository(await initializeDatabase(connection));
       };
-      await task(createFinanceRepository(database), activities, database, connection, reopen);
+      await task(createFinanceRepository(database), activities, database, connection, reopen, path);
     } finally {
       connection.close();
     }
@@ -783,4 +799,221 @@ test("a void that would overflow balances after revisions leaves the ledger unch
     id: "too-large", targetEventId: repayment.id, occurredAt: 600,
   })).error, { code: "AMOUNT_OVERFLOW", field: "total" });
   assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
+}));
+
+function sha256(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function backupFile(path) {
+  return {
+    uri: path,
+    get exists() { return existsSync(path); },
+    get size() { return statSync(path).size; },
+    get modificationTime() { return Math.floor(statSync(path).mtimeMs); },
+    create: () => writeFileSync(path, "", { flag: "wx" }),
+    sha256: async () => sha256(readFileSync(path)),
+    open(mode) {
+      const fd = openSync(path, mode === "read" ? "r" : "r+");
+      return {
+        async readBytes(length) {
+          const bytes = new Uint8Array(length);
+          return bytes.subarray(0, readSync(fd, bytes, 0, length, null));
+        },
+        async writeBytes(bytes) {
+          let offset = 0;
+          while (offset < bytes.length) offset += writeSync(fd, bytes, offset, bytes.length - offset, null);
+        },
+        close: () => closeSync(fd),
+      };
+    },
+  };
+}
+
+function backupService(path, overrides) {
+  return createBackupService({
+    createWorkspace() {
+      const directoryUri = mkdtempSync(join(dirname(path), "scratch-"));
+      return {
+        directoryUri, token: basename(directoryUri),
+        file: (name) => backupFile(join(directoryUri, name)),
+        remove: () => rmSync(directoryUri, { recursive: true, force: true }),
+      };
+    },
+    file: backupFile,
+    openDatabase: async (name, directory) => openTestConnection(directory ? join(directory, name) : name),
+    async publish(source, destination = dirname(path)) {
+      const target = join(destination, basename(source));
+      copyFileSync(source, target, constants.COPYFILE_EXCL);
+      return target;
+    },
+    ...overrides,
+  });
+}
+
+function unpackBackup(uri) {
+  const bytes = readFileSync(uri);
+  const first = bytes.indexOf(10);
+  const second = bytes.indexOf(10, first + 1);
+  return { manifest: JSON.parse(bytes.subarray(first + 1, second)), payload: bytes.subarray(second + 1) };
+}
+
+function writeBackup(uri, manifest, payload) {
+  writeFileSync(uri, Buffer.concat([Buffer.from(`SplitMori Backup\n${JSON.stringify(manifest)}\n`), payload]));
+}
+
+test("WAL backup preserves every ledger and quick-split record without changing the source", withFinance(async (finance, activities, database, connection, _reopen, path) => {
+  const quick = createQuickSplitRepository(database);
+  valueOf(await quick.saveQuickDraft("draft", { mode: "equal" }, 50));
+  valueOf(await quick.saveQuickHistory("history", quickInput()));
+  valueOf(await createQuickSplitConversionService(database).convertQuickHistory(conversionRequest()));
+  valueOf(await finance.createExpense("trip", 110, expense()));
+  valueOf(await finance.recordMerchantRefund("trip", 200, { ...refund, recipientId: "a" }));
+  valueOf(await finance.recordMemberTransfer("trip", 250, { ...repayment, amountMinor: 6000 }));
+  valueOf(await finance.commitExpenseCorrection("trip", correction(8000, { reviewedRefundIds: [refund.id] })));
+  valueOf(await finance.voidMerchantRefund("trip", { id: "void-refund", targetEventId: refund.id, occurredAt: 400 }));
+  const before = valueOf(await finance.getActivityLedger("trip"));
+  const sourceBytes = readFileSync(path);
+  const walBytes = readFileSync(`${path}-wal`);
+  assert.ok(walBytes.length > 32);
+
+  const service = backupService(path);
+  const { uri, manifest } = valueOf(await service.exportBackup(database, { destinationDirectoryUri: dirname(path) }));
+  const exportedBytes = readFileSync(uri);
+  assert.match(uri, /\.splitmori-backup$/);
+  assert.equal(manifest.schemaVersion, 6);
+  const preview = valueOf(await service.previewBackup(uri));
+  assert.deepEqual(preview.manifest, manifest);
+  assert.ok(preview.fileModifiedAt > 0);
+  assert.deepEqual(
+    [preview.validationStatus, preview.activityCount, preview.memberCount, preview.expenseCount, preview.financialEventCount,
+      preview.repaymentCount, preview.quickHistoryCount],
+    ["valid", 1, 2, 2, 6, 1, 1],
+  );
+  assert.deepEqual(readFileSync(uri), exportedBytes);
+
+  const snapshotPath = join(dirname(path), "exported.sqlite");
+  writeFileSync(snapshotPath, unpackBackup(uri).payload);
+  const snapshot = openTestConnection(snapshotPath);
+  try {
+    const tables = await connection.getAllAsync("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name");
+    for (const { name } of tables) {
+      assert.deepEqual(await snapshot.getAllAsync(`SELECT * FROM ${name}`), await connection.getAllAsync(`SELECT * FROM ${name}`), name);
+    }
+  } finally {
+    snapshot.close();
+  }
+  assert.deepEqual(readFileSync(path), sourceBytes);
+  assert.deepEqual(readFileSync(`${path}-wal`), walBytes);
+  assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
+  assert.equal((await activities.getActivity("trip")).name, "Trip");
+}));
+
+test("backup is serialized between database transactions", withFinance(async (_finance, activities, database, _connection, _reopen, path) => {
+  const service = backupService(path);
+  let release;
+  const wait = new Promise((resolve) => { release = resolve; });
+  const first = database.write(async (connection) => {
+    await connection.runAsync("UPDATE activities SET name = 'Committed before backup' WHERE id = 'trip'");
+    await wait;
+  });
+  const exporting = service.exportBackup(database);
+  const later = activities.renameActivity("trip", "Committed after backup");
+  release();
+  const [, exported] = await Promise.all([first, exporting, later]);
+  const { uri } = valueOf(exported);
+  const snapshotPath = join(dirname(path), "ordered.sqlite");
+  writeFileSync(snapshotPath, unpackBackup(uri).payload);
+  const snapshot = openTestConnection(snapshotPath);
+  try {
+    assert.equal((await snapshot.getFirstAsync("SELECT name FROM activities")).name, "Committed before backup");
+  } finally {
+    snapshot.close();
+  }
+  assert.equal((await activities.getActivity("trip")).name, "Committed after backup");
+}));
+
+test("backup validation rejects corrupt and future files and can preview an older schema", withFinance(async (_finance, _activities, database, _connection, _reopen, path) => {
+  const service = backupService(path);
+  const invalid = join(dirname(path), "invalid.splitmori-backup");
+  assert.equal((await service.validateBackup(invalid)).error.code, "BACKUP_FILE_NOT_FOUND");
+  writeFileSync(invalid, "not a SplitMori backup");
+  assert.equal((await service.validateBackup(invalid)).error.code, "INVALID_BACKUP_FORMAT");
+
+  const { uri } = valueOf(await service.exportBackup(database));
+  const { manifest, payload } = unpackBackup(uri);
+  writeBackup(invalid, manifest, payload.subarray(0, -1));
+  assert.equal((await service.validateBackup(invalid)).error.code, "BACKUP_CHECKSUM_MISMATCH");
+  const damaged = Buffer.from(payload);
+  damaged[damaged.length - 1] ^= 1;
+  writeBackup(invalid, manifest, damaged);
+  assert.equal((await service.validateBackup(invalid)).error.code, "BACKUP_CHECKSUM_MISMATCH");
+  writeBackup(invalid, { ...manifest, formatVersion: 2 }, payload);
+  assert.equal((await service.validateBackup(invalid)).error.code, "UNSUPPORTED_BACKUP_VERSION");
+  writeBackup(invalid, { ...manifest, schemaVersion: migrations.length + 1 }, payload);
+  assert.equal((await service.validateBackup(invalid)).error.code, "UNSUPPORTED_BACKUP_VERSION");
+  damaged.fill(0);
+  writeBackup(invalid, { ...manifest, sha256: sha256(damaged) }, damaged);
+  assert.equal((await service.validateBackup(invalid)).error.code, "BACKUP_INTEGRITY_FAILED");
+
+  const oldPath = join(dirname(path), "version-one.sqlite");
+  const old = openTestConnection(oldPath);
+  try {
+    await old.execAsync(migrations[0]);
+    await old.execAsync("PRAGMA user_version = 1");
+  } finally {
+    old.close();
+  }
+  const oldPayload = readFileSync(oldPath);
+  writeBackup(invalid, {
+    ...manifest, schemaVersion: 1, createdAt: undefined, byteLength: oldPayload.length, sha256: sha256(oldPayload),
+  }, oldPayload);
+  const preview = valueOf(await service.previewBackup(invalid));
+  assert.equal(preview.manifest.schemaVersion, 1);
+  assert.equal(preview.manifest.createdAt, null);
+  assert.equal(preview.financialEventCount, 0);
+}));
+
+test("backup validation checks SQLite schema, foreign keys, and financial totals beyond the checksum", withFinance(async (finance, _activities, database, _connection, _reopen, path) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  const service = backupService(path);
+  const { uri } = valueOf(await service.exportBackup(database));
+  const { manifest, payload } = unpackBackup(uri);
+  const altered = join(dirname(path), "altered.sqlite");
+  const invalid = join(dirname(path), "altered.splitmori-backup");
+  for (const [sql, code] of [
+    ["DROP TABLE quick_history", "BACKUP_SCHEMA_MISMATCH"],
+    ["UPDATE merchant_payments SET member_id = 'missing'", "BACKUP_FOREIGN_KEYS_FAILED"],
+    ["UPDATE expense_allocations SET amount_minor = 4999 WHERE member_id = 'a'", "BACKUP_LEDGER_INVALID"],
+    ["PRAGMA user_version = 7", "UNSUPPORTED_BACKUP_VERSION"],
+  ]) {
+    writeFileSync(altered, payload);
+    const connection = openTestConnection(altered);
+    try {
+      await connection.execAsync(sql);
+    } finally {
+      connection.close();
+    }
+    const newPayload = readFileSync(altered);
+    writeBackup(invalid, { ...manifest, byteLength: newPayload.length, sha256: sha256(newPayload) }, newPayload);
+    assert.equal((await service.validateBackup(invalid)).error?.code, code);
+  }
+}));
+
+test("snapshot and publishing failures leave the current ledger usable", withFinance(async (finance, _activities, database, _connection, _reopen, path) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  const before = valueOf(await finance.getActivityLedger("trip"));
+  const service = backupService(path);
+  assert.equal((await service.exportBackup(database, { destinationDirectoryUri: join(dirname(path), "missing") })).error.code,
+    "BACKUP_EXPORT_FAILED");
+  assert.equal((await service.exportBackup({
+    ...database,
+    async backupSnapshot(directory) {
+      writeFileSync(join(directory, backupSnapshotName), "partial snapshot");
+      throw new Error("Snapshot failed");
+    },
+  })).error.code, "BACKUP_EXPORT_FAILED");
+  assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
+  valueOf(await finance.recordMemberTransfer("trip", 200, repayment));
+  assert.equal(valueOf(await finance.getActivityLedger("trip")).events.length, 2);
 }));

@@ -61,7 +61,17 @@ export type DomainErrorCode =
   | "EVENT_ALREADY_VOIDED"
   | "VOID_OUT_OF_ORDER"
   | "INVALID_VOID_REASON"
-  | "VOID_LEDGER_CONFLICT";
+  | "VOID_LEDGER_CONFLICT"
+  | "BACKUP_EXPORT_FAILED"
+  | "BACKUP_READ_FAILED"
+  | "BACKUP_FILE_NOT_FOUND"
+  | "INVALID_BACKUP_FORMAT"
+  | "UNSUPPORTED_BACKUP_VERSION"
+  | "BACKUP_CHECKSUM_MISMATCH"
+  | "BACKUP_INTEGRITY_FAILED"
+  | "BACKUP_FOREIGN_KEYS_FAILED"
+  | "BACKUP_SCHEMA_MISMATCH"
+  | "BACKUP_LEDGER_INVALID";
 
 type ErrorField =
   | "currency"
@@ -100,7 +110,8 @@ type ErrorField =
   | "conversionRequestId"
   | "memberMapping"
   | "targetEventId"
-  | "voidReason";
+  | "voidReason"
+  | "backup";
 
 export type Failure = {
   readonly ok: false;

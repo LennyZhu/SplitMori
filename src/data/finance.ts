@@ -188,6 +188,21 @@ async function readEvents(connection: SQLiteReader, activity: ActivityContext): 
   });
 }
 
+/** Replays the financial facts on a read-only backup connection without migrations or writes. */
+export async function validateStoredLedgers(connection: SQLiteReader, schemaVersion: number): Promise<Result<true>> {
+  const rows = await connection.getAllAsync<{ id: string }>("SELECT id FROM activities ORDER BY id");
+  for (const { id } of rows) {
+    const activity = await readActivity(connection, id);
+    if (!activity) return failure("ACTIVITY_NOT_FOUND", "activityId");
+    const events = schemaVersion >= 2 ? await readEvents(connection, activity) : [];
+    const revisions = schemaVersion >= 3 ? await readExpenseRevisions(connection, id) : [];
+    const voids = schemaVersion >= 6 ? await readFinancialVoids(connection, id) : [];
+    const balances = calculateBalances(activity.currency, activity.memberIds, [], orderedTimeline(events, revisions, voids));
+    if (!balances.ok) return balances;
+  }
+  return { ok: true, value: true };
+}
+
 function eventId(event: FinanceEvent): string {
   return event.kind === "expense" ? event.expense.id : event.id;
 }
