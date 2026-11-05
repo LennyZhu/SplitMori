@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { calculateBalances } from "../src/domain/balance.ts";
+import { allocateCharges, calculateCharges } from "../src/domain/charges.ts";
 import { formatAmount, parseAmount } from "../src/domain/money.ts";
 import { suggestTransfers } from "../src/domain/settlement.ts";
-import { splitEqual, splitIndividual, splitTreat } from "../src/domain/split.ts";
+import { splitCustom, splitEqual, splitIndividual, splitTreat } from "../src/domain/split.ts";
 
 function valueOf(result) {
   assert.equal(result.ok, true, JSON.stringify(result));
@@ -526,4 +527,138 @@ test("settlement rejects invalid balances, duplicate members and conflicting cur
   ]) {
     assert.deepEqual(suggestTransfers({ ...input, ...overrides }).error, { code, field });
   }
+});
+
+test("a final receipt amount is split as entered without adding a service fee", () => {
+  const total = valueOf(parseAmount("1100", "HKD"));
+  const calculated = valueOf(calculateCharges({ kind: "finalTotal", total }));
+  assert.deepEqual(calculated, { kind: "finalTotal", total });
+  assertShares(splitEqual(calculated.total, ["a", "b"]), [55_000, 55_000], total);
+});
+
+test("the 10% shortcut defaults to the pre-discount subtotal and rounds half up", () => {
+  const details = {
+    kind: "details",
+    subtotal: { currency: "HKD", amountMinor: 90_000 },
+    discountMinor: 5000,
+    serviceFee: { kind: "quick10" },
+  };
+  const before = valueOf(calculateCharges({ ...details, receiptTotal: { currency: "HKD", amountMinor: 94_000 } }));
+  assert.equal(before.serviceFeeMinor, 9000);
+  assert.equal(before.total.amountMinor, 94_000);
+
+  const after = valueOf(calculateCharges({ ...details, serviceFee: { kind: "quick10", basis: "afterDiscount" } }));
+  assert.equal(after.serviceFeeMinor, 8500);
+  assert.equal(after.total.amountMinor, 93_500);
+
+  const half = valueOf(calculateCharges({ ...details, subtotal: { currency: "JPY", amountMinor: 5 }, discountMinor: 0 }));
+  assert.equal(half.serviceFeeMinor, 1);
+});
+
+test("service fees and discounts follow original shares and preserve the final total", () => {
+  const subtotal = { currency: "JPY", amountMinor: 10 };
+  const base = valueOf(splitIndividual(subtotal, [
+    { memberId: "a", personalMinor: 5 },
+    { memberId: "b", personalMinor: 3 },
+    { memberId: "c", personalMinor: 2 },
+  ], { amountMinor: 0, memberIds: [] }));
+  const result = allocateCharges(base, {
+    kind: "details", subtotal, discountMinor: 4, serviceFee: { kind: "manual", amountMinor: 3 },
+  });
+  const value = assertShares(result, [4, 3, 2], { currency: "JPY", amountMinor: 9 });
+  assert.deepEqual(value.allocations, [
+    { memberId: "a", baseMinor: 5, serviceFeeMinor: 1, discountMinor: 2, amountMinor: 4 },
+    { memberId: "b", baseMinor: 3, serviceFeeMinor: 1, discountMinor: 1, amountMinor: 3 },
+    { memberId: "c", baseMinor: 2, serviceFeeMinor: 1, discountMinor: 1, amountMinor: 2 },
+  ]);
+
+  const equalSubtotal = { currency: "JPY", amountMinor: 3 };
+  const equal = valueOf(splitEqual(equalSubtotal, ["c", "a", "b"]));
+  const equalResult = allocateCharges(equal, {
+    kind: "details", subtotal: equalSubtotal, discountMinor: 1, serviceFee: { kind: "manual", amountMinor: 2 },
+  });
+  const equalValue = assertShares(equalResult, [1, 2, 1], { currency: "JPY", amountMinor: 4 });
+  assert.deepEqual(equalValue.allocations.map(({ discountMinor }) => discountMinor), [1, 0, 0]);
+  assert.deepEqual(equalValue.allocations.map(({ serviceFeeMinor }) => serviceFeeMinor), [1, 1, 0]);
+  assertShares(allocateCharges(equal, { kind: "details", subtotal: equalSubtotal, discountMinor: 3 }),
+    [0, 0, 0], { currency: "JPY", amountMinor: 0 });
+});
+
+test("custom fixed allocations must match the final bill exactly", () => {
+  const total = { currency: "HKD", amountMinor: 5000 };
+  const options = { kind: "fixed", members: [
+    { memberId: "b", amountMinor: 3000 }, { memberId: "a", amountMinor: 2000 },
+  ] };
+  const value = assertShares(splitCustom(total, options), [3000, 2000], total);
+  assert.deepEqual(value.explanation, { kind: "custom", method: "fixed" });
+  assert.deepEqual(splitCustom({ ...total, amountMinor: 5001 }, options).error,
+    { code: "TOTAL_MISMATCH", field: "allocations" });
+});
+
+test("custom percentages and integer shares distribute remainders in snapshot order", () => {
+  const total = { currency: "JPY", amountMinor: 102 };
+  const percentage = { kind: "percentage", members: [
+    { memberId: "b", basisPoints: 5000 }, { memberId: "c", basisPoints: 2500 }, { memberId: "a", basisPoints: 2500 },
+  ] };
+  const shares = { kind: "shares", members: [
+    { memberId: "b", shares: 2 }, { memberId: "c", shares: 1 }, { memberId: "a", shares: 1 },
+  ] };
+  for (const options of [percentage, shares]) {
+    const value = assertShares(splitCustom(total, options), [51, 26, 25], total);
+    assert.deepEqual(value.allocations.map(({ memberId }) => memberId), ["b", "c", "a"]);
+  }
+
+  const max = { ...total, amountMinor: Number.MAX_SAFE_INTEGER };
+  const largeShares = { kind: "shares", members: [
+    { memberId: "b", shares: max.amountMinor }, { memberId: "a", shares: max.amountMinor },
+  ] };
+  assertShares(splitCustom(max, largeShares), [4_503_599_627_370_496, 4_503_599_627_370_495], max);
+});
+
+test("charge calculations reject conflicting fee sources, invalid amounts and receipt mismatches", () => {
+  const details = { kind: "details", subtotal: { currency: "HKD", amountMinor: 100 } };
+  for (const [overrides, code, field] of [
+    [{ discountMinor: 101 }, "DISCOUNT_EXCEEDS_SUBTOTAL", "discount"],
+    [{ serviceFee: { kind: "manual", amountMinor: -1 } }, "NEGATIVE_AMOUNT", "serviceFee"],
+    [{ serviceFee: { kind: "quick10", amountMinor: 1 } }, "SERVICE_FEE_CONFLICT", "serviceFee"],
+    [{ receiptTotal: { currency: "HKD", amountMinor: 99 } }, "TOTAL_MISMATCH", "receiptTotal"],
+    [{ receiptTotal: { currency: "JPY", amountMinor: 100 } }, "CURRENCY_MISMATCH", "receiptTotal"],
+    [{ subtotal: { currency: "HKD", amountMinor: Number.MAX_SAFE_INTEGER }, serviceFee: { kind: "quick10" } },
+      "AMOUNT_OVERFLOW", "total"],
+  ]) {
+    assert.deepEqual(calculateCharges({ ...details, ...overrides }).error, { code, field });
+  }
+  const zero = { currency: "HKD", amountMinor: 0 };
+  const zeroSplit = valueOf(splitEqual(zero, ["a", "b"]));
+  const result = allocateCharges(zeroSplit, {
+    ...details, subtotal: zero, serviceFee: { kind: "manual", amountMinor: 1 },
+  });
+  assert.deepEqual(result.error, { code: "NO_CHARGE_WEIGHTS", field: "charges" });
+});
+
+test("custom splits reject invalid amounts, percentages, shares and repeated members", () => {
+  const total = { currency: "JPY", amountMinor: 100 };
+  for (const [options, code, field] of [
+    [{ kind: "percentage", members: [{ memberId: "a", basisPoints: 9999 }] }, "TOTAL_MISMATCH", "basisPoints"],
+    [{ kind: "percentage", members: [{ memberId: "a", basisPoints: 9999.5 }] }, "INVALID_PERCENTAGE", "basisPoints"],
+    [{ kind: "shares", members: [{ memberId: "a", shares: 0 }] }, "INVALID_SHARE_COUNT", "shares"],
+    [{ kind: "shares", members: [{ memberId: "a", shares: 1 }, { memberId: "a", shares: 2 }] },
+      "DUPLICATE_MEMBER_ID", "memberIds"],
+    [{ kind: "fixed", members: [{ memberId: "a", amountMinor: -1 }] }, "NEGATIVE_AMOUNT", "allocations"],
+    [{ kind: "fixed", members: [{ memberId: "a", amountMinor: Number.MAX_SAFE_INTEGER }, { memberId: "b", amountMinor: 1 }] },
+      "AMOUNT_OVERFLOW", "allocations"],
+  ]) {
+    assert.deepEqual(splitCustom(total, options).error, { code, field });
+  }
+});
+
+test("treat uses the final receipt without applying proportional charges to the host commitment", () => {
+  const subtotal = { currency: "HKD", amountMinor: 90_000 };
+  const details = { kind: "details", subtotal, serviceFee: { kind: "manual", amountMinor: 10_000 } };
+  const base = valueOf(splitTreat(subtotal, group, fixed));
+  assert.deepEqual(allocateCharges(base, details).error, { code: "CHARGE_ALLOCATION_UNSUPPORTED", field: "charges" });
+
+  const { total } = valueOf(calculateCharges(details));
+  const value = assertShares(splitTreat(total, group, fixed), [60_000, 10_000, 10_000, 10_000, 10_000], total);
+  assert.equal(value.explanation.coveredMinor, 60_000);
 });

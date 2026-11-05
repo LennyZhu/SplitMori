@@ -26,7 +26,13 @@ export type DomainErrorCode =
   | "REFUND_REDUCTION_EXCEEDS_ALLOCATION"
   | "SELF_TRANSFER"
   | "TRANSFER_EXCEEDS_BALANCE"
-  | "UNBALANCED_NET_BALANCES";
+  | "UNBALANCED_NET_BALANCES"
+  | "DISCOUNT_EXCEEDS_SUBTOTAL"
+  | "INVALID_SERVICE_FEE"
+  | "SERVICE_FEE_CONFLICT"
+  | "CHARGE_ALLOCATION_UNSUPPORTED"
+  | "NO_CHARGE_WEIGHTS"
+  | "INVALID_SHARE_COUNT";
 
 type ErrorField =
   | "currency"
@@ -46,7 +52,14 @@ type ErrorField =
   | "merchantRefund"
   | "refundReductions"
   | "memberTransfer"
-  | "netBalanceMinor";
+  | "netBalanceMinor"
+  | "subtotal"
+  | "discount"
+  | "serviceFee"
+  | "receiptTotal"
+  | "charges"
+  | "basisPoints"
+  | "shares";
 
 export type Failure = {
   readonly ok: false;

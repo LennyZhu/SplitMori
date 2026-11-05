@@ -1,6 +1,7 @@
 import { failure, type Failure, type Result } from "./result.ts";
 
 const minorDigits = { HKD: 2, CNY: 2, MOP: 2, TWD: 2, USD: 2, JPY: 0 } as const;
+export const wholeBasisPoints = 10_000;
 
 export type Currency = keyof typeof minorDigits;
 
@@ -20,7 +21,11 @@ type AmountField =
   | "merchantRefund"
   | "refundReductions"
   | "memberTransfer"
-  | "netBalanceMinor";
+  | "netBalanceMinor"
+  | "subtotal"
+  | "discount"
+  | "serviceFee"
+  | "receiptTotal";
 
 export function isCurrency(currency: unknown): currency is Currency {
   return typeof currency === "string" && Object.prototype.hasOwnProperty.call(minorDigits, currency);
@@ -35,6 +40,12 @@ export function validateMinorAmount(amountMinor: number, field: AmountField): Fa
 export function validateMoney(money: Money, field: AmountField): Failure | undefined {
   if (!isCurrency(money.currency)) return failure("UNSUPPORTED_CURRENCY", "currency");
   return validateMinorAmount(money.amountMinor, field);
+}
+
+/** Rounds a validated nonnegative amount times a rate from 0 to 100% half up. */
+export function roundBasisPoints(amountMinor: number, basisPoints: number): number {
+  const scale = BigInt(wholeBasisPoints);
+  return Number((BigInt(amountMinor) * BigInt(basisPoints) + scale / 2n) / scale);
 }
 
 /** Accepts a whole part with optional fractional digits, using an ASCII decimal point. */

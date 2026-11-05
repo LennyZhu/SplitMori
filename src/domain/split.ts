@@ -1,4 +1,4 @@
-import { validateMinorAmount, validateMoney, type Money } from "./money.ts";
+import { roundBasisPoints, validateMinorAmount, validateMoney, wholeBasisPoints, type Money } from "./money.ts";
 import { failure, type Failure, type Result } from "./result.ts";
 
 export type Allocation = {
@@ -95,6 +95,29 @@ function allocateEvenly(totalMinor: number, memberIds: readonly string[]) {
   return { allocations, breakdown: { baseMinor, extraMinorUnits } };
 }
 
+/** Validated weights follow snapshot order. Positive totals require at least one positive weight. */
+export function allocateByWeight(totalMinor: number, weights: readonly number[]): number[] {
+  if (totalMinor === 0) return weights.map(() => 0);
+
+  const weightTotal = weights.reduce((sum, weight) => sum + BigInt(weight), 0n);
+  const total = BigInt(totalMinor);
+  let extraUnits = totalMinor;
+  const amounts: number[] = [];
+  const remainders = weights.map((weight, index) => {
+    const product = total * BigInt(weight);
+    const base = Number(product / weightTotal);
+    amounts.push(base);
+    extraUnits -= base;
+    return { index, remainder: product % weightTotal };
+  });
+  remainders.sort((left, right) => {
+    if (left.remainder === right.remainder) return left.index - right.index;
+    return left.remainder > right.remainder ? -1 : 1;
+  });
+  for (let i = 0; i < extraUnits; i += 1) amounts[remainders[i].index] += 1;
+  return amounts;
+}
+
 /** Pass participating IDs in their stable snapshot order. */
 export function splitEqual(total: Money, memberIds: readonly string[]): Result<SplitResult> {
   const invalid = validateMoney(total, "total") ?? validateMemberIds(memberIds);
@@ -113,6 +136,10 @@ export function splitEqual(total: Money, memberIds: readonly string[]): Result<S
   };
 }
 
+function isValidBasisPoints(basisPoints: number): boolean {
+  return Number.isInteger(basisPoints) && basisPoints >= 0 && basisPoints <= wholeBasisPoints;
+}
+
 function resolveCover(totalMinor: number, cover: TreatCover): Result<number> {
   if (cover.kind === "fixed") {
     const invalid = validateMinorAmount(cover.amountMinor, "cover");
@@ -120,14 +147,8 @@ function resolveCover(totalMinor: number, cover: TreatCover): Result<number> {
     return { ok: true, value: cover.amountMinor };
   }
 
-  const { basisPoints } = cover;
-  if (!Number.isInteger(basisPoints) || basisPoints < 0 || basisPoints > 10_000) {
-    return failure("INVALID_PERCENTAGE", "cover");
-  }
-
-  // Round a half minor unit up before allocating the remainder.
-  const product = BigInt(totalMinor) * BigInt(basisPoints);
-  return { ok: true, value: Number((product + 5_000n) / 10_000n) };
+  if (!isValidBasisPoints(cover.basisPoints)) return failure("INVALID_PERCENTAGE", "cover");
+  return { ok: true, value: roundBasisPoints(totalMinor, cover.basisPoints) };
 }
 
 /** Calculates liability only. Pass participating IDs in their stable snapshot order. */
@@ -241,6 +262,77 @@ export function splitIndividual(
         sharedMemberIds,
         sharedSplit: breakdown,
       },
+    },
+  };
+}
+
+export type CustomSplitOptions =
+  | { readonly kind: "fixed"; readonly members: readonly Allocation[] }
+  | { readonly kind: "percentage"; readonly members: readonly {
+      readonly memberId: string;
+      readonly basisPoints: number;
+    }[] }
+  | { readonly kind: "shares"; readonly members: readonly {
+      readonly memberId: string;
+      readonly shares: number;
+    }[] };
+
+export type CustomSplitResult = {
+  readonly total: Money;
+  readonly allocations: readonly Allocation[];
+  readonly allocationVersion: 1;
+  readonly explanation: { readonly kind: "custom"; readonly method: CustomSplitOptions["kind"] };
+};
+
+/** Splits the final bill using one custom method. Pass members in stable snapshot order. */
+export function splitCustom(total: Money, options: CustomSplitOptions): Result<CustomSplitResult> {
+  const memberIds = options.members.map(({ memberId }) => memberId);
+  const invalid = validateMoney(total, "total") ?? validateMemberIds(memberIds);
+  if (invalid) return invalid;
+
+  const { amountMinor, currency } = total;
+  let amounts: number[];
+  switch (options.kind) {
+    case "fixed": {
+      let fixedTotal = 0n;
+      amounts = [];
+      for (const member of options.members) {
+        const invalidAmount = validateMinorAmount(member.amountMinor, "allocations");
+        if (invalidAmount) return invalidAmount;
+        amounts.push(member.amountMinor);
+        fixedTotal += BigInt(member.amountMinor);
+      }
+      if (fixedTotal > BigInt(Number.MAX_SAFE_INTEGER)) return failure("AMOUNT_OVERFLOW", "allocations");
+      if (fixedTotal !== BigInt(amountMinor)) return failure("TOTAL_MISMATCH", "allocations");
+      break;
+    }
+    case "percentage": {
+      const weights = options.members.map(({ basisPoints }) => basisPoints);
+      if (!weights.every(isValidBasisPoints)) return failure("INVALID_PERCENTAGE", "basisPoints");
+      if (weights.reduce((sum, rate) => sum + rate, 0) !== wholeBasisPoints) {
+        return failure("TOTAL_MISMATCH", "basisPoints");
+      }
+      amounts = allocateByWeight(amountMinor, weights);
+      break;
+    }
+    case "shares": {
+      const weights = options.members.map(({ shares }) => shares);
+      if (!weights.every((shares) => Number.isSafeInteger(shares) && shares > 0)) {
+        return failure("INVALID_SHARE_COUNT", "shares");
+      }
+      amounts = allocateByWeight(amountMinor, weights);
+      break;
+    }
+  }
+
+  const allocations = memberIds.map((memberId, index) => ({ memberId, amountMinor: amounts[index] }));
+  return {
+    ok: true,
+    value: {
+      total: { currency, amountMinor },
+      allocations,
+      allocationVersion: 1,
+      explanation: { kind: "custom", method: options.kind },
     },
   };
 }
