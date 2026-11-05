@@ -12,7 +12,11 @@ export type DomainErrorCode =
   | "COVER_EXCEEDS_TOTAL"
   | "NO_REMAINDER_PARTICIPANTS"
   | "MEMBER_NOT_PARTICIPATING"
-  | "TOTAL_MISMATCH";
+  | "TOTAL_MISMATCH"
+  | "CURRENCY_MISMATCH"
+  | "INVALID_EXPENSE_ID"
+  | "DUPLICATE_EXPENSE_ID"
+  | "MISSING_MERCHANT_PAYMENT";
 
 type ErrorField =
   | "currency"
@@ -23,7 +27,10 @@ type ErrorField =
   | "cover"
   | "personalSpending"
   | "sharedAmount"
-  | "sharedMemberIds";
+  | "sharedMemberIds"
+  | "expenseId"
+  | "merchantPayment"
+  | "allocations";
 
 export type Failure = {
   readonly ok: false;

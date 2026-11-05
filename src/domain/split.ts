@@ -65,9 +65,9 @@ export type IndividualSplitResult = {
   };
 };
 
-function validateMemberIds(
+export function validateMemberIds(
   memberIds: readonly string[],
-  field: "memberIds" | "sharedMemberIds" = "memberIds",
+  field: "memberIds" | "sharedMemberIds" | "allocations" = "memberIds",
 ): Failure | undefined {
   if (memberIds.length === 0) return failure("NO_PARTICIPANTS", field);
 

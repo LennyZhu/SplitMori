@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { calculateBalances } from "../src/domain/balance.ts";
 import { formatAmount, parseAmount } from "../src/domain/money.ts";
 import { splitEqual, splitIndividual, splitTreat } from "../src/domain/split.ts";
 
@@ -169,4 +170,118 @@ test("individual splitting rejects missing, duplicate and unknown members for th
   assert.deepEqual(splitIndividual(total, [...spending, ...spending], { amountMinor: 0, memberIds: [] }).error, {
     code: "DUPLICATE_MEMBER_ID", field: "memberIds",
   });
+});
+
+test("one merchant payer fronts the full HKD bill and receives the other members' shares", () => {
+  const memberIds = ["a", "b", "c", "d", "e"];
+  const total = valueOf(parseAmount("1000", "HKD"));
+  const expense = {
+    id: "dinner",
+    split: valueOf(splitEqual(total, memberIds)),
+    merchantPayment: { memberId: "a", ...total },
+  };
+  const result = valueOf(calculateBalances("HKD", memberIds, [expense]));
+  assert.deepEqual(result, {
+    currency: "HKD",
+    balances: [
+      { memberId: "a", merchantPaidMinor: 100_000, allocatedMinor: 20_000, netBalanceMinor: 80_000 },
+      ...memberIds.slice(1).map((memberId) => ({
+        memberId, merchantPaidMinor: 0, allocatedMinor: 20_000, netBalanceMinor: -20_000,
+      })),
+    ],
+  });
+});
+
+test("different members can front different expenses and the activity stays zero-sum", () => {
+  const dinner = { currency: "HKD", amountMinor: 10_000 };
+  const drinks = { currency: "HKD", amountMinor: 6000 };
+  const expenses = [
+    {
+      id: "dinner",
+      split: valueOf(splitEqual(dinner, ["a", "b"])),
+      merchantPayment: { memberId: "c", ...dinner },
+    },
+    {
+      id: "drinks",
+      split: valueOf(splitIndividual(drinks, [
+        { memberId: "b", personalMinor: 4000 },
+        { memberId: "c", personalMinor: 2000 },
+      ], { amountMinor: 0, memberIds: [] })),
+      merchantPayment: { memberId: "a", ...drinks },
+    },
+  ];
+  const { balances } = valueOf(calculateBalances("HKD", ["a", "b", "c", "d"], expenses));
+  assert.deepEqual(balances, [
+    { memberId: "a", merchantPaidMinor: 6000, allocatedMinor: 5000, netBalanceMinor: 1000 },
+    { memberId: "b", merchantPaidMinor: 0, allocatedMinor: 9000, netBalanceMinor: -9000 },
+    { memberId: "c", merchantPaidMinor: 10_000, allocatedMinor: 2000, netBalanceMinor: 8000 },
+    { memberId: "d", merchantPaidMinor: 0, allocatedMinor: 0, netBalanceMinor: 0 },
+  ]);
+  assert.equal(balances.reduce((sum, { netBalanceMinor }) => sum + netBalanceMinor, 0), 0);
+});
+
+test("formal expenses reject missing, mismatched and invalid merchant payments", () => {
+  const total = { currency: "HKD", amountMinor: 100 };
+  const split = valueOf(splitEqual(total, ["a"]));
+  const payment = { memberId: "a", ...total };
+  for (const [merchantPayment, code] of [
+    [undefined, "MISSING_MERCHANT_PAYMENT"],
+    [{ ...payment, amountMinor: 99 }, "TOTAL_MISMATCH"],
+    [{ ...payment, amountMinor: -1 }, "NEGATIVE_AMOUNT"],
+    [{ ...payment, memberId: "outsider" }, "MEMBER_NOT_PARTICIPATING"],
+    [{ ...payment, currency: "JPY" }, "CURRENCY_MISMATCH"],
+  ]) {
+    const result = calculateBalances("HKD", ["a"], [{ id: "dinner", split, merchantPayment }]);
+    assert.deepEqual(result.error, { code, field: "merchantPayment" });
+  }
+});
+
+test("activities reject invalid IDs, repeated expenses, mixed currencies and invalid allocations", () => {
+  const total = { currency: "HKD", amountMinor: 100 };
+  const split = valueOf(splitEqual(total, ["a"]));
+  const expense = { id: "dinner", split, merchantPayment: { memberId: "a", ...total } };
+  const yen = { currency: "JPY", amountMinor: 100 };
+  const yenExpense = {
+    id: "other",
+    split: valueOf(splitEqual(yen, ["a"])),
+    merchantPayment: { memberId: "a", ...yen },
+  };
+  for (const [memberIds, expenses, code, field] of [
+    [["a", " "], [], "INVALID_MEMBER_ID", "memberIds"],
+    [["a", "a"], [], "DUPLICATE_MEMBER_ID", "memberIds"],
+    [["a"], [{ ...expense, id: " " }], "INVALID_EXPENSE_ID", "expenseId"],
+    [["a"], [expense, expense], "DUPLICATE_EXPENSE_ID", "expenseId"],
+    [["a"], [expense, yenExpense], "CURRENCY_MISMATCH", "currency"],
+  ]) {
+    const result = calculateBalances("HKD", memberIds, expenses);
+    assert.deepEqual(result.error, { code, field });
+  }
+  for (const [allocations, code] of [
+    [[{ memberId: "a", amountMinor: 99 }], "TOTAL_MISMATCH"],
+    [[{ memberId: "b", amountMinor: 100 }], "MEMBER_NOT_PARTICIPATING"],
+    [[{ memberId: "a", amountMinor: 50 }, { memberId: "a", amountMinor: 50 }], "DUPLICATE_MEMBER_ID"],
+  ]) {
+    const result = calculateBalances("HKD", ["a"], [{ ...expense, split: { ...split, allocations } }]);
+    assert.deepEqual(result.error, { code, field: "allocations" });
+  }
+});
+
+test("activity totals stay exact up to the safe integer limit and reject cumulative overflow", () => {
+  const total = { currency: "JPY", amountMinor: Number.MAX_SAFE_INTEGER };
+  const expense = {
+    id: "large",
+    split: valueOf(splitEqual(total, ["b"])),
+    merchantPayment: { memberId: "a", ...total },
+  };
+  const { balances } = valueOf(calculateBalances("JPY", ["a", "b"], [expense]));
+  assert.deepEqual(balances.map(({ netBalanceMinor }) => netBalanceMinor), [total.amountMinor, -total.amountMinor]);
+
+  const extra = { currency: "JPY", amountMinor: 1 };
+  const extraExpense = {
+    id: "extra",
+    split: valueOf(splitEqual(extra, ["a"])),
+    merchantPayment: { memberId: "b", ...extra },
+  };
+  const result = calculateBalances("JPY", ["a", "b"], [expense, extraExpense]);
+  assert.deepEqual(result.error, { code: "AMOUNT_OVERFLOW", field: "total" });
 });
