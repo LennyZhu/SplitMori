@@ -1,21 +1,24 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
-  closeSync, constants, copyFileSync, existsSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync,
+  closeSync, constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync,
   writeFileSync, writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { backup as sqliteBackup, DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createActivityRepository } from "../src/data/activities.ts";
 import { backupSnapshotName, DatabaseInitializationError, initializeDatabase } from "../src/data/database.ts";
+import { createDatabaseHost, databaseName, restoreFiles } from "../src/data/databaseHost.ts";
 import { createFinanceRepository } from "../src/data/finance.ts";
 import { migrations } from "../src/data/migrations.ts";
 import { createQuickSplitRepository } from "../src/data/quickSplits.ts";
 import { splitEqual } from "../src/domain/split.ts";
-import { createBackupService } from "../src/services/backup.ts";
+import { createBackupService, inspectBackupDatabase, inspectStandaloneBackup } from "../src/services/backup.ts";
 import { createQuickSplitConversionService } from "../src/services/quickSplitConversion.ts";
+import { createRestoreService } from "../src/services/restore.ts";
 
 // Exercises the production SQL against a real file with Node's SQLite adapter.
 function openTestConnection(path) {
@@ -830,8 +833,8 @@ function backupFile(path) {
   };
 }
 
-function backupService(path, overrides) {
-  return createBackupService({
+function backupPlatform(path, overrides) {
+  return {
     createWorkspace() {
       const directoryUri = mkdtempSync(join(dirname(path), "scratch-"));
       return {
@@ -840,7 +843,7 @@ function backupService(path, overrides) {
         remove: () => rmSync(directoryUri, { recursive: true, force: true }),
       };
     },
-    file: backupFile,
+    file: (uri) => backupFile(uri.startsWith("file:") ? fileURLToPath(uri) : uri),
     openDatabase: async (name, directory) => openTestConnection(directory ? join(directory, name) : name),
     async publish(source, destination = dirname(path)) {
       const target = join(destination, basename(source));
@@ -848,7 +851,11 @@ function backupService(path, overrides) {
       return target;
     },
     ...overrides,
-  });
+  };
+}
+
+function backupService(path, overrides) {
+  return createBackupService(backupPlatform(path, overrides));
 }
 
 function unpackBackup(uri) {
@@ -1016,4 +1023,236 @@ test("snapshot and publishing failures leave the current ledger usable", withFin
   assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
   valueOf(await finance.recordMemberTransfer("trip", 200, repayment));
   assert.equal(valueOf(await finance.getActivityLedger("trip")).events.length, 2);
+}));
+
+function restoreHost(directoryUri, platform, faults = {}) {
+  const opened = new Set();
+  const host = createDatabaseHost({
+    directoryUri,
+    file(name, directory = directoryUri) {
+      const uri = join(directory, name);
+      return {
+        uri,
+        get exists() { return existsSync(uri); },
+        sha256: async () => sha256(readFileSync(uri)),
+        remove: () => rmSync(uri),
+        rename(target) {
+          faults.beforeRename?.(name, target);
+          const destination = join(directory, target);
+          assert.equal(existsSync(destination), false, "restore renames must not overwrite");
+          renameSync(uri, destination);
+        },
+      };
+    },
+    async copy(source, name) {
+      copyFileSync(source, join(directoryUri, name), constants.COPYFILE_EXCL);
+    },
+    async open(name) {
+      const connection = openTestConnection(join(directoryUri, name));
+      const close = connection.closeAsync;
+      connection.closeAsync = async () => {
+        await close();
+        opened.delete(connection);
+      };
+      opened.add(connection);
+      return connection;
+    },
+    backup: (connection, directory) => connection.writeSnapshot(directory),
+    createWorkspace: platform.createWorkspace,
+    async checkStandalone(name, directory) {
+      assert.ok(existsSync(join(directory, name)));
+      valueOf(await inspectStandaloneBackup(platform, name, directory));
+    },
+    async checkInitialized(connection) {
+      await faults.beforeCheck?.();
+      valueOf(await inspectBackupDatabase(platform, connection, migrations.length));
+    },
+  });
+  return { host, opened, close: async () => { for (const connection of opened) await connection.closeAsync(); } };
+}
+
+function withRestore(task) {
+  return withFinance(async (finance, _activities, source, sourceConnection, _reopen, path) => {
+    const directory = join(dirname(path), "live");
+    mkdirSync(directory);
+    const platform = backupPlatform(path);
+    const backups = createBackupService(platform);
+    const faults = {};
+    const managed = restoreHost(directory, platform, faults);
+    try {
+      const live = await managed.host.getDatabase();
+      const activities = createActivityRepository(live);
+      await activities.createActivity({
+        id: "old", name: "Current data", currency: "HKD", members: [{ id: "owner", displayName: "Owner" }],
+      });
+      const service = createRestoreService(backups, managed.host);
+      const exportSource = async () => valueOf(await backups.exportBackup(source)).uri;
+      const prepare = async (file) => {
+        const outcome = await service.prepareRestore(pathToFileURL(file).href);
+        assert.equal(outcome.status, "ready", JSON.stringify(outcome));
+        return outcome.preview;
+      };
+      await task({
+        directory, platform, managed, faults, live, activities, finance, source, sourceConnection, service, exportSource, prepare,
+      });
+    } finally {
+      await managed.close();
+    }
+  });
+}
+
+test("confirmed restore replaces the full database and retained repositories use the new connection", withRestore(async ({
+  managed, faults, live, activities, finance, source, sourceConnection, service, exportSource, prepare,
+}) => {
+  const oldConnection = [...managed.opened][0];
+  const quick = createQuickSplitRepository(source);
+  valueOf(await quick.saveQuickDraft("draft", { mode: "equal" }, 50));
+  valueOf(await quick.saveQuickHistory("history", quickInput()));
+  valueOf(await createQuickSplitConversionService(source).convertQuickHistory(conversionRequest()));
+  valueOf(await finance.createExpense("trip", 110, expense()));
+  valueOf(await finance.recordMerchantRefund("trip", 200, { ...refund, recipientId: "a" }));
+  valueOf(await finance.recordMemberTransfer("trip", 250, { ...repayment, amountMinor: 6000 }));
+  valueOf(await finance.commitExpenseCorrection("trip", correction(8000, { reviewedRefundIds: [refund.id] })));
+  valueOf(await finance.voidMerchantRefund("trip", { id: "void-refund", targetEventId: refund.id, occurredAt: 400 }));
+
+  const preview = await prepare(await exportSource());
+  assert.equal(preview.effect, "replace-all-local-data");
+  assert.deepEqual([preview.current.activityCount, preview.current.expenseCount, preview.difference.expenseCount], [1, 0, 2]);
+  faults.beforeCheck = async () => {
+    await assert.rejects(activities.renameActivity("old", "Blocked during restore"), /restore in progress/);
+  };
+  assert.deepEqual(await service.restoreBackup({ confirmation: preview.confirmation, confirmed: true }), { status: "restored" });
+  assert.equal(await managed.host.getDatabase(), live);
+  await assert.rejects(oldConnection.getFirstAsync("SELECT 1"), /not open/);
+  assert.deepEqual((await activities.listActivities()).map(({ id }) => id), ["trip"]);
+
+  const tables = await sourceConnection.getAllAsync("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name");
+  for (const { name } of tables) {
+    assert.deepEqual(await live.read((db) => db.getAllAsync(`SELECT * FROM ${name}`)),
+      await sourceConnection.getAllAsync(`SELECT * FROM ${name}`), name);
+  }
+  assert.deepEqual(valueOf(await createFinanceRepository(live).getActivityLedger("trip")),
+    valueOf(await finance.getActivityLedger("trip")));
+  await activities.renameActivity("trip", "New connection works");
+  assert.equal((await activities.getActivity("trip")).name, "New connection works");
+}));
+
+test("restore rejects invalid paths, damaged backups and a valid backup swapped after preview", withRestore(async ({
+  directory, finance, service, activities, exportSource, prepare,
+}) => {
+  for (const uri of ["https://example.test/backup", "/tmp/backup", "file://host/tmp/a", "file:///tmp/%2e%2e/a"]) {
+    assert.deepEqual(await service.prepareRestore(uri), { status: "validation-failed", code: "INVALID_BACKUP_URI" });
+  }
+  const bad = join(directory, "bad.splitmori-backup");
+  writeFileSync(bad, "invalid");
+  assert.deepEqual(await service.prepareRestore(pathToFileURL(bad).href), { status: "validation-failed", code: "INVALID_BACKUP_FORMAT" });
+  const original = await exportSource();
+  const { manifest, payload } = unpackBackup(original);
+  writeBackup(bad, { ...manifest, schemaVersion: migrations.length + 1 }, payload);
+  assert.deepEqual(await service.prepareRestore(pathToFileURL(bad).href),
+    { status: "validation-failed", code: "UNSUPPORTED_BACKUP_VERSION" });
+  const preview = await prepare(original);
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  copyFileSync(await exportSource(), original);
+  assert.deepEqual(await service.restoreBackup({ confirmation: preview.confirmation, confirmed: true }),
+    { status: "validation-failed", code: "BACKUP_CHANGED" });
+  assert.deepEqual((await activities.listActivities()).map(({ id }) => id), ["old"]);
+  assert.equal(existsSync(join(directory, restoreFiles.safety)), false);
+}));
+
+test("cancel consumes the confirmation and leaves both the main SQLite file and WAL unchanged", withRestore(async ({
+  directory, service, exportSource, prepare,
+}) => {
+  const files = [databaseName, databaseName + "-wal"];
+  const before = files.map((name) => readFileSync(join(directory, name)));
+  const preview = await prepare(await exportSource());
+  assert.deepEqual(await service.restoreBackup({ confirmation: preview.confirmation, confirmed: false }), { status: "cancelled" });
+  assert.deepEqual(await service.restoreBackup({ confirmation: preview.confirmation, confirmed: true }),
+    { status: "validation-failed", code: "INVALID_CONFIRMATION" });
+  assert.deepEqual(files.map((name) => readFileSync(join(directory, name))), before);
+}));
+
+test("a stale confirmation is rejected and a fresh restore can migrate an older snapshot", withRestore(async ({
+  directory, live, activities, service, exportSource, prepare,
+}) => {
+  const { manifest } = unpackBackup(await exportSource());
+  const olderPath = join(directory, "legacy.sqlite");
+  const older = openTestConnection(olderPath);
+  try {
+    await older.execAsync(migrations[0]);
+    await older.execAsync(`
+      PRAGMA user_version = 1;
+      INSERT INTO activities VALUES ('legacy', 'Legacy', 'HKD', 'active', 1, 1);
+      INSERT INTO members VALUES ('legacy-member', 'Member', 1);
+      INSERT INTO activity_members VALUES ('legacy', 'legacy-member', 0);
+    `);
+  } finally {
+    older.close();
+  }
+  const olderPayload = readFileSync(olderPath);
+  const olderBackup = join(directory, "legacy.splitmori-backup");
+  writeBackup(olderBackup, {
+    ...manifest, schemaVersion: 1, byteLength: olderPayload.length, sha256: sha256(olderPayload),
+  }, olderPayload);
+  const preview = await prepare(olderBackup);
+  await activities.renameActivity("old", "Edited after preview");
+  assert.deepEqual(await service.restoreBackup({ confirmation: preview.confirmation, confirmed: true }),
+    { status: "validation-failed", code: "CURRENT_DATA_CHANGED" });
+  assert.equal((await activities.getActivity("old")).name, "Edited after preview");
+  const fresh = await prepare(olderBackup);
+  assert.deepEqual(await service.restoreBackup({ confirmation: fresh.confirmation, confirmed: true }), { status: "restored" });
+  assert.deepEqual((await activities.listActivities()).map(({ id }) => id), ["legacy"]);
+  assert.equal((await live.read((db) => db.getFirstAsync("PRAGMA user_version"))).user_version, migrations.length);
+  assert.deepEqual(unpackBackup(olderBackup).payload, olderPayload);
+}));
+
+test("a failure after switching to the new file rolls back and makes the original usable", withRestore(async ({
+  directory, live, activities, managed, faults, service, exportSource, prepare,
+}) => {
+  const original = [...managed.opened][0];
+  await activities.createActivity({
+    id: "original-trip", name: "Original trip", currency: "HKD", members: quickInput().members,
+  });
+  const finance = createFinanceRepository(live);
+  valueOf(await finance.createExpense("original-trip", 100, expense("original-expense")));
+  const ledger = valueOf(await finance.getActivityLedger("original-trip"));
+  const preview = await prepare(await exportSource());
+  faults.beforeCheck = () => {
+    assert.ok(existsSync(join(directory, restoreFiles.safety)));
+    assert.ok(existsSync(join(directory, restoreFiles.displaced)));
+    faults.beforeCheck = undefined;
+    throw new Error("Injected check failure after opening the replacement");
+  };
+  assert.deepEqual(await service.restoreBackup({ confirmation: preview.confirmation, confirmed: true }), { status: "failed" });
+  assert.deepEqual((await activities.listActivities()).map(({ id }) => id).sort(), ["old", "original-trip"]);
+  assert.deepEqual(valueOf(await finance.getActivityLedger("original-trip")), ledger);
+  await assert.rejects(original.getFirstAsync("SELECT 1"), /not open/);
+  assert.equal(existsSync(join(directory, restoreFiles.safety)), false);
+  await activities.renameActivity("old", "Original remains writable");
+}));
+
+test("startup recovers a durable marker when switching and immediate rollback are interrupted", withRestore(async ({
+  directory, platform, faults, service, activities, exportSource, prepare,
+}) => {
+  const preview = await prepare(await exportSource());
+  faults.beforeRename = (name, target) => {
+    if (name === restoreFiles.stage && target === databaseName) throw new Error("Injected interruption at SQLite rename");
+  };
+  assert.deepEqual(await service.restoreBackup({ confirmation: preview.confirmation, confirmed: true }),
+    { status: "recovery-required" });
+  assert.equal(existsSync(join(directory, databaseName)), false);
+  assert.ok(existsSync(join(directory, restoreFiles.safety)));
+  await assert.rejects(activities.listActivities(), /recovery failed/);
+  writeFileSync(join(directory, databaseName + "-wal"), "stale WAL");
+  writeFileSync(join(directory, databaseName + "-shm"), "stale SHM");
+
+  const restarted = restoreHost(directory, platform);
+  try {
+    const reopened = await restarted.host.getDatabase();
+    assert.deepEqual((await createActivityRepository(reopened).listActivities()).map(({ id }) => id), ["old"]);
+    assert.equal(existsSync(join(directory, restoreFiles.safety)), false);
+    assert.equal((await reopened.read((db) => db.getFirstAsync("PRAGMA journal_mode"))).journal_mode, "wal");
+  } finally {
+    await restarted.close();
+  }
 }));

@@ -21,10 +21,7 @@ export type BackupManifest = {
 export type BackupExport = { readonly uri: string; readonly manifest: BackupManifest };
 export type BackupExportOptions = { readonly destinationDirectoryUri?: string };
 
-export type BackupPreview = {
-  readonly validationStatus: "valid";
-  readonly manifest: BackupManifest;
-  readonly fileModifiedAt: number | null;
+export type BackupCounts = {
   readonly activityCount: number;
   readonly memberCount: number;
   readonly expenseCount: number;
@@ -32,6 +29,12 @@ export type BackupPreview = {
   readonly financialEventCount: number;
   readonly repaymentCount: number;
   readonly quickHistoryCount: number;
+};
+
+export type BackupPreview = BackupCounts & {
+  readonly validationStatus: "valid";
+  readonly manifest: BackupManifest;
+  readonly fileModifiedAt: number | null;
 };
 
 export type BackupFileHandle = {
@@ -170,17 +173,33 @@ async function schemaMatches(platform: BackupPlatform, db: BackupDatabase, versi
   }
 }
 
-async function inspectSnapshot(platform: BackupPlatform, directoryUri: string, manifest: BackupManifest, fileModifiedAt: number | null): Promise<Result<BackupPreview>> {
-  let db: BackupDatabase | undefined;
+export async function readBackupCounts(
+  db: Pick<BackupDatabase, "getFirstAsync">, version: number = migrations.length,
+): Promise<BackupCounts> {
+  async function count(table: string, introduced = 1) {
+    if (version < introduced) return 0;
+    const row = await db.getFirstAsync<{ count: number }>(`SELECT COUNT(*) AS count FROM ${table}`);
+    if (!row || !Number.isSafeInteger(row.count) || row.count < 0) throw new Error("Invalid backup row count");
+    return row.count;
+  }
+  return {
+    activityCount: await count("activities"),
+    memberCount: await count("members"),
+    expenseCount: await count("expenses", 2),
+    financialEventCount: await count("financial_events", 2) + await count("expense_revisions", 3)
+      + await count("financial_voids", 6),
+    repaymentCount: await count("member_transfers", 2),
+    quickHistoryCount: await count("quick_history", 4),
+  };
+}
+
+export async function inspectBackupDatabase(
+  platform: BackupPlatform, db: BackupDatabase, expectedVersion?: number,
+): Promise<Result<BackupCounts>> {
   try {
-    // Expo has no read-only open flag. Only the disposable copy is opened, with writes disabled on its connection.
-    db = await platform.openDatabase(backupSnapshotName, directoryUri);
-    await db.execAsync("PRAGMA query_only = ON; PRAGMA trusted_schema = OFF;");
-    const journal = await db.getFirstAsync<{ journal_mode: string }>("PRAGMA journal_mode");
-    if (journal?.journal_mode !== "delete") return failure("BACKUP_INTEGRITY_FAILED", "backup");
     const version = await readVersion(db);
     if (!supportedSchema(version)) return failure("UNSUPPORTED_BACKUP_VERSION", "backup");
-    if (version !== manifest.schemaVersion) return failure("BACKUP_SCHEMA_MISMATCH", "backup");
+    if (expectedVersion !== undefined && version !== expectedVersion) return failure("BACKUP_SCHEMA_MISMATCH", "backup");
     const integrity = await db.getAllAsync<{ integrity_check: string }>("PRAGMA integrity_check");
     if (integrity.length !== 1 || integrity[0].integrity_check !== "ok") return failure("BACKUP_INTEGRITY_FAILED", "backup");
     if (!await schemaMatches(platform, db, version)) return failure("BACKUP_SCHEMA_MISMATCH", "backup");
@@ -190,28 +209,27 @@ async function inspectSnapshot(platform: BackupPlatform, directoryUri: string, m
     } catch {
       return failure("BACKUP_LEDGER_INVALID", "backup");
     }
+    return { ok: true, value: await readBackupCounts(db, version) };
+  } catch {
+    return failure("BACKUP_INTEGRITY_FAILED", "backup");
+  }
+}
 
-    async function count(connection: BackupDatabase, table: string, introduced = 1) {
-      if (manifest.schemaVersion < introduced) return 0;
-      const row = await connection.getFirstAsync<{ count: number }>(`SELECT COUNT(*) AS count FROM ${table}`);
-      if (!row || !Number.isSafeInteger(row.count) || row.count < 0) throw new Error("Invalid backup row count");
-      return row.count;
-    }
-
-    return { ok: true, value: {
-      validationStatus: "valid", manifest, fileModifiedAt,
-      activityCount: await count(db, "activities"),
-      memberCount: await count(db, "members"),
-      expenseCount: await count(db, "expenses", 2),
-      financialEventCount: await count(db, "financial_events", 2) + await count(db, "expense_revisions", 3)
-        + await count(db, "financial_voids", 6),
-      repaymentCount: await count(db, "member_transfers", 2),
-      quickHistoryCount: await count(db, "quick_history", 4),
-    } };
+export async function inspectStandaloneBackup(
+  platform: BackupPlatform, name: string, directoryUri: string, expectedVersion?: number,
+): Promise<Result<BackupCounts>> {
+  let db: BackupDatabase | undefined;
+  try {
+    // Expo has no read-only open flag. Open only app-owned snapshots and disable writes.
+    db = await platform.openDatabase(name, directoryUri);
+    await db.execAsync("PRAGMA query_only = ON; PRAGMA trusted_schema = OFF;");
+    const journal = await db.getFirstAsync<{ journal_mode: string }>("PRAGMA journal_mode");
+    if (journal?.journal_mode !== "delete") return failure("BACKUP_INTEGRITY_FAILED", "backup");
+    return await inspectBackupDatabase(platform, db, expectedVersion);
   } catch {
     return failure("BACKUP_INTEGRITY_FAILED", "backup");
   } finally {
-    await db?.closeAsync().catch(() => undefined);
+    await db?.closeAsync();
   }
 }
 
@@ -254,7 +272,10 @@ export function createBackupService(platform: BackupPlatform) {
     }
   }
 
-  async function validateBackup(uri: string): Promise<Result<BackupPreview>> {
+  // The callback can use the same private snapshot that was extracted, hashed and inspected.
+  async function withValidatedSnapshot<T>(
+    uri: string, task: (snapshot: BackupFile, preview: BackupPreview) => Promise<T>,
+  ): Promise<Result<T>> {
     let workspace: BackupWorkspace | undefined;
     try {
       const file = platform.file(uri);
@@ -274,7 +295,11 @@ export function createBackupService(platform: BackupPlatform) {
         return { ok: true, value: manifest } as const;
       });
       if (!extracted.ok) return extracted;
-      return await inspectSnapshot(platform, workspace.directoryUri, extracted.value, fileModifiedAt);
+      const manifest = extracted.value;
+      const inspected = await inspectStandaloneBackup(platform, backupSnapshotName, workspace.directoryUri, manifest.schemaVersion);
+      if (!inspected.ok) return inspected;
+      const preview: BackupPreview = { validationStatus: "valid", manifest, fileModifiedAt, ...inspected.value };
+      return { ok: true, value: await task(snapshot, preview) };
     } catch {
       return failure("BACKUP_READ_FAILED", "backup");
     } finally {
@@ -282,7 +307,8 @@ export function createBackupService(platform: BackupPlatform) {
     }
   }
 
-  return { exportBackup, validateBackup, previewBackup: validateBackup };
+  const validateBackup = (uri: string) => withValidatedSnapshot(uri, async (_snapshot, preview) => preview);
+  return { exportBackup, validateBackup, previewBackup: validateBackup, withValidatedSnapshot };
 }
 
 export async function exportBackup(options?: BackupExportOptions): Promise<Result<BackupExport>> {

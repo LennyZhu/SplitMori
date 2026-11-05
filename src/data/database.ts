@@ -15,7 +15,7 @@ export type LocalDatabase = {
   backupSnapshot(directoryUri: string): Promise<void>;
 };
 
-type InitializationStage = "open" | "configure" | "migration";
+type InitializationStage = "open" | "configure" | "migration" | "recovery";
 
 export class DatabaseInitializationError extends Error {
   readonly stage: InitializationStage;
@@ -104,40 +104,7 @@ export async function initializeDatabase(connection: SQLiteConnection, snapshotW
   return database;
 }
 
-async function openLocalDatabase(): Promise<LocalDatabase> {
-  let connection: SQLiteDatabase;
-  let sqlite: typeof import("expo-sqlite");
-  try {
-    sqlite = await import("expo-sqlite");
-    connection = await sqlite.openDatabaseAsync("splitmori.db", { useNewConnection: true });
-  } catch (error) {
-    throw new DatabaseInitializationError("open", error);
-  }
-
-  try {
-    return await initializeDatabase(connection, async (directoryUri) => {
-      const destination = await sqlite.openDatabaseAsync(backupSnapshotName, { useNewConnection: true }, directoryUri);
-      try {
-        await sqlite.backupDatabaseAsync({ sourceDatabase: connection, destDatabase: destination });
-        const journal = await destination.getFirstAsync<{ journal_mode: string }>("PRAGMA journal_mode = DELETE");
-        if (journal?.journal_mode !== "delete") throw new Error("Backup snapshot requires a standalone journal mode");
-      } finally {
-        await destination.closeAsync();
-      }
-    });
-  } catch (error) {
-    // Retain the initialization error if the failing connection also cannot close.
-    await connection.closeAsync().catch(() => undefined);
-    throw error;
-  }
-}
-
-let openingDatabase: Promise<LocalDatabase> | undefined;
-
-export function getLocalDatabase(): Promise<LocalDatabase> {
-  openingDatabase ??= openLocalDatabase().catch((error: unknown) => {
-    openingDatabase = undefined;
-    throw error;
-  });
-  return openingDatabase;
+export async function getLocalDatabase(): Promise<LocalDatabase> {
+  const { expoDatabaseHost } = await import("./databaseExpo.ts");
+  return expoDatabaseHost.getDatabase();
 }
