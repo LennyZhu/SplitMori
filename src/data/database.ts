@@ -1,7 +1,7 @@
 import type { SQLiteDatabase } from "expo-sqlite";
 import { migrations } from "./migrations.ts";
 
-type SQLiteReader = Pick<SQLiteDatabase, "getFirstAsync" | "getAllAsync">;
+export type SQLiteReader = Pick<SQLiteDatabase, "getFirstAsync" | "getAllAsync">;
 export type SQLiteConnection = SQLiteReader & Pick<SQLiteDatabase, "execAsync" | "runAsync">;
 
 export type LocalDatabase = {
@@ -36,11 +36,10 @@ function createDatabase(connection: SQLiteConnection): LocalDatabase {
     return result;
   }
 
-  return {
-    read: (task) => enqueue(() => task(connection)),
-    // All callers use this queue so unrelated reads or writes cannot join an open transaction.
-    write: (task) => enqueue(async () => {
-      await connection.execAsync("BEGIN IMMEDIATE");
+  // Serialize snapshots and writes on the connection whose foreign keys were configured.
+  function transact<T>(begin: "BEGIN DEFERRED" | "BEGIN IMMEDIATE", task: (connection: SQLiteConnection) => Promise<T>) {
+    return enqueue(async () => {
+      await connection.execAsync(begin);
       try {
         const value = await task(connection);
         await connection.execAsync("COMMIT");
@@ -54,7 +53,12 @@ function createDatabase(connection: SQLiteConnection): LocalDatabase {
         }
         throw error;
       }
-    }),
+    });
+  }
+
+  return {
+    read: (task) => transact("BEGIN DEFERRED", task),
+    write: (task) => transact("BEGIN IMMEDIATE", task),
   };
 }
 

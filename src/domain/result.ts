@@ -34,7 +34,13 @@ export type DomainErrorCode =
   | "NO_CHARGE_WEIGHTS"
   | "INVALID_SHARE_COUNT"
   | "EXPENSE_CORRECTION_ID_MISMATCH"
-  | "EXPENSE_SNAPSHOT_MISMATCH";
+  | "EXPENSE_SNAPSHOT_MISMATCH"
+  | "ACTIVITY_NOT_FOUND"
+  | "ACTIVITY_COMPLETED"
+  | "EVENT_ID_CONFLICT"
+  | "INVALID_EVENT_TIME"
+  | "INVALID_SPLIT_SNAPSHOT"
+  | "FINANCE_STORAGE_ERROR";
 
 type ErrorField =
   | "currency"
@@ -61,7 +67,10 @@ type ErrorField =
   | "receiptTotal"
   | "charges"
   | "basisPoints"
-  | "shares";
+  | "shares"
+  | "activityId"
+  | "occurredAt"
+  | "storage";
 
 export type Failure = {
   readonly ok: false;

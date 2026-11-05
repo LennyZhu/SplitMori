@@ -25,4 +25,90 @@ export const migrations = [
 
   CREATE INDEX activity_members_by_member ON activity_members(member_id);
   `,
+  `
+  CREATE UNIQUE INDEX activities_id_currency ON activities(id, currency);
+
+  CREATE TABLE financial_events (
+    sequence INTEGER PRIMARY KEY CHECK (sequence BETWEEN 1 AND 9007199254740991),
+    id TEXT NOT NULL UNIQUE CHECK (length(trim(id)) > 0),
+    activity_id TEXT NOT NULL REFERENCES activities(id) ON DELETE RESTRICT,
+    kind TEXT NOT NULL CHECK (kind IN ('expense', 'merchantRefund', 'memberTransfer')),
+    occurred_at INTEGER NOT NULL CHECK (occurred_at BETWEEN 0 AND 9007199254740991),
+    UNIQUE (activity_id, id)
+  ) STRICT;
+
+  CREATE INDEX financial_events_timeline ON financial_events(activity_id, occurred_at, sequence);
+
+  CREATE TABLE expenses (
+    id TEXT NOT NULL PRIMARY KEY,
+    activity_id TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    amount_minor INTEGER NOT NULL CHECK (amount_minor BETWEEN 0 AND 9007199254740991),
+    split_mode TEXT NOT NULL CHECK (split_mode IN ('equal', 'treat', 'individual', 'custom')),
+    allocation_version INTEGER NOT NULL CHECK (allocation_version BETWEEN 1 AND 9007199254740991),
+    UNIQUE (activity_id, id),
+    FOREIGN KEY (activity_id, id) REFERENCES financial_events(activity_id, id) ON DELETE RESTRICT,
+    FOREIGN KEY (activity_id, currency) REFERENCES activities(id, currency) ON UPDATE RESTRICT ON DELETE RESTRICT
+  ) STRICT;
+
+  CREATE TABLE expense_allocations (
+    activity_id TEXT NOT NULL,
+    expense_id TEXT NOT NULL,
+    member_id TEXT NOT NULL,
+    amount_minor INTEGER NOT NULL CHECK (amount_minor BETWEEN 0 AND 9007199254740991),
+    position INTEGER NOT NULL CHECK (position BETWEEN 0 AND 9007199254740991),
+    PRIMARY KEY (expense_id, member_id),
+    UNIQUE (expense_id, position),
+    FOREIGN KEY (activity_id, expense_id) REFERENCES expenses(activity_id, id) ON DELETE RESTRICT,
+    FOREIGN KEY (activity_id, member_id) REFERENCES activity_members(activity_id, member_id) ON DELETE RESTRICT
+  ) STRICT;
+
+  CREATE TABLE merchant_payments (
+    activity_id TEXT NOT NULL,
+    expense_id TEXT NOT NULL,
+    member_id TEXT NOT NULL,
+    amount_minor INTEGER NOT NULL CHECK (amount_minor BETWEEN 0 AND 9007199254740991),
+    PRIMARY KEY (expense_id, member_id),
+    FOREIGN KEY (activity_id, expense_id) REFERENCES expenses(activity_id, id) ON DELETE RESTRICT,
+    FOREIGN KEY (activity_id, member_id) REFERENCES activity_members(activity_id, member_id) ON DELETE RESTRICT
+  ) STRICT;
+
+  CREATE UNIQUE INDEX merchant_payments_single_payer ON merchant_payments(expense_id);
+
+  CREATE TABLE merchant_refunds (
+    id TEXT NOT NULL PRIMARY KEY,
+    activity_id TEXT NOT NULL,
+    expense_id TEXT NOT NULL,
+    recipient_id TEXT NOT NULL,
+    amount_minor INTEGER NOT NULL CHECK (amount_minor BETWEEN 1 AND 9007199254740991),
+    UNIQUE (activity_id, expense_id, id),
+    FOREIGN KEY (activity_id, id) REFERENCES financial_events(activity_id, id) ON DELETE RESTRICT,
+    FOREIGN KEY (activity_id, expense_id) REFERENCES expenses(activity_id, id) ON DELETE RESTRICT,
+    FOREIGN KEY (activity_id, recipient_id) REFERENCES activity_members(activity_id, member_id) ON DELETE RESTRICT
+  ) STRICT;
+
+  CREATE TABLE refund_reductions (
+    activity_id TEXT NOT NULL,
+    expense_id TEXT NOT NULL,
+    refund_id TEXT NOT NULL,
+    member_id TEXT NOT NULL,
+    amount_minor INTEGER NOT NULL CHECK (amount_minor BETWEEN 0 AND 9007199254740991),
+    PRIMARY KEY (refund_id, member_id),
+    FOREIGN KEY (activity_id, expense_id, refund_id)
+      REFERENCES merchant_refunds(activity_id, expense_id, id) ON DELETE RESTRICT,
+    FOREIGN KEY (expense_id, member_id) REFERENCES expense_allocations(expense_id, member_id) ON DELETE RESTRICT
+  ) STRICT;
+
+  CREATE TABLE member_transfers (
+    id TEXT NOT NULL PRIMARY KEY,
+    activity_id TEXT NOT NULL,
+    from_member_id TEXT NOT NULL,
+    to_member_id TEXT NOT NULL,
+    amount_minor INTEGER NOT NULL CHECK (amount_minor BETWEEN 1 AND 9007199254740991),
+    CHECK (from_member_id <> to_member_id),
+    FOREIGN KEY (activity_id, id) REFERENCES financial_events(activity_id, id) ON DELETE RESTRICT,
+    FOREIGN KEY (activity_id, from_member_id) REFERENCES activity_members(activity_id, member_id) ON DELETE RESTRICT,
+    FOREIGN KEY (activity_id, to_member_id) REFERENCES activity_members(activity_id, member_id) ON DELETE RESTRICT
+  ) STRICT;
+  `,
 ] as const;
