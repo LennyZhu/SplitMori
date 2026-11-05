@@ -9,7 +9,7 @@ export type Money = {
   readonly amountMinor: number;
 };
 
-type AmountField = "amount" | "total" | "cover";
+type AmountField = "amount" | "total" | "cover" | "personalSpending" | "sharedAmount";
 
 function isCurrency(currency: unknown): currency is Currency {
   return typeof currency === "string" && Object.prototype.hasOwnProperty.call(minorDigits, currency);
