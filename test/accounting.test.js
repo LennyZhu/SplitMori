@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { calculateBalances } from "../src/domain/balance.ts";
 import { allocateCharges, calculateCharges } from "../src/domain/charges.ts";
+import { previewExpenseCorrection } from "../src/domain/correction.ts";
 import { formatAmount, parseAmount } from "../src/domain/money.ts";
 import { suggestTransfers } from "../src/domain/settlement.ts";
 import { splitCustom, splitEqual, splitIndividual, splitTreat } from "../src/domain/split.ts";
@@ -661,4 +662,103 @@ test("treat uses the final receipt without applying proportional charges to the 
   const { total } = valueOf(calculateCharges(details));
   const value = assertShares(splitTreat(total, group, fixed), [60_000, 10_000, 10_000, 10_000, 10_000], total);
   assert.equal(value.explanation.coveredMinor, 60_000);
+});
+
+function correctedEqualExpense(expense, amountMinor, memberId = expense.merchantPayment.memberId) {
+  const total = { ...expense.split.total, amountMinor };
+  const memberIds = expense.split.allocations.map((allocation) => allocation.memberId);
+  return {
+    ...expense,
+    split: valueOf(splitEqual(total, memberIds)),
+    merchantPayment: { memberId, ...total },
+  };
+}
+
+test("reducing a paid-back expense preserves the historical transfer and reverses the suggestion", () => {
+  const { memberIds, expense, transfer } = repaymentFixture();
+  const proposed = correctedEqualExpense(expense, 7000);
+  const preview = valueOf(previewExpenseCorrection({
+    currency: "HKD", memberIds, expenses: [expense], events: [transfer], original: expense, proposed,
+  }));
+  assert.deepEqual(preview.memberChanges, [
+    { memberId: "a", beforeNetBalanceMinor: 0, afterNetBalanceMinor: -1500, deltaMinor: -1500 },
+    { memberId: "b", beforeNetBalanceMinor: 0, afterNetBalanceMinor: 1500, deltaMinor: 1500 },
+  ]);
+  assert.deepEqual(preview.after.balances.map(({ transferSentMinor, transferReceivedMinor }) => [
+    transferSentMinor, transferReceivedMinor,
+  ]), [[0, 5000], [5000, 0]]);
+  assert.deepEqual(preview.suggestions, [
+    { fromMemberId: "a", toMemberId: "b", currency: "HKD", amountMinor: 1500 },
+  ]);
+});
+
+test("a corrected expense in the event timeline keeps its refund and repayment effects", () => {
+  const { memberIds, expense, refund, transfer } = repaymentFixture();
+  const proposed = correctedEqualExpense(expense, 8000);
+  const preview = valueOf(previewExpenseCorrection({
+    currency: "HKD", memberIds, expenses: [],
+    events: [{ kind: "expense", expense }, transfer, refund], original: expense, proposed,
+  }));
+  assert.deepEqual(preview.expense, { before: expense, after: proposed, refunds: [refund] });
+  assert.deepEqual(preview.before.effectiveExpenses, [{ expenseId: expense.id, effectiveTotalMinor: 8000 }]);
+  assert.deepEqual(preview.after.effectiveExpenses, [{ expenseId: expense.id, effectiveTotalMinor: 6000 }]);
+  assert.deepEqual(preview.after.balances.map(({ allocatedMinor }) => allocatedMinor), [3000, 3000]);
+  assert.deepEqual(preview.after.balances.map(({ netBalanceMinor }) => netBalanceMinor), [-2000, 2000]);
+});
+
+test("a correction is rejected if preserved refunds exceed the new bill or a member share", () => {
+  const { memberIds, expense, refund } = repaymentFixture();
+  const secondRefund = { ...refund, id: "refund-2" };
+  const input = { currency: "HKD", memberIds, expenses: [expense], events: [refund, secondRefund], original: expense };
+  assert.deepEqual(previewExpenseCorrection({ ...input, proposed: correctedEqualExpense(expense, 3000) }).error,
+    { code: "REFUND_EXCEEDS_EXPENSE", field: "merchantRefund" });
+
+  const proposed = { ...expense, split: { ...expense.split, allocations: [
+    { memberId: "a", amountMinor: 1500 }, { memberId: "b", amountMinor: 8500 },
+  ] } };
+  assert.deepEqual(previewExpenseCorrection({ ...input, proposed }).error,
+    { code: "REFUND_REDUCTION_EXCEEDS_ALLOCATION", field: "refundReductions" });
+});
+
+test("correcting the merchant payer keeps a refund recorded for a different member", () => {
+  const { expense, refund } = repaymentFixture();
+  const receivedByB = { ...refund, recipientId: "b" };
+  const preview = valueOf(previewExpenseCorrection({
+    currency: "HKD", memberIds: ["a", "b", "c"], expenses: [expense], events: [receivedByB],
+    original: expense, proposed: correctedEqualExpense(expense, 8000, "c"),
+  }));
+  assert.deepEqual(preview.expense.refunds, [receivedByB]);
+  assert.deepEqual(preview.after.balances.map(({ merchantRefundReceivedMinor }) => merchantRefundReceivedMinor), [0, 2000, 0]);
+  assert.deepEqual(preview.after.balances.map(({ netBalanceMinor }) => netBalanceMinor), [-3000, -5000, 8000]);
+  assert.deepEqual(preview.suggestions, [
+    { fromMemberId: "b", toMemberId: "c", currency: "HKD", amountMinor: 5000 },
+    { fromMemberId: "a", toMemberId: "c", currency: "HKD", amountMinor: 3000 },
+  ]);
+});
+
+test("correction previews are repeatable and leave all snapshots and events intact", () => {
+  const { memberIds, expense, refund, transfer } = repaymentFixture();
+  const input = {
+    currency: "HKD", memberIds, expenses: [expense], events: [transfer, refund],
+    original: structuredClone(expense), proposed: correctedEqualExpense(expense, 8000),
+  };
+  const originalInput = structuredClone(input);
+  const first = valueOf(previewExpenseCorrection(input));
+  assert.deepEqual(valueOf(previewExpenseCorrection(input)), first);
+  assert.deepEqual(input, originalInput);
+});
+
+test("correction checks the source snapshot, stable expense ID and proposed totals", () => {
+  const { memberIds, expense } = repaymentFixture();
+  const proposed = correctedEqualExpense(expense, 8000);
+  const input = { currency: "HKD", memberIds, expenses: [expense], original: expense, proposed };
+  for (const [overrides, code, field] of [
+    [{ proposed: { ...proposed, id: "different" } }, "EXPENSE_CORRECTION_ID_MISMATCH", "expenseId"],
+    [{ original: correctedEqualExpense(expense, 9000) }, "EXPENSE_SNAPSHOT_MISMATCH", "expenseId"],
+    [{ proposed: { ...proposed, merchantPayment: expense.merchantPayment } }, "TOTAL_MISMATCH", "merchantPayment"],
+    [{ proposed: { ...proposed, split: { ...proposed.split, allocations: expense.split.allocations } } },
+      "TOTAL_MISMATCH", "allocations"],
+  ]) {
+    assert.deepEqual(previewExpenseCorrection({ ...input, ...overrides }).error, { code, field });
+  }
 });
