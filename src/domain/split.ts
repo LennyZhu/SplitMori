@@ -67,7 +67,7 @@ export type IndividualSplitResult = {
 
 export function validateMemberIds(
   memberIds: readonly string[],
-  field: "memberIds" | "sharedMemberIds" | "allocations" = "memberIds",
+  field: "memberIds" | "sharedMemberIds" | "allocations" | "refundReductions" = "memberIds",
 ): Failure | undefined {
   if (memberIds.length === 0) return failure("NO_PARTICIPANTS", field);
 

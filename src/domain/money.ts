@@ -16,7 +16,10 @@ type AmountField =
   | "personalSpending"
   | "sharedAmount"
   | "merchantPayment"
-  | "allocations";
+  | "allocations"
+  | "merchantRefund"
+  | "refundReductions"
+  | "memberTransfer";
 
 export function isCurrency(currency: unknown): currency is Currency {
   return typeof currency === "string" && Object.prototype.hasOwnProperty.call(minorDigits, currency);

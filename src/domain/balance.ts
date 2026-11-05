@@ -1,6 +1,6 @@
 import { isCurrency, validateMinorAmount, validateMoney, type Currency, type Money } from "./money.ts";
-import { failure, type Result } from "./result.ts";
-import { validateMemberIds, type SplitResult } from "./split.ts";
+import { failure, type Failure, type Result } from "./result.ts";
+import { validateMemberIds, type Allocation, type SplitResult } from "./split.ts";
 
 export type MerchantPayment = Money & { readonly memberId: string };
 
@@ -10,9 +10,30 @@ export type Expense = {
   readonly merchantPayment: MerchantPayment;
 };
 
+export type MerchantRefund = Money & {
+  readonly kind: "merchantRefund";
+  readonly id: string;
+  readonly expenseId: string;
+  readonly recipientId: string;
+  readonly reductions: readonly Allocation[];
+};
+
+export type MemberTransfer = Money & {
+  readonly kind: "memberTransfer";
+  readonly id: string;
+  readonly fromMemberId: string;
+  readonly toMemberId: string;
+};
+
+export type BalanceEvent = MerchantRefund | MemberTransfer | {
+  readonly kind: "expense";
+  readonly expense: Expense;
+};
+
 export type MemberBalance = {
   readonly memberId: string;
   readonly merchantPaidMinor: number;
+  /** Current share after any refund reductions. */
   readonly allocatedMinor: number;
   /** Positive means receivable, negative means payable. */
   readonly netBalanceMinor: number;
@@ -23,75 +44,232 @@ export type ActivityBalances = {
   readonly balances: readonly MemberBalance[];
 };
 
+export type MemberEventBalance = MemberBalance & {
+  readonly merchantRefundReceivedMinor: number;
+  readonly transferSentMinor: number;
+  readonly transferReceivedMinor: number;
+};
+
+export type ActivityEventBalances = {
+  readonly currency: Currency;
+  readonly balances: readonly MemberEventBalance[];
+  readonly effectiveExpenses: readonly { readonly expenseId: string; readonly effectiveTotalMinor: number }[];
+};
+
+type MemberTotals = {
+  merchantPaid: bigint;
+  refundReceived: bigint;
+  allocated: bigint;
+  transferSent: bigint;
+  transferReceived: bigint;
+};
+
+type ExpenseTotals = {
+  readonly gross: bigint;
+  readonly remainingAllocations: Map<string, bigint>;
+  refunded: bigint;
+};
+
 const maxMinor = BigInt(Number.MAX_SAFE_INTEGER);
 
-/** Calculates original expense balances for every activity member in input order. */
+function netBalance(member: MemberTotals): bigint {
+  return member.merchantPaid - member.refundReceived - member.allocated
+    + member.transferSent - member.transferReceived;
+}
+
+function applyExpense(
+  currency: Currency,
+  members: ReadonlyMap<string, MemberTotals>,
+  { split, merchantPayment }: Expense,
+): Result<ExpenseTotals> {
+  const { total, allocations } = split;
+  const invalidTotal = validateMoney(total, "total");
+  if (invalidTotal) return invalidTotal;
+  if (total.currency !== currency) return failure("CURRENCY_MISMATCH", "currency");
+  const gross = BigInt(total.amountMinor);
+
+  if (!merchantPayment) return failure("MISSING_MERCHANT_PAYMENT", "merchantPayment");
+  const invalidPayment = validateMoney(merchantPayment, "merchantPayment");
+  if (invalidPayment) return invalidPayment;
+  if (merchantPayment.currency !== currency) return failure("CURRENCY_MISMATCH", "merchantPayment");
+  const payer = members.get(merchantPayment.memberId);
+  if (!payer) return failure("MEMBER_NOT_PARTICIPATING", "merchantPayment");
+  if (merchantPayment.amountMinor !== total.amountMinor) {
+    return failure("TOTAL_MISMATCH", "merchantPayment");
+  }
+
+  const invalidAllocations = validateMemberIds(
+    allocations.map(({ memberId }) => memberId),
+    "allocations",
+  );
+  if (invalidAllocations) return invalidAllocations;
+
+  const remainingAllocations = new Map<string, bigint>();
+  let allocatedTotal = 0n;
+  for (const { memberId, amountMinor } of allocations) {
+    const member = members.get(memberId);
+    if (!member) return failure("MEMBER_NOT_PARTICIPATING", "allocations");
+    const invalidAmount = validateMinorAmount(amountMinor, "allocations");
+    if (invalidAmount) return invalidAmount;
+
+    const share = BigInt(amountMinor);
+    remainingAllocations.set(memberId, share);
+    allocatedTotal += share;
+    member.allocated += share;
+  }
+  if (allocatedTotal > maxMinor) return failure("AMOUNT_OVERFLOW", "allocations");
+  if (allocatedTotal !== gross) return failure("TOTAL_MISMATCH", "allocations");
+
+  payer.merchantPaid += BigInt(merchantPayment.amountMinor);
+  return { ok: true, value: { gross, remainingAllocations, refunded: 0n } };
+}
+
+function applyRefund(
+  members: ReadonlyMap<string, MemberTotals>,
+  expenses: ReadonlyMap<string, ExpenseTotals>,
+  refund: MerchantRefund,
+): Failure | undefined {
+  const expense = expenses.get(refund.expenseId);
+  if (!expense) return failure("EXPENSE_NOT_FOUND", "expenseId");
+  const recipient = members.get(refund.recipientId);
+  if (!recipient) return failure("MEMBER_NOT_PARTICIPATING", "merchantRefund");
+
+  const amount = BigInt(refund.amountMinor);
+  if (expense.refunded + amount > expense.gross) return failure("REFUND_EXCEEDS_EXPENSE", "merchantRefund");
+  const reductions = refund.reductions ?? [];
+  const invalidReductions = validateMemberIds(
+    reductions.map(({ memberId }) => memberId),
+    "refundReductions",
+  );
+  if (invalidReductions) return invalidReductions;
+
+  let reductionTotal = 0n;
+  for (const { memberId, amountMinor } of reductions) {
+    const member = members.get(memberId);
+    const remaining = expense.remainingAllocations.get(memberId);
+    if (!member || remaining === undefined) return failure("MEMBER_NOT_PARTICIPATING", "refundReductions");
+    const invalidAmount = validateMinorAmount(amountMinor, "refundReductions");
+    if (invalidAmount) return invalidAmount;
+    const reduction = BigInt(amountMinor);
+    if (reduction > remaining) return failure("REFUND_REDUCTION_EXCEEDS_ALLOCATION", "refundReductions");
+
+    reductionTotal += reduction;
+    expense.remainingAllocations.set(memberId, remaining - reduction);
+    member.allocated -= reduction;
+  }
+  if (reductionTotal !== amount) return failure("TOTAL_MISMATCH", "refundReductions");
+
+  expense.refunded += amount;
+  recipient.refundReceived += amount;
+}
+
+function applyTransfer(members: ReadonlyMap<string, MemberTotals>, transfer: MemberTransfer): Failure | undefined {
+  const sender = members.get(transfer.fromMemberId);
+  const recipient = members.get(transfer.toMemberId);
+  if (!sender || !recipient) return failure("MEMBER_NOT_PARTICIPATING", "memberTransfer");
+  if (sender === recipient) return failure("SELF_TRANSFER", "memberTransfer");
+
+  const amount = BigInt(transfer.amountMinor);
+  if (amount > -netBalance(sender) || amount > netBalance(recipient)) {
+    return failure("TRANSFER_EXCEEDS_BALANCE", "memberTransfer");
+  }
+  if (sender.transferSent + amount > maxMinor || recipient.transferReceived + amount > maxMinor) {
+    return failure("AMOUNT_OVERFLOW", "memberTransfer");
+  }
+
+  sender.transferSent += amount;
+  recipient.transferReceived += amount;
+}
+
 export function calculateBalances(
   currency: Currency,
   memberIds: readonly string[],
   expenses: readonly Expense[],
-): Result<ActivityBalances> {
+): Result<ActivityBalances>;
+/** Opening expenses are applied first, followed by events in the supplied chronological order. */
+export function calculateBalances(
+  currency: Currency,
+  memberIds: readonly string[],
+  expenses: readonly Expense[],
+  events: readonly BalanceEvent[],
+): Result<ActivityEventBalances>;
+export function calculateBalances(
+  currency: Currency,
+  memberIds: readonly string[],
+  expenses: readonly Expense[],
+  events?: readonly BalanceEvent[],
+): Result<ActivityBalances | ActivityEventBalances> {
   if (!isCurrency(currency)) return failure("UNSUPPORTED_CURRENCY", "currency");
   const invalidMembers = validateMemberIds(memberIds);
   if (invalidMembers) return invalidMembers;
 
-  const members = new Map(memberIds.map((id) => [id, { merchantPaid: 0n, allocated: 0n }]));
-  const expenseIds = new Set<string>();
+  const members = new Map(memberIds.map((id): [string, MemberTotals] => [id, {
+    merchantPaid: 0n, refundReceived: 0n, allocated: 0n, transferSent: 0n, transferReceived: 0n,
+  }]));
+  const expenseTotals = new Map<string, ExpenseTotals>();
+  const eventIds = new Set<string>();
   let activityTotal = 0n;
 
-  for (const { id, split, merchantPayment } of expenses) {
-    if (typeof id !== "string" || id.trim() === "") return failure("INVALID_EXPENSE_ID", "expenseId");
-    if (expenseIds.has(id)) return failure("DUPLICATE_EXPENSE_ID", "expenseId");
-    expenseIds.add(id);
-
-    const { total, allocations } = split;
-    const invalidTotal = validateMoney(total, "total");
-    if (invalidTotal) return invalidTotal;
-    if (total.currency !== currency) return failure("CURRENCY_MISMATCH", "currency");
-    const gross = BigInt(total.amountMinor);
-
-    if (!merchantPayment) return failure("MISSING_MERCHANT_PAYMENT", "merchantPayment");
-    const invalidPayment = validateMoney(merchantPayment, "merchantPayment");
-    if (invalidPayment) return invalidPayment;
-    if (merchantPayment.currency !== currency) return failure("CURRENCY_MISMATCH", "merchantPayment");
-    const payer = members.get(merchantPayment.memberId);
-    if (!payer) return failure("MEMBER_NOT_PARTICIPATING", "merchantPayment");
-    if (merchantPayment.amountMinor !== total.amountMinor) {
-      return failure("TOTAL_MISMATCH", "merchantPayment");
+  const timeline: readonly BalanceEvent[] = [
+    ...expenses.map((expense) => ({ kind: "expense" as const, expense })),
+    ...(events ?? []),
+  ];
+  for (const event of timeline) {
+    if (event?.kind === "expense") {
+      const { id } = event.expense;
+      if (typeof id !== "string" || id.trim() === "") return failure("INVALID_EXPENSE_ID", "expenseId");
+      if (expenseTotals.has(id)) return failure("DUPLICATE_EXPENSE_ID", "expenseId");
+      const result = applyExpense(currency, members, event.expense);
+      if (!result.ok) return result;
+      activityTotal += result.value.gross;
+      if (activityTotal > maxMinor) return failure("AMOUNT_OVERFLOW", "total");
+      expenseTotals.set(id, result.value);
+      continue;
     }
-
-    const invalidAllocations = validateMemberIds(
-      allocations.map(({ memberId }) => memberId),
-      "allocations",
-    );
-    if (invalidAllocations) return invalidAllocations;
-
-    let allocatedTotal = 0n;
-    for (const { memberId, amountMinor } of allocations) {
-      const member = members.get(memberId);
-      if (!member) return failure("MEMBER_NOT_PARTICIPATING", "allocations");
-      const invalidAmount = validateMinorAmount(amountMinor, "allocations");
-      if (invalidAmount) return invalidAmount;
-
-      const share = BigInt(amountMinor);
-      allocatedTotal += share;
-      member.allocated += share;
+    if (event?.kind !== "merchantRefund" && event?.kind !== "memberTransfer") {
+      return failure("INVALID_EVENT_TYPE", "events");
     }
-    if (allocatedTotal > maxMinor) return failure("AMOUNT_OVERFLOW", "allocations");
-    if (allocatedTotal !== gross) return failure("TOTAL_MISMATCH", "allocations");
+    if (typeof event.id !== "string" || event.id.trim() === "") return failure("INVALID_EVENT_ID", "eventId");
+    if (eventIds.has(event.id)) return failure("DUPLICATE_EVENT_ID", "eventId");
+    eventIds.add(event.id);
+    const invalidAmount = validateMoney(event, event.kind);
+    if (invalidAmount) return invalidAmount;
+    if (event.currency !== currency) return failure("CURRENCY_MISMATCH", event.kind);
+    if (event.amountMinor === 0) return failure("NON_POSITIVE_AMOUNT", event.kind);
 
-    activityTotal += gross;
-    if (activityTotal > maxMinor) return failure("AMOUNT_OVERFLOW", "total");
-    payer.merchantPaid += BigInt(merchantPayment.amountMinor);
+    const invalidEvent = event.kind === "merchantRefund"
+      ? applyRefund(members, expenseTotals, event)
+      : applyTransfer(members, event);
+    if (invalidEvent) return invalidEvent;
   }
 
-  // Matching payment and allocation totals make the balances zero-sum.
-  // Each amount fits within the checked activity total before converting back to number.
-  const balances = Array.from(members, ([memberId, { merchantPaid, allocated }]): MemberBalance => ({
-    memberId,
-    merchantPaidMinor: Number(merchantPaid),
-    allocatedMinor: Number(allocated),
-    netBalanceMinor: Number(merchantPaid - allocated),
+  const balances: MemberBalance[] = [];
+  const eventBalances: MemberEventBalance[] = [];
+  for (const [memberId, member] of members) {
+    const net = netBalance(member);
+    if (net < -maxMinor || net > maxMinor) return failure("AMOUNT_OVERFLOW", "total");
+    const balance = {
+      memberId,
+      merchantPaidMinor: Number(member.merchantPaid),
+      allocatedMinor: Number(member.allocated),
+      netBalanceMinor: Number(net),
+    };
+    if (events === undefined) {
+      balances.push(balance);
+    } else {
+      eventBalances.push({
+        ...balance,
+        merchantRefundReceivedMinor: Number(member.refundReceived),
+        transferSentMinor: Number(member.transferSent),
+        transferReceivedMinor: Number(member.transferReceived),
+      });
+    }
+  }
+  if (events === undefined) return { ok: true, value: { currency, balances } };
+
+  const effectiveExpenses = Array.from(expenseTotals, ([expenseId, { gross, refunded }]) => ({
+    expenseId,
+    effectiveTotalMinor: Number(gross - refunded),
   }));
-  return { ok: true, value: { currency, balances } };
+  return { ok: true, value: { currency, balances: eventBalances, effectiveExpenses } };
 }

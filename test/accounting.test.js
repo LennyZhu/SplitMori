@@ -285,3 +285,157 @@ test("activity totals stay exact up to the safe integer limit and reject cumulat
   const result = calculateBalances("JPY", ["a", "b"], [expense, extraExpense]);
   assert.deepEqual(result.error, { code: "AMOUNT_OVERFLOW", field: "total" });
 });
+
+function repaymentFixture() {
+  const memberIds = ["a", "b"];
+  const total = { currency: "HKD", amountMinor: 10_000 };
+  const expense = {
+    id: "dinner",
+    split: valueOf(splitEqual(total, memberIds)),
+    merchantPayment: { memberId: "a", ...total },
+  };
+  const refund = {
+    kind: "merchantRefund",
+    id: "refund-1",
+    expenseId: expense.id,
+    recipientId: "a",
+    currency: "HKD",
+    amountMinor: 2000,
+    reductions: [{ memberId: "a", amountMinor: 1000 }, { memberId: "b", amountMinor: 1000 }],
+  };
+  const transfer = {
+    kind: "memberTransfer",
+    id: "transfer-1",
+    fromMemberId: "b",
+    toMemberId: "a",
+    currency: "HKD",
+    amountMinor: 5000,
+  };
+  return { memberIds, expense, refund, transfer };
+}
+
+function assertNetBalances(result, expected) {
+  const value = valueOf(result);
+  const netAmounts = value.balances.map(({ netBalanceMinor }) => netBalanceMinor);
+  assert.deepEqual(netAmounts, expected);
+  assert.equal(netAmounts.reduce((sum, amount) => sum + BigInt(amount), 0n), 0n);
+  return value;
+}
+
+test("a partial merchant refund reduces the effective expense and preserves the original records", () => {
+  const { memberIds, expense, refund } = repaymentFixture();
+  const inputs = { expenses: [expense], events: [refund] };
+  const originalInputs = structuredClone(inputs);
+  const value = assertNetBalances(
+    calculateBalances("HKD", memberIds, inputs.expenses, inputs.events),
+    [4000, -4000],
+  );
+  assert.deepEqual(value.effectiveExpenses, [{ expenseId: "dinner", effectiveTotalMinor: 8000 }]);
+  assert.deepEqual(value.balances.map(({ allocatedMinor }) => allocatedMinor), [4000, 4000]);
+  assert.equal(value.balances[0].merchantPaidMinor, 10_000);
+  assert.equal(value.balances[0].merchantRefundReceivedMinor, 2000);
+  assert.deepEqual(inputs, originalInputs);
+});
+
+test("a member who did not pay the merchant can receive the refund", () => {
+  const { memberIds, expense, refund } = repaymentFixture();
+  const result = calculateBalances("HKD", memberIds, [expense], [{ ...refund, recipientId: "b" }]);
+  const value = assertNetBalances(result, [6000, -6000]);
+  assert.deepEqual(value.balances.map(({ merchantPaidMinor }) => merchantPaidMinor), [10_000, 0]);
+  assert.deepEqual(value.balances.map(({ merchantRefundReceivedMinor }) => merchantRefundReceivedMinor), [0, 2000]);
+  assert.deepEqual(value.balances.map(({ allocatedMinor }) => allocatedMinor), [4000, 4000]);
+  assert.deepEqual(value.effectiveExpenses, [{ expenseId: "dinner", effectiveTotalMinor: 8000 }]);
+});
+
+test("a later refund can reverse settled balances and allow a repayment in the other direction", () => {
+  const { memberIds, expense, refund, transfer } = repaymentFixture();
+  assertNetBalances(calculateBalances("HKD", memberIds, [expense], [transfer]), [0, 0]);
+  const value = assertNetBalances(
+    calculateBalances("HKD", memberIds, [expense], [transfer, refund]),
+    [-1000, 1000],
+  );
+  assert.equal(value.balances[1].transferSentMinor, 5000);
+  assert.equal(value.balances[0].transferReceivedMinor, 5000);
+
+  const reverse = { ...transfer, id: "transfer-2", fromMemberId: "a", toMemberId: "b", amountMinor: 1000 };
+  assertNetBalances(calculateBalances("HKD", memberIds, [expense], [transfer, refund, reverse]), [0, 0]);
+});
+
+test("refunds conserve reductions and cap both cumulative refunds and each expense share", () => {
+  const { memberIds, expense, refund } = repaymentFixture();
+  const larger = {
+    ...refund,
+    amountMinor: 6000,
+    reductions: [{ memberId: "a", amountMinor: 3000 }, { memberId: "b", amountMinor: 3000 }],
+  };
+  const extra = { ...larger, id: "refund-2" };
+  const fullyRefunded = {
+    ...refund,
+    amountMinor: 10_000,
+    reductions: expense.split.allocations,
+  };
+  const full = assertNetBalances(calculateBalances("HKD", memberIds, [expense], [fullyRefunded]), [0, 0]);
+  assert.deepEqual(full.effectiveExpenses, [{ expenseId: "dinner", effectiveTotalMinor: 0 }]);
+
+  for (const [events, code, field] of [
+    [[larger, extra], "REFUND_EXCEEDS_EXPENSE", "merchantRefund"],
+    [[{ ...refund, amountMinor: 1999 }], "TOTAL_MISMATCH", "refundReductions"],
+    [[larger, { ...extra, amountMinor: 2001, reductions: [{ memberId: "a", amountMinor: 2001 }] }],
+      "REFUND_REDUCTION_EXCEEDS_ALLOCATION", "refundReductions"],
+    [[{ ...refund, amountMinor: 0 }], "NON_POSITIVE_AMOUNT", "merchantRefund"],
+  ]) {
+    const result = calculateBalances("HKD", memberIds, [expense], events);
+    assert.deepEqual(result.error, { code, field });
+  }
+});
+
+test("refunds reject duplicate event IDs and incorrect expense or member associations", () => {
+  const { expense, refund, transfer } = repaymentFixture();
+  const otherExpense = {
+    ...expense,
+    id: "drinks",
+    split: valueOf(splitEqual(expense.split.total, ["c"])),
+  };
+  for (const [events, code, field] of [
+    [[refund, refund], "DUPLICATE_EVENT_ID", "eventId"],
+    [[refund, { ...transfer, id: refund.id }], "DUPLICATE_EVENT_ID", "eventId"],
+    [[{ ...refund, expenseId: "missing" }], "EXPENSE_NOT_FOUND", "expenseId"],
+    [[{ ...refund, recipientId: "outsider" }], "MEMBER_NOT_PARTICIPATING", "merchantRefund"],
+    [[{ ...refund, reductions: [{ memberId: "c", amountMinor: 2000 }] }],
+      "MEMBER_NOT_PARTICIPATING", "refundReductions"],
+  ]) {
+    const result = calculateBalances("HKD", ["a", "b", "c"], [expense, otherExpense], events);
+    assert.deepEqual(result.error, { code, field });
+  }
+});
+
+test("repayments require valid members and can only reduce the current debt and credit", () => {
+  const { memberIds, expense, transfer } = repaymentFixture();
+  const partial = { ...transfer, amountMinor: 3000 };
+  assertNetBalances(calculateBalances("HKD", memberIds, [expense], [partial]), [2000, -2000]);
+  for (const [events, code, field] of [
+    [[partial, { ...partial, id: "transfer-2" }], "TRANSFER_EXCEEDS_BALANCE", "memberTransfer"],
+    [[{ ...transfer, fromMemberId: "a", toMemberId: "b" }], "TRANSFER_EXCEEDS_BALANCE", "memberTransfer"],
+    [[{ ...transfer, fromMemberId: "a" }], "SELF_TRANSFER", "memberTransfer"],
+    [[{ ...transfer, toMemberId: "outsider" }], "MEMBER_NOT_PARTICIPATING", "memberTransfer"],
+    [[{ ...transfer, amountMinor: 0 }], "NON_POSITIVE_AMOUNT", "memberTransfer"],
+    [[{ ...transfer, currency: "JPY" }], "CURRENCY_MISMATCH", "memberTransfer"],
+    [[partial, partial], "DUPLICATE_EVENT_ID", "eventId"],
+  ]) {
+    const result = calculateBalances("HKD", memberIds, [expense], events);
+    assert.deepEqual(result.error, { code, field });
+  }
+});
+
+test("a later expense is applied after an earlier repayment in the supplied sequence", () => {
+  const { memberIds, expense, transfer } = repaymentFixture();
+  const later = {
+    ...expense,
+    id: "later",
+    merchantPayment: { ...expense.merchantPayment, memberId: "b" },
+  };
+  assertNetBalances(
+    calculateBalances("HKD", memberIds, [expense], [transfer, { kind: "expense", expense: later }]),
+    [-5000, 5000],
+  );
+});

@@ -16,7 +16,16 @@ export type DomainErrorCode =
   | "CURRENCY_MISMATCH"
   | "INVALID_EXPENSE_ID"
   | "DUPLICATE_EXPENSE_ID"
-  | "MISSING_MERCHANT_PAYMENT";
+  | "MISSING_MERCHANT_PAYMENT"
+  | "INVALID_EVENT_TYPE"
+  | "INVALID_EVENT_ID"
+  | "DUPLICATE_EVENT_ID"
+  | "NON_POSITIVE_AMOUNT"
+  | "EXPENSE_NOT_FOUND"
+  | "REFUND_EXCEEDS_EXPENSE"
+  | "REFUND_REDUCTION_EXCEEDS_ALLOCATION"
+  | "SELF_TRANSFER"
+  | "TRANSFER_EXCEEDS_BALANCE";
 
 type ErrorField =
   | "currency"
@@ -30,7 +39,12 @@ type ErrorField =
   | "sharedMemberIds"
   | "expenseId"
   | "merchantPayment"
-  | "allocations";
+  | "allocations"
+  | "events"
+  | "eventId"
+  | "merchantRefund"
+  | "refundReductions"
+  | "memberTransfer";
 
 export type Failure = {
   readonly ok: false;
