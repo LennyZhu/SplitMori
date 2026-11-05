@@ -1,11 +1,11 @@
 {
+  "extends": "expo/tsconfig.base",
   "compilerOptions": {
     "target": "ES2020",
-    "module": "NodeNext",
     "strict": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "erasableSyntaxOnly": true
   },
-  "include": ["src/domain/**/*.ts"]
+  "include": ["index.tsx", "src/**/*.ts", "src/**/*.tsx"]
 }
