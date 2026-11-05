@@ -165,4 +165,25 @@ export const migrations = [
   DROP TABLE refund_reductions;
   ALTER TABLE refund_reductions_v3 RENAME TO refund_reductions;
   `,
+  `
+  CREATE TABLE quick_draft (
+    slot INTEGER PRIMARY KEY CHECK (slot = 1),
+    id TEXT NOT NULL CHECK (length(trim(id)) > 0),
+    created_at INTEGER NOT NULL CHECK (created_at BETWEEN 0 AND 9007199254740991),
+    updated_at INTEGER NOT NULL CHECK (updated_at BETWEEN created_at AND 9007199254740991),
+    schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+    input_json TEXT NOT NULL
+  ) STRICT;
+
+  CREATE TABLE quick_history (
+    id TEXT NOT NULL PRIMARY KEY CHECK (length(trim(id)) > 0),
+    created_at INTEGER NOT NULL CHECK (created_at BETWEEN 0 AND 9007199254740991),
+    updated_at INTEGER NOT NULL CHECK (updated_at BETWEEN created_at AND 9007199254740991),
+    schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+    input_json TEXT NOT NULL,
+    result_json TEXT NOT NULL
+  ) STRICT;
+
+  CREATE INDEX quick_history_saved_order ON quick_history(created_at DESC, id);
+  `,
 ] as const;

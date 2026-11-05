@@ -8,6 +8,7 @@ import { createActivityRepository } from "../src/data/activities.ts";
 import { DatabaseInitializationError, initializeDatabase } from "../src/data/database.ts";
 import { createFinanceRepository } from "../src/data/finance.ts";
 import { migrations } from "../src/data/migrations.ts";
+import { createQuickSplitRepository } from "../src/data/quickSplits.ts";
 import { splitEqual } from "../src/domain/split.ts";
 
 // Exercises the production SQL against a real file with Node's SQLite adapter.
@@ -41,7 +42,7 @@ test("activity/member writes survive closing and reopening SQLite", withTestFile
   try {
     const database = await initializeDatabase(connection);
     const repository = createActivityRepository(database);
-    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 3);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 4);
     assert.equal((await connection.getFirstAsync("PRAGMA journal_mode")).journal_mode, "wal");
     assert.equal((await connection.getFirstAsync("PRAGMA foreign_keys")).foreign_keys, 1);
 
@@ -68,7 +69,7 @@ test("activity/member writes survive closing and reopening SQLite", withTestFile
     connection.close();
     connection = openTestConnection(path);
     const reopened = createActivityRepository(await initializeDatabase(connection));
-    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 3);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 4);
     assert.deepEqual((await reopened.listActivities()).map(({ id }) => id), ["dinner"]);
     const saved = await reopened.getActivity("dinner");
     assert.equal(saved.name, "Friday dinner");
@@ -166,7 +167,7 @@ test("forward migrations preserve v1 activities and a saved expense survives reo
     connection.close();
     connection = openTestConnection(path);
     const reopened = createFinanceRepository(await initializeDatabase(connection));
-    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 3);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 4);
     assert.deepEqual(valueOf(await reopened.listExpenses("trip")), [{ ...saved, currentVersion: 1 }]);
     assert.deepEqual(valueOf(await reopened.getExpense("trip", "dinner")), { ...saved, currentVersion: 1, refunds: [] });
   } finally {
@@ -381,7 +382,7 @@ test("v2 expenses form version one and corrected history survives reopening SQLi
     connection.close();
     connection = openTestConnection(path);
     const reopened = createFinanceRepository(await initializeDatabase(connection));
-    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 3);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 4);
     assert.deepEqual(valueOf(await reopened.listExpenseRevisions("trip", "dinner")), [baseline, revised]);
     const ledger = valueOf(await reopened.getActivityLedger("trip"));
     assert.deepEqual(ledger.balanceSnapshot.balances.map(({ netBalanceMinor }) => netBalanceMinor), [-2000, 2000]);
@@ -403,4 +404,121 @@ test("corrections require an open activity, an append time and a balanced replac
   assert.deepEqual((await finance.commitExpenseCorrection("trip", correction(7000, { proposed }))).error,
     { code: "TOTAL_MISMATCH", field: "merchantPayment" });
   assert.equal(valueOf(await finance.getExpense("trip", "dinner")).currentVersion, 1);
+}));
+
+function quickInput() {
+  return {
+    members: [{ id: "z", displayName: "Alex" }, { id: "a", displayName: "Bo" }],
+    charges: { kind: "finalTotal", total: { currency: "HKD", amountMinor: 10_001 } },
+    method: { kind: "equal", memberIds: ["z", "a"] },
+  };
+}
+
+test("one quick draft preserves incomplete input and rejects a stale replacement", withFinance(async (_finance, _activities, database, connection) => {
+  const quick = createQuickSplitRepository(database);
+  assert.equal(valueOf(await quick.getQuickDraft()), null);
+  const partial = { currency: "HKD", mode: "treat", members: [{ id: "z" }], parameters: { total: "12.", cover: "" } };
+  const first = valueOf(await quick.saveQuickDraft("draft-1", partial, 100));
+  assert.deepEqual(first.input, partial);
+  assert.deepEqual(valueOf(await quick.saveQuickDraft("draft-1", partial, 100)), first);
+  assert.deepEqual((await quick.saveQuickDraft("draft-1", {}, 100)).error,
+    { code: "QUICK_RECORD_ID_CONFLICT", field: "quickRecordId" });
+
+  const second = valueOf(await quick.saveQuickDraft("draft-2", { mode: "equal" }, 200));
+  assert.equal(second.createdAt, 100);
+  assert.equal(second.updatedAt, 200);
+  assert.deepEqual((await quick.saveQuickDraft("draft-1", partial, 100)).error,
+    { code: "STALE_QUICK_DRAFT", field: "occurredAt" });
+  assert.equal((await connection.getFirstAsync("SELECT COUNT(*) AS count FROM quick_draft")).count, 1);
+  assert.deepEqual(valueOf(await quick.getQuickDraft()), second);
+  assert.equal(valueOf(await quick.clearQuickDraft()), true);
+  assert.equal(valueOf(await quick.getQuickDraft()), null);
+}));
+
+test("v4 quick snapshots retain members, rounding and draft inputs after reopening", withTestFile(async (path) => {
+  let connection = openTestConnection(path);
+  try {
+    for (const sql of migrations.slice(0, 3)) await connection.execAsync(sql);
+    await connection.execAsync("PRAGMA user_version = 3");
+    const quick = createQuickSplitRepository(await initializeDatabase(connection));
+    const input = quickInput();
+    const saved = valueOf(await quick.saveQuickHistory("history", input));
+    const draft = valueOf(await quick.saveQuickDraft("draft", { parameters: { total: "-" } }, 100));
+    input.members[0].displayName = "Renamed";
+
+    connection.close();
+    connection = openTestConnection(path);
+    const reopened = createQuickSplitRepository(await initializeDatabase(connection));
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 4);
+    assert.deepEqual(valueOf(await reopened.getQuickDraft()), draft);
+    assert.deepEqual(valueOf(await reopened.getQuickHistory("history")), saved);
+    assert.equal(saved.input.members[0].displayName, "Alex");
+    assert.equal(saved.schemaVersion, 1);
+    assert.equal(saved.snapshot.split.allocationVersion, 1);
+    assert.deepEqual(saved.snapshot.split.allocations, [
+      { memberId: "z", amountMinor: 5001 }, { memberId: "a", amountMinor: 5000 },
+    ]);
+    assert.deepEqual(saved.snapshot.suggestions, []);
+  } finally {
+    connection.close();
+  }
+}));
+
+test("manual quick history keeps more than 100 records independently of the draft", withFinance(async (_finance, _activities, database) => {
+  const quick = createQuickSplitRepository(database);
+  const input = quickInput();
+  for (let i = 0; i < 101; i += 1) valueOf(await quick.saveQuickHistory(`history-${i}`, input));
+  valueOf(await quick.saveQuickDraft("draft-1", {}, 100));
+  valueOf(await quick.saveQuickDraft("draft-2", { mode: "equal" }, 200));
+  valueOf(await quick.clearQuickDraft());
+  assert.equal(valueOf(await quick.listQuickHistory()).length, 101);
+  assert.ok(valueOf(await quick.getQuickHistory("history-0")));
+  assert.equal(valueOf(await quick.deleteQuickHistory("history-50")), true);
+  assert.equal(valueOf(await quick.listQuickHistory()).length, 100);
+  assert.equal(valueOf(await quick.getQuickHistory("history-50")), null);
+}));
+
+test("manual quick history IDs are idempotent and conflicting content is rejected", withFinance(async (_finance, _activities, database) => {
+  const quick = createQuickSplitRepository(database);
+  const input = quickInput();
+  const [first, retry] = await Promise.all([
+    quick.saveQuickHistory("same", input),
+    quick.saveQuickHistory("same", { method: input.method, charges: input.charges, members: input.members }),
+  ]);
+  assert.deepEqual(valueOf(first), valueOf(retry));
+  assert.deepEqual((await quick.saveQuickHistory("same", { ...input, merchantPayerId: "z" })).error,
+    { code: "QUICK_RECORD_ID_CONFLICT", field: "quickRecordId" });
+  valueOf(await quick.saveQuickHistory("different", input));
+  assert.equal(valueOf(await quick.listQuickHistory()).length, 2);
+}));
+
+test("manual history uses the split engine and rejects nonconserving or invalid inputs", withFinance(async (_finance, _activities, database) => {
+  const quick = createQuickSplitRepository(database);
+  const input = quickInput();
+  const details = {
+    ...input, charges: { kind: "details", subtotal: { currency: "HKD", amountMinor: 10_000 }, discountMinor: 1000 },
+    method: { kind: "individual", personalSpending: [{ memberId: "z", personalMinor: 8000 }, { memberId: "a", personalMinor: 2000 }],
+      shared: { amountMinor: 0, memberIds: [] } },
+  };
+  const valid = valueOf(await quick.saveQuickHistory("details", details));
+  assert.equal(valid.snapshot.split.total.amountMinor, 9000);
+  assert.deepEqual(valid.snapshot.split.allocations.map(({ amountMinor }) => amountMinor), [7200, 1800]);
+
+  const badFixed = { kind: "custom", options: { kind: "fixed", members: [{ memberId: "z", amountMinor: 10_000 }] } };
+  assert.deepEqual((await quick.saveQuickHistory("invalid", { ...input, method: badFixed })).error,
+    { code: "TOTAL_MISMATCH", field: "allocations" });
+  assert.deepEqual((await quick.saveQuickHistory("outside", { ...input, merchantPayerId: "unknown" })).error,
+    { code: "MEMBER_NOT_PARTICIPATING", field: "merchantPayment" });
+  assert.equal(valueOf(await quick.listQuickHistory()).length, 1);
+}));
+
+test("quick history with a payer creates suggestions without writing to the activity ledger", withFinance(async (finance, _activities, database) => {
+  const quick = createQuickSplitRepository(database);
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  const before = valueOf(await finance.getActivityLedger("trip"));
+  const saved = valueOf(await quick.saveQuickHistory("dinner", { ...quickInput(), merchantPayerId: "z" }));
+  assert.deepEqual(saved.snapshot.suggestions, [{ fromMemberId: "a", toMemberId: "z", currency: "HKD", amountMinor: 5000 }]);
+  assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
+  valueOf(await quick.deleteQuickHistory("dinner"));
+  assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
 }));

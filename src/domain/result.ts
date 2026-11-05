@@ -45,7 +45,12 @@ export type DomainErrorCode =
   | "REVISION_ID_CONFLICT"
   | "EXPENSE_VERSION_CONFLICT"
   | "REVISION_OUT_OF_ORDER"
-  | "REFUND_REVIEW_REQUIRED";
+  | "REFUND_REVIEW_REQUIRED"
+  | "INVALID_QUICK_INPUT"
+  | "INVALID_QUICK_RECORD_ID"
+  | "QUICK_RECORD_ID_CONFLICT"
+  | "STALE_QUICK_DRAFT"
+  | "QUICK_STORAGE_ERROR";
 
 type ErrorField =
   | "currency"
@@ -78,7 +83,9 @@ type ErrorField =
   | "storage"
   | "revisionId"
   | "expectedVersion"
-  | "reviewedRefundIds";
+  | "reviewedRefundIds"
+  | "quickInput"
+  | "quickRecordId";
 
 export type Failure = {
   readonly ok: false;
