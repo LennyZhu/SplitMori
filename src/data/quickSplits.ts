@@ -1,7 +1,7 @@
 import type { Currency } from "../domain/money.ts";
 import { calculateQuickSplit, type QuickSplitInput, type QuickSplitSnapshot } from "../domain/quickSplit.ts";
 import { failure, type Result } from "../domain/result.ts";
-import type { LocalDatabase } from "./database.ts";
+import type { LocalDatabase, SQLiteReader } from "./database.ts";
 
 type JsonValue = null | boolean | number | string | readonly JsonValue[] | { readonly [key: string]: JsonValue };
 
@@ -64,6 +64,11 @@ function decodeRecord<T>({ id, createdAt, updatedAt, schemaVersion: version, inp
 
 function decodeHistory(row: HistoryRow): QuickHistoryRecord {
   return { ...decodeRecord<QuickSplitInput>(row), snapshot: JSON.parse(row.resultJson) as QuickSplitSnapshot };
+}
+
+export async function readQuickHistory(connection: SQLiteReader, id: string): Promise<QuickHistoryRecord | null> {
+  const row = await connection.getFirstAsync<HistoryRow>(`SELECT ${historyColumns} FROM quick_history WHERE id = ?`, id);
+  return row ? decodeHistory(row) : null;
 }
 
 async function withStorage<T>(operation: () => Promise<Result<T>>): Promise<Result<T>> {
@@ -162,10 +167,9 @@ export function createQuickSplitRepository(database: LocalDatabase) {
 
     async getQuickHistory(id: string): Promise<Result<QuickHistoryRecord | null>> {
       if (!validId(id)) return failure("INVALID_QUICK_RECORD_ID", "quickRecordId");
-      return withStorage(() => database.read(async (connection) => {
-        const row = await connection.getFirstAsync<HistoryRow>(`SELECT ${historyColumns} FROM quick_history WHERE id = ?`, id);
-        return { ok: true, value: row ? decodeHistory(row) : null };
-      }));
+      return withStorage(() => database.read(async (connection) => ({
+        ok: true, value: await readQuickHistory(connection, id),
+      })));
     },
 
     async deleteQuickHistory(id: string): Promise<Result<boolean>> {

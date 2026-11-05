@@ -27,6 +27,8 @@ export type StoredFinanceEvent<T extends FinanceEvent = FinanceEvent> = T & {
   readonly sequence: number;
 };
 
+export type StoredExpense = StoredFinanceEvent<ExpenseEvent>;
+
 type CurrentExpense = StoredFinanceEvent<ExpenseEvent> & { readonly currentVersion: number };
 
 export type ExpenseDetail = CurrentExpense & {
@@ -304,6 +306,59 @@ async function withStorage<T>(task: () => Promise<Result<T>>): Promise<Result<T>
   }
 }
 
+async function recordInTransaction(
+  transaction: SQLiteConnection, activityId: string, occurredAt: number, event: FinanceEvent, allowRetry = true,
+): Promise<Result<StoredFinanceEvent>> {
+  const id = eventId(event);
+  if (typeof id !== "string" || id.trim() === "") {
+    return event.kind === "expense" ? failure("INVALID_EXPENSE_ID", "expenseId") : failure("INVALID_EVENT_ID", "eventId");
+  }
+  if (!Number.isSafeInteger(occurredAt) || occurredAt < 0) return failure("INVALID_EVENT_TIME", "occurredAt");
+
+  const existing = await transaction.getFirstAsync<{ activityId: string }>(
+    "SELECT activity_id AS activityId FROM financial_events WHERE id = ?", id,
+  );
+  if (existing && (!allowRetry || existing.activityId !== activityId)) return failure("EVENT_ID_CONFLICT", "eventId");
+
+  const activity = await readActivity(transaction, activityId);
+  if (!activity) return failure("ACTIVITY_NOT_FOUND", "activityId");
+  const history = await readEvents(transaction, activity);
+  if (existing) {
+    const saved = history.find((entry) => eventId(entry) === id);
+    if (!saved || saved.occurredAt !== occurredAt || !sameEvent(saved, event)) {
+      return failure("EVENT_ID_CONFLICT", "eventId");
+    }
+    return { ok: true, value: saved };
+  }
+  if (activity.status === "completed" && event.kind !== "memberTransfer") {
+    return failure("ACTIVITY_COMPLETED", "activityId");
+  }
+  if (event.kind === "expense") {
+    const invalid = validateSplitSnapshot(event.expense);
+    if (invalid) return invalid;
+  }
+
+  const ordered = orderedTimeline(history, await readExpenseRevisions(transaction, activityId));
+  const next = ordered.findIndex((entry) => entry.occurredAt > occurredAt);
+  const index = next === -1 ? ordered.length : next;
+  const timeline = [...ordered.slice(0, index), event, ...ordered.slice(index)];
+  const balances = calculateBalances(activity.currency, activity.memberIds, [], timeline);
+  if (!balances.ok) return balances;
+
+  const saved = await insertEvent(transaction, activity, occurredAt, event);
+  return { ok: true, value: saved };
+}
+
+/** Requires an existing write transaction. A caller-owned receipt handles retries. */
+export async function insertNewExpenseInTransaction(
+  transaction: SQLiteConnection, activityId: string, occurredAt: number, expense: FinanceExpense,
+): Promise<Result<StoredExpense>> {
+  const result = await recordInTransaction(transaction, activityId, occurredAt, { kind: "expense", expense }, false);
+  if (!result.ok) return result;
+  if (result.value.kind !== "expense") throw new Error("Expected a stored expense");
+  return { ok: true, value: result.value };
+}
+
 export function createFinanceRepository(database: LocalDatabase) {
   function readLedger<T>(
     activityId: string,
@@ -317,49 +372,7 @@ export function createFinanceRepository(database: LocalDatabase) {
   }
 
   function record(activityId: string, occurredAt: number, event: FinanceEvent): Promise<Result<StoredFinanceEvent>> {
-    const id = eventId(event);
-    if (typeof id !== "string" || id.trim() === "") {
-      return Promise.resolve(event.kind === "expense"
-        ? failure("INVALID_EXPENSE_ID", "expenseId") : failure("INVALID_EVENT_ID", "eventId"));
-    }
-    if (!Number.isSafeInteger(occurredAt) || occurredAt < 0) {
-      return Promise.resolve(failure("INVALID_EVENT_TIME", "occurredAt"));
-    }
-
-    return withStorage(() => database.write(async (transaction) => {
-      const existing = await transaction.getFirstAsync<{ activityId: string }>(
-        "SELECT activity_id AS activityId FROM financial_events WHERE id = ?", id,
-      );
-      if (existing && existing.activityId !== activityId) return failure("EVENT_ID_CONFLICT", "eventId");
-
-      const activity = await readActivity(transaction, activityId);
-      if (!activity) return failure("ACTIVITY_NOT_FOUND", "activityId");
-      const history = await readEvents(transaction, activity);
-      if (existing) {
-        const saved = history.find((entry) => eventId(entry) === id);
-        if (!saved || saved.occurredAt !== occurredAt || !sameEvent(saved, event)) {
-          return failure("EVENT_ID_CONFLICT", "eventId");
-        }
-        return { ok: true, value: saved };
-      }
-      if (activity.status === "completed" && event.kind !== "memberTransfer") {
-        return failure("ACTIVITY_COMPLETED", "activityId");
-      }
-      if (event.kind === "expense") {
-        const invalid = validateSplitSnapshot(event.expense);
-        if (invalid) return invalid;
-      }
-
-      const ordered = orderedTimeline(history, await readExpenseRevisions(transaction, activityId));
-      const next = ordered.findIndex((entry) => entry.occurredAt > occurredAt);
-      const index = next === -1 ? ordered.length : next;
-      const timeline = [...ordered.slice(0, index), event, ...ordered.slice(index)];
-      const balances = calculateBalances(activity.currency, activity.memberIds, [], timeline);
-      if (!balances.ok) return balances;
-
-      const saved = await insertEvent(transaction, activity, occurredAt, event);
-      return { ok: true, value: saved };
-    }));
+    return withStorage(() => database.write((transaction) => recordInTransaction(transaction, activityId, occurredAt, event)));
   }
 
   function previewCorrection(

@@ -50,7 +50,13 @@ export type DomainErrorCode =
   | "INVALID_QUICK_RECORD_ID"
   | "QUICK_RECORD_ID_CONFLICT"
   | "STALE_QUICK_DRAFT"
-  | "QUICK_STORAGE_ERROR";
+  | "QUICK_STORAGE_ERROR"
+  | "QUICK_HISTORY_NOT_FOUND"
+  | "QUICK_HISTORY_ALREADY_CONVERTED"
+  | "INVALID_CONVERSION_ID"
+  | "CONVERSION_REQUEST_CONFLICT"
+  | "INVALID_MEMBER_MAPPING"
+  | "QUICK_CONVERSION_STORAGE_ERROR";
 
 type ErrorField =
   | "currency"
@@ -85,7 +91,9 @@ type ErrorField =
   | "expectedVersion"
   | "reviewedRefundIds"
   | "quickInput"
-  | "quickRecordId";
+  | "quickRecordId"
+  | "conversionRequestId"
+  | "memberMapping";
 
 export type Failure = {
   readonly ok: false;

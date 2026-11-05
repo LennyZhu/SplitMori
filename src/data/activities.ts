@@ -46,6 +46,13 @@ function selectMembers(connection: Pick<SQLiteConnection, "getAllAsync">, activi
   `, activityId);
 }
 
+export async function readActivityDetail(
+  connection: Pick<SQLiteConnection, "getFirstAsync" | "getAllAsync">, id: string,
+): Promise<ActivityDetail | null> {
+  const activity = await selectActivity(connection, id);
+  return activity ? { ...activity, members: await selectMembers(connection, id) } : null;
+}
+
 async function insertMember(
   transaction: SQLiteConnection, activityId: string, input: NewMember, position: number, createdAt: number,
 ): Promise<ActivityMember> {
@@ -111,10 +118,7 @@ export function createActivityRepository(database: LocalDatabase) {
     },
 
     getActivity(id: string): Promise<ActivityDetail | null> {
-      return database.read(async (connection) => {
-        const activity = await selectActivity(connection, id);
-        return activity ? { ...activity, members: await selectMembers(connection, id) } : null;
-      });
+      return database.read((connection) => readActivityDetail(connection, id));
     },
 
     renameActivity(id: string, name: string): Promise<Activity> {

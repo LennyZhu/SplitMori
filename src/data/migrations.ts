@@ -186,4 +186,15 @@ export const migrations = [
 
   CREATE INDEX quick_history_saved_order ON quick_history(created_at DESC, id);
   `,
+  `
+  CREATE TABLE quick_split_conversions (
+    request_id TEXT NOT NULL PRIMARY KEY CHECK (length(trim(request_id)) > 0),
+    history_id TEXT NOT NULL UNIQUE CHECK (length(trim(history_id)) > 0),
+    activity_id TEXT NOT NULL,
+    expense_id TEXT NOT NULL UNIQUE,
+    request_json TEXT NOT NULL,
+    receipt_json TEXT NOT NULL,
+    FOREIGN KEY (activity_id, expense_id) REFERENCES expenses(activity_id, id) ON DELETE RESTRICT
+  ) STRICT;
+  `,
 ] as const;

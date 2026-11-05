@@ -10,6 +10,7 @@ import { createFinanceRepository } from "../src/data/finance.ts";
 import { migrations } from "../src/data/migrations.ts";
 import { createQuickSplitRepository } from "../src/data/quickSplits.ts";
 import { splitEqual } from "../src/domain/split.ts";
+import { createQuickSplitConversionService } from "../src/services/quickSplitConversion.ts";
 
 // Exercises the production SQL against a real file with Node's SQLite adapter.
 function openTestConnection(path) {
@@ -42,7 +43,7 @@ test("activity/member writes survive closing and reopening SQLite", withTestFile
   try {
     const database = await initializeDatabase(connection);
     const repository = createActivityRepository(database);
-    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 4);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 5);
     assert.equal((await connection.getFirstAsync("PRAGMA journal_mode")).journal_mode, "wal");
     assert.equal((await connection.getFirstAsync("PRAGMA foreign_keys")).foreign_keys, 1);
 
@@ -69,7 +70,7 @@ test("activity/member writes survive closing and reopening SQLite", withTestFile
     connection.close();
     connection = openTestConnection(path);
     const reopened = createActivityRepository(await initializeDatabase(connection));
-    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 4);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 5);
     assert.deepEqual((await reopened.listActivities()).map(({ id }) => id), ["dinner"]);
     const saved = await reopened.getActivity("dinner");
     assert.equal(saved.name, "Friday dinner");
@@ -167,7 +168,7 @@ test("forward migrations preserve v1 activities and a saved expense survives reo
     connection.close();
     connection = openTestConnection(path);
     const reopened = createFinanceRepository(await initializeDatabase(connection));
-    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 4);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 5);
     assert.deepEqual(valueOf(await reopened.listExpenses("trip")), [{ ...saved, currentVersion: 1 }]);
     assert.deepEqual(valueOf(await reopened.getExpense("trip", "dinner")), { ...saved, currentVersion: 1, refunds: [] });
   } finally {
@@ -382,7 +383,7 @@ test("v2 expenses form version one and corrected history survives reopening SQLi
     connection.close();
     connection = openTestConnection(path);
     const reopened = createFinanceRepository(await initializeDatabase(connection));
-    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 4);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 5);
     assert.deepEqual(valueOf(await reopened.listExpenseRevisions("trip", "dinner")), [baseline, revised]);
     const ledger = valueOf(await reopened.getActivityLedger("trip"));
     assert.deepEqual(ledger.balanceSnapshot.balances.map(({ netBalanceMinor }) => netBalanceMinor), [-2000, 2000]);
@@ -449,7 +450,7 @@ test("v4 quick snapshots retain members, rounding and draft inputs after reopeni
     connection.close();
     connection = openTestConnection(path);
     const reopened = createQuickSplitRepository(await initializeDatabase(connection));
-    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 4);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 5);
     assert.deepEqual(valueOf(await reopened.getQuickDraft()), draft);
     assert.deepEqual(valueOf(await reopened.getQuickHistory("history")), saved);
     assert.equal(saved.input.members[0].displayName, "Alex");
@@ -521,4 +522,124 @@ test("quick history with a payer creates suggestions without writing to the acti
   assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
   valueOf(await quick.deleteQuickHistory("dinner"));
   assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
+}));
+
+function conversionRequest(overrides = {}) {
+  return {
+    requestId: "convert-1", historyId: "history", activityId: "trip", occurredAt: 100,
+    memberMapping: [{ quickMemberId: "z", activityMemberId: "a" }, { quickMemberId: "a", activityMemberId: "z" }],
+    merchantPayment: { memberId: "z", currency: "HKD", amountMinor: 10_001 },
+    ...overrides,
+  };
+}
+
+test("conversion maps saved amounts by ID and keeps the original calculation and history", withFinance(async (finance, _activities, database) => {
+  const quick = createQuickSplitRepository(database);
+  const input = quickInput();
+  input.members[1].displayName = input.members[0].displayName;
+  const history = valueOf(await quick.saveQuickHistory("history", input));
+  const service = createQuickSplitConversionService(database);
+  const receipt = valueOf(await service.convertQuickHistory(conversionRequest()));
+
+  assert.equal(receipt.event.expense.id, "quick-conversion:convert-1");
+  assert.deepEqual(receipt.event.expense.split.allocations, [
+    { memberId: "z", amountMinor: 5000 }, { memberId: "a", amountMinor: 5001 },
+  ]);
+  assert.deepEqual(receipt.source.split, history.snapshot.split);
+  assert.deepEqual(receipt.source.input, history.input);
+  assert.deepEqual(valueOf(await quick.getQuickHistory("history")), history);
+  assert.deepEqual(valueOf(await finance.listEvents("trip")), [receipt.event]);
+  assert.deepEqual(valueOf(await finance.getActivityLedger("trip")).suggestions,
+    [{ fromMemberId: "a", toMemberId: "z", currency: "HKD", amountMinor: 5001 }]);
+}));
+
+test("conversion requires explicit actual payment matching the saved total", withFinance(async (finance, _activities, database) => {
+  const quick = createQuickSplitRepository(database);
+  valueOf(await quick.saveQuickHistory("history", { ...quickInput(), merchantPayerId: "a" }));
+  const service = createQuickSplitConversionService(database);
+  assert.deepEqual((await service.convertQuickHistory(conversionRequest({ merchantPayment: undefined }))).error,
+    { code: "MISSING_MERCHANT_PAYMENT", field: "merchantPayment" });
+  const request = conversionRequest();
+  assert.deepEqual((await service.convertQuickHistory({ ...request, merchantPayment: { ...request.merchantPayment, amountMinor: 10_000 } })).error,
+    { code: "TOTAL_MISMATCH", field: "merchantPayment" });
+  assert.deepEqual(valueOf(await finance.listEvents("trip")), []);
+}));
+
+test("conversion rejects incomplete or merged mappings, wrong currency and completed activities", withFinance(async (finance, activities, database) => {
+  const quick = createQuickSplitRepository(database);
+  valueOf(await quick.saveQuickHistory("history", quickInput()));
+  const service = createQuickSplitConversionService(database);
+  for (const memberMapping of [
+    [{ quickMemberId: "a", activityMemberId: "z" }],
+    [{ quickMemberId: "a", activityMemberId: "z" }, { quickMemberId: "z", activityMemberId: "z" }],
+    [{ quickMemberId: "a", activityMemberId: "z" }, { quickMemberId: "z", activityMemberId: "missing" }],
+  ]) {
+    assert.deepEqual((await service.convertQuickHistory(conversionRequest({ memberMapping }))).error,
+      { code: "INVALID_MEMBER_MAPPING", field: "memberMapping" });
+  }
+  await activities.createActivity({ id: "yen", name: "Yen trip", currency: "JPY", members: [{ id: "j", displayName: "Jo" }] });
+  assert.deepEqual((await service.convertQuickHistory(conversionRequest({ activityId: "yen" }))).error,
+    { code: "CURRENCY_MISMATCH", field: "currency" });
+  await activities.completeActivity("trip");
+  assert.deepEqual((await service.convertQuickHistory(conversionRequest())).error,
+    { code: "ACTIVITY_COMPLETED", field: "activityId" });
+  assert.deepEqual(valueOf(await finance.listEvents("trip")), []);
+  assert.deepEqual(valueOf(await finance.listEvents("yen")), []);
+}));
+
+test("conversion retries remain idempotent after deleting history and never double-post", withFinance(async (finance, _activities, database) => {
+  const quick = createQuickSplitRepository(database);
+  valueOf(await quick.saveQuickHistory("history", quickInput()));
+  const service = createQuickSplitConversionService(database);
+  const request = conversionRequest();
+  const [first, retry] = await Promise.all([
+    service.convertQuickHistory(request),
+    service.convertQuickHistory({ ...request, memberMapping: [...request.memberMapping].reverse() }),
+  ]);
+  const receipt = valueOf(first);
+  assert.deepEqual(valueOf(retry), receipt);
+  assert.deepEqual((await service.convertQuickHistory({ ...request, occurredAt: 101 })).error,
+    { code: "CONVERSION_REQUEST_CONFLICT", field: "conversionRequestId" });
+  assert.equal(valueOf(await quick.deleteQuickHistory("history")), true);
+  assert.equal(valueOf(await quick.getQuickHistory("history")), null);
+  assert.deepEqual(valueOf(await service.convertQuickHistory(request)), receipt);
+  assert.deepEqual((await service.convertQuickHistory({ ...request, requestId: "other" })).error,
+    { code: "QUICK_HISTORY_ALREADY_CONVERTED", field: "quickRecordId" });
+  assert.deepEqual(valueOf(await finance.listEvents("trip")), [receipt.event]);
+}));
+
+test("conversion receipt failure rolls back the event, expense, allocations and payment", withFinance(async (finance, _activities, database, connection) => {
+  const quick = createQuickSplitRepository(database);
+  const history = valueOf(await quick.saveQuickHistory("history", quickInput()));
+  const service = createQuickSplitConversionService(database);
+  await database.write((transaction) => transaction.execAsync(`
+    CREATE TRIGGER reject_conversion_receipt BEFORE INSERT ON quick_split_conversions
+    BEGIN SELECT RAISE(ABORT, 'test conversion receipt failure'); END;
+  `));
+  const request = conversionRequest();
+  assert.deepEqual((await service.convertQuickHistory(request)).error,
+    { code: "QUICK_CONVERSION_STORAGE_ERROR", field: "storage" });
+  for (const table of ["financial_events", "expenses", "expense_allocations", "merchant_payments", "quick_split_conversions"]) {
+    assert.equal((await connection.getFirstAsync(`SELECT COUNT(*) AS count FROM ${table}`)).count, 0);
+  }
+  assert.deepEqual(valueOf(await quick.getQuickHistory("history")), history);
+  await database.write((transaction) => transaction.execAsync("DROP TRIGGER reject_conversion_receipt"));
+  const saved = valueOf(await service.convertQuickHistory(request));
+  assert.deepEqual(valueOf(await finance.listEvents("trip")), [saved.event]);
+}));
+
+test("conversion rejects a missing or nonconserving saved snapshot", withFinance(async (finance, _activities, database) => {
+  const service = createQuickSplitConversionService(database);
+  assert.deepEqual((await service.convertQuickHistory(conversionRequest())).error,
+    { code: "QUICK_HISTORY_NOT_FOUND", field: "quickRecordId" });
+  const quick = createQuickSplitRepository(database);
+  const history = valueOf(await quick.saveQuickHistory("history", quickInput()));
+  const broken = structuredClone(history.snapshot);
+  broken.split.allocations[0].amountMinor -= 1;
+  await database.write((transaction) => transaction.runAsync(
+    "UPDATE quick_history SET result_json = ? WHERE id = ?", JSON.stringify(broken), history.id,
+  ));
+  assert.deepEqual((await service.convertQuickHistory(conversionRequest())).error,
+    { code: "TOTAL_MISMATCH", field: "allocations" });
+  assert.deepEqual(valueOf(await finance.listEvents("trip")), []);
 }));
