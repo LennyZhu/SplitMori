@@ -10,9 +10,20 @@ export type DomainErrorCode =
   | "HOST_NOT_PARTICIPATING"
   | "INVALID_PERCENTAGE"
   | "COVER_EXCEEDS_TOTAL"
-  | "NO_REMAINDER_PARTICIPANTS";
+  | "NO_REMAINDER_PARTICIPANTS"
+  | "MEMBER_NOT_PARTICIPATING"
+  | "TOTAL_MISMATCH";
 
-type ErrorField = "currency" | "amount" | "total" | "memberIds" | "hostId" | "cover";
+type ErrorField =
+  | "currency"
+  | "amount"
+  | "total"
+  | "memberIds"
+  | "hostId"
+  | "cover"
+  | "personalSpending"
+  | "sharedAmount"
+  | "sharedMemberIds";
 
 export type Failure = {
   readonly ok: false;

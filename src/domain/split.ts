@@ -40,15 +40,43 @@ export type SplitResult = {
       };
 };
 
-function validateMemberIds(memberIds: readonly string[]): Failure | undefined {
-  if (memberIds.length === 0) return failure("NO_PARTICIPANTS", "memberIds");
+export type PersonalSpending = {
+  readonly memberId: string;
+  readonly personalMinor: number;
+};
+
+export type SharedSpending = {
+  readonly amountMinor: number;
+  readonly memberIds: readonly string[];
+};
+
+export type IndividualSplitResult = {
+  readonly total: Money;
+  readonly allocations: readonly (Allocation & {
+    readonly personalMinor: number;
+    readonly sharedMinor: number;
+  })[];
+  readonly allocationVersion: 1;
+  readonly explanation: {
+    readonly kind: "individual";
+    readonly sharedTotalMinor: number;
+    readonly sharedMemberIds: readonly string[];
+    readonly sharedSplit: EqualBreakdown;
+  };
+};
+
+function validateMemberIds(
+  memberIds: readonly string[],
+  field: "memberIds" | "sharedMemberIds" = "memberIds",
+): Failure | undefined {
+  if (memberIds.length === 0) return failure("NO_PARTICIPANTS", field);
 
   const seen = new Set<string>();
   for (const memberId of memberIds) {
     if (typeof memberId !== "string" || memberId.trim() === "") {
-      return failure("INVALID_MEMBER_ID", "memberIds");
+      return failure("INVALID_MEMBER_ID", field);
     }
-    if (seen.has(memberId)) return failure("DUPLICATE_MEMBER_ID", "memberIds");
+    if (seen.has(memberId)) return failure("DUPLICATE_MEMBER_ID", field);
     seen.add(memberId);
   }
 }
@@ -152,6 +180,66 @@ export function splitTreat(
         remainderMinor,
         includeHostInRemainder,
         remainderSplit: breakdown,
+      },
+    },
+  };
+}
+
+/** Pass one personal amount per member in stable snapshot order, including zero amounts. */
+export function splitIndividual(
+  total: Money,
+  personalSpending: readonly PersonalSpending[],
+  shared: SharedSpending,
+): Result<IndividualSplitResult> {
+  const memberIds = personalSpending.map(({ memberId }) => memberId);
+  const invalid = validateMoney(total, "total")
+    ?? validateMemberIds(memberIds)
+    ?? validateMinorAmount(shared.amountMinor, "sharedAmount");
+  if (invalid) return invalid;
+
+  if (shared.amountMinor > 0 || shared.memberIds.length > 0) {
+    const invalidSharedMembers = validateMemberIds(shared.memberIds, "sharedMemberIds");
+    if (invalidSharedMembers) return invalidSharedMembers;
+  }
+
+  const selected = new Set(shared.memberIds);
+  const sharedMemberIds = memberIds.filter((memberId) => selected.has(memberId));
+  if (sharedMemberIds.length !== selected.size) {
+    return failure("MEMBER_NOT_PARTICIPATING", "sharedMemberIds");
+  }
+
+  let spendingTotal = BigInt(shared.amountMinor);
+  for (const { personalMinor } of personalSpending) {
+    const invalidPersonal = validateMinorAmount(personalMinor, "personalSpending");
+    if (invalidPersonal) return invalidPersonal;
+    spendingTotal += BigInt(personalMinor);
+  }
+
+  const { currency, amountMinor } = total;
+  if (spendingTotal > BigInt(Number.MAX_SAFE_INTEGER)) return failure("AMOUNT_OVERFLOW", "total");
+  if (spendingTotal !== BigInt(amountMinor)) return failure("TOTAL_MISMATCH", "total");
+
+  const { allocations: sharedAllocations, breakdown } = allocateEvenly(
+    shared.amountMinor,
+    sharedMemberIds,
+  );
+  const sharedByMember = new Map(sharedAllocations.map((share) => [share.memberId, share.amountMinor]));
+  const allocations = personalSpending.map(({ memberId, personalMinor }) => {
+    const sharedMinor = sharedByMember.get(memberId) ?? 0;
+    return { memberId, personalMinor, sharedMinor, amountMinor: personalMinor + sharedMinor };
+  });
+
+  return {
+    ok: true,
+    value: {
+      total: { currency, amountMinor },
+      allocations,
+      allocationVersion: 1,
+      explanation: {
+        kind: "individual",
+        sharedTotalMinor: shared.amountMinor,
+        sharedMemberIds,
+        sharedSplit: breakdown,
       },
     },
   };

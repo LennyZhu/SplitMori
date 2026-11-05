@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { formatAmount, parseAmount } from "../src/domain/money.ts";
-import { splitEqual, splitTreat } from "../src/domain/split.ts";
+import { splitEqual, splitIndividual, splitTreat } from "../src/domain/split.ts";
 
 function valueOf(result) {
   assert.equal(result.ok, true, JSON.stringify(result));
@@ -93,4 +93,80 @@ test("treat rejects over-cover or an unallocated remainder and allows a fully co
   assert.equal(splitTreat(bill, ["host"], fixed).error.code, "NO_REMAINDER_PARTICIPANTS");
   const fullCover = { ...fixed, cover: { kind: "percentage", basisPoints: 10_000 } };
   assertShares(splitTreat(bill, ["host"], fullCover), [bill.amountMinor], bill);
+});
+
+test("individual spending adds each member's share of the HKD common expense", () => {
+  const total = valueOf(parseAmount("700", "HKD"));
+  const spending = [
+    { memberId: "a", personalMinor: 20_000 },
+    { memberId: "b", personalMinor: 12_000 },
+    { memberId: "c", personalMinor: 8_000 },
+  ];
+  const shared = { amountMinor: 30_000, memberIds: ["a", "b", "c"] };
+  const value = assertShares(splitIndividual(total, spending, shared), [30_000, 22_000, 18_000], total);
+  assert.deepEqual(value.allocations, [
+    { memberId: "a", personalMinor: 20_000, sharedMinor: 10_000, amountMinor: 30_000 },
+    { memberId: "b", personalMinor: 12_000, sharedMinor: 10_000, amountMinor: 22_000 },
+    { memberId: "c", personalMinor: 8_000, sharedMinor: 10_000, amountMinor: 18_000 },
+  ]);
+});
+
+test("the JPY common expense is split among selected members in snapshot order", () => {
+  const total = { currency: "JPY", amountMinor: 35 };
+  const spending = [
+    { memberId: "c", personalMinor: 10 },
+    { memberId: "a", personalMinor: 20 },
+    { memberId: "b", personalMinor: 0 },
+  ];
+  const shared = { amountMinor: 5, memberIds: ["b", "c"] };
+  const result = splitIndividual(total, spending, shared);
+  const value = assertShares(result, [13, 20, 2], total);
+  assert.deepEqual(value.allocations.map(({ sharedMinor }) => sharedMinor), [3, 0, 2]);
+  assert.deepEqual(value.explanation, {
+    kind: "individual",
+    sharedTotalMinor: 5,
+    sharedMemberIds: ["c", "b"],
+    sharedSplit: { baseMinor: 2, extraMinorUnits: 1 },
+  });
+  assert.deepEqual(splitIndividual(total, spending, { ...shared, memberIds: ["c", "b"] }), result);
+});
+
+test("personal spending can cover the whole bill with no common expense", () => {
+  const total = { currency: "USD", amountMinor: 1275 };
+  const spending = [{ memberId: "a", personalMinor: 1275 }];
+  const value = assertShares(splitIndividual(total, spending, { amountMinor: 0, memberIds: [] }), [1275], total);
+  assert.equal(value.allocations[0].sharedMinor, 0);
+});
+
+test("individual splitting rejects invalid amounts, cumulative overflow and a mismatched bill", () => {
+  const total = { currency: "JPY", amountMinor: 20 };
+  const spending = [{ memberId: "a", personalMinor: 10 }];
+  const shared = { amountMinor: 1, memberIds: ["a"] };
+  assert.deepEqual(splitIndividual(total, spending, shared).error, { code: "TOTAL_MISMATCH", field: "total" });
+  assert.deepEqual(splitIndividual(total, spending, { ...shared, amountMinor: 1.5 }).error, {
+    code: "INVALID_AMOUNT", field: "sharedAmount",
+  });
+  assert.deepEqual(splitIndividual(total, [{ memberId: "a", personalMinor: -1 }], shared).error, {
+    code: "NEGATIVE_AMOUNT", field: "personalSpending",
+  });
+  const max = { ...total, amountMinor: Number.MAX_SAFE_INTEGER };
+  assert.deepEqual(splitIndividual(max, [{ memberId: "a", personalMinor: max.amountMinor }], shared).error, {
+    code: "AMOUNT_OVERFLOW", field: "total",
+  });
+});
+
+test("individual splitting rejects missing, duplicate and unknown members for the common expense", () => {
+  const total = { currency: "HKD", amountMinor: 20 };
+  const spending = [{ memberId: "a", personalMinor: 10 }];
+  for (const [memberIds, code] of [
+    [[], "NO_PARTICIPANTS"],
+    [["a", "a"], "DUPLICATE_MEMBER_ID"],
+    [["b"], "MEMBER_NOT_PARTICIPATING"],
+  ]) {
+    const result = splitIndividual(total, spending, { amountMinor: 10, memberIds });
+    assert.deepEqual(result.error, { code, field: "sharedMemberIds" });
+  }
+  assert.deepEqual(splitIndividual(total, [...spending, ...spending], { amountMinor: 0, memberIds: [] }).error, {
+    code: "DUPLICATE_MEMBER_ID", field: "memberIds",
+  });
 });
