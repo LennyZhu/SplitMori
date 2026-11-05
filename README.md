@@ -1,19 +1,26 @@
 # SplitMori
 
-**SplitMori** — 聚餐 AA、請客分攤與多人活動結算 App。
+SplitMori — 聚餐 AA、請客分攤與多人活動結算 App。
 
-本仓库目前处于 **PRD / 产品设计阶段**。尚未初始化 App 工程、开发应用功能或配置线上/商店资源。
+> **阶段：需求冻结（PRD v1.0），尚未开始应用开发。** 本仓库当前用于保存产品决策和需求文档。
 
-## 当前文档
+## 产品方向
 
-- `docs/PRD_v0.7_Master.md` — 唯一现行需求主文档。
-- `docs/Decisions_v0.7.md` — 用户已确认的产品决策及剩余事项。
-- `docs/Codex_Handoff_v0.7_Not_Started.md` — 后续开发交接规划；**不代表已经授权执行**。
+- 聚餐优先，兼顾旅行/多人费用。
+- iOS / iPhone first · 繁體中文（香港） / English。
+- Local-First，无账号、无后端；基础 Free + 一次性买断 Lifetime Pro。
+- Free 无限快速试算/手动保存，**一个进行中活动**，活动内费用笔数无限。
+- 免费单人请客、基础消费分摊、基础服务费/优惠、真实商家退款、基础 PNG 和整库备份恢复。
+- Pro：多位请客者、逐项消费、自定义分账、同笔多人向商家付款、多个进行中活动、高级分享与费用分配。
 
-## 已确认的核心方向
+## 现行文档
 
-- iOS / iPhone 优先，繁體中文（香港）及英文；Local-First。
-- Free 无限快速 AA、一个进行中活动且支出笔数无限；Pro 一次性买断。
-- 一笔费用只使用一种主分账模式；基本真实商家退款和基础备份对 Free 开放。
+- [`docs/PRD_v1.0_Master.md`](docs/PRD_v1.0_Master.md)：**唯一现行主 PRD**（F01–F22 核心规则已冻结，完整 S00–S13 页面及测试矩阵）。
+- [`docs/Decisions_v1.0.md`](docs/Decisions_v1.0.md)：已确认决策与变更管理、仍需处理的发布参数。
+- [`docs/Codex_Handoff_v1.0_NOT_STARTED.md`](docs/Codex_Handoff_v1.0_NOT_STARTED.md)：未来分阶段交接和验收规范，**不代表已获授权开发**。
 
-**下一步**：确认主 PRD 第 16 节高优先级事项，审核主要页面与结算引擎的验收用例，再冻结开发需求。
+旧版 PRD 可以留在 `docs/` 用于历史追溯，但已过时条款以 v1.0 为准。
+
+## 开发状态
+
+App 工程、Expo、数据库、购买商品、EAS、签名均尚未初始化。需产品负责人明确授权后才启动 Codex 的首个独立阶段。
