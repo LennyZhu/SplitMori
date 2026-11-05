@@ -25,7 +25,9 @@ export type MemberTransfer = Money & {
   readonly toMemberId: string;
 };
 
-export type BalanceEvent = MerchantRefund | MemberTransfer | {
+export type ExpenseRevisionEvent = { readonly kind: "expenseRevision"; readonly expense: Expense };
+
+export type BalanceEvent = MerchantRefund | MemberTransfer | ExpenseRevisionEvent | {
   readonly kind: "expense";
   readonly expense: Expense;
 };
@@ -66,7 +68,9 @@ type MemberTotals = {
 
 type ExpenseTotals = {
   readonly gross: bigint;
+  readonly payerId: string;
   readonly remainingAllocations: Map<string, bigint>;
+  readonly refunds: MerchantRefund[];
   refunded: bigint;
 };
 
@@ -121,7 +125,10 @@ function applyExpense(
   if (allocatedTotal !== gross) return failure("TOTAL_MISMATCH", "allocations");
 
   payer.merchantPaid += BigInt(merchantPayment.amountMinor);
-  return { ok: true, value: { gross, remainingAllocations, refunded: 0n } };
+  return {
+    ok: true,
+    value: { gross, payerId: merchantPayment.memberId, remainingAllocations, refunds: [], refunded: 0n },
+  };
 }
 
 function applyRefund(
@@ -160,7 +167,21 @@ function applyRefund(
   if (reductionTotal !== amount) return failure("TOTAL_MISMATCH", "refundReductions");
 
   expense.refunded += amount;
+  expense.refunds.push(refund);
   recipient.refundReceived += amount;
+}
+
+function carryRefundsForward(
+  members: ReadonlyMap<string, MemberTotals>, expenses: ReadonlyMap<string, ExpenseTotals>, previous: ExpenseTotals,
+): Failure | undefined {
+  // Remove the old effective expense and reapply its refunds to the replacement shares.
+  members.get(previous.payerId)!.merchantPaid -= previous.gross;
+  for (const [memberId, share] of previous.remainingAllocations) members.get(memberId)!.allocated -= share;
+  for (const refund of previous.refunds) {
+    members.get(refund.recipientId)!.refundReceived -= BigInt(refund.amountMinor);
+    const invalid = applyRefund(members, expenses, refund);
+    if (invalid) return invalid;
+  }
 }
 
 function applyTransfer(members: ReadonlyMap<string, MemberTotals>, transfer: MemberTransfer): Failure | undefined {
@@ -215,15 +236,21 @@ export function calculateBalances(
     ...(events ?? []),
   ];
   for (const event of timeline) {
-    if (event?.kind === "expense") {
+    if (event?.kind === "expense" || event?.kind === "expenseRevision") {
       const { id } = event.expense;
       if (typeof id !== "string" || id.trim() === "") return failure("INVALID_EXPENSE_ID", "expenseId");
-      if (expenseTotals.has(id)) return failure("DUPLICATE_EXPENSE_ID", "expenseId");
+      const previous = expenseTotals.get(id);
+      if (previous && event.kind === "expense") return failure("DUPLICATE_EXPENSE_ID", "expenseId");
+      if (!previous && event.kind === "expenseRevision") return failure("EXPENSE_NOT_FOUND", "expenseId");
       const result = applyExpense(currency, members, event.expense);
       if (!result.ok) return result;
-      activityTotal += result.value.gross;
+      activityTotal += result.value.gross - (previous?.gross ?? 0n);
       if (activityTotal > maxMinor) return failure("AMOUNT_OVERFLOW", "total");
       expenseTotals.set(id, result.value);
+      if (previous) {
+        const invalid = carryRefundsForward(members, expenseTotals, previous);
+        if (invalid) return invalid;
+      }
       continue;
     }
     if (event?.kind !== "merchantRefund" && event?.kind !== "memberTransfer") {

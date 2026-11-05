@@ -40,7 +40,12 @@ export type DomainErrorCode =
   | "EVENT_ID_CONFLICT"
   | "INVALID_EVENT_TIME"
   | "INVALID_SPLIT_SNAPSHOT"
-  | "FINANCE_STORAGE_ERROR";
+  | "FINANCE_STORAGE_ERROR"
+  | "INVALID_REVISION_ID"
+  | "REVISION_ID_CONFLICT"
+  | "EXPENSE_VERSION_CONFLICT"
+  | "REVISION_OUT_OF_ORDER"
+  | "REFUND_REVIEW_REQUIRED";
 
 type ErrorField =
   | "currency"
@@ -70,7 +75,10 @@ type ErrorField =
   | "shares"
   | "activityId"
   | "occurredAt"
-  | "storage";
+  | "storage"
+  | "revisionId"
+  | "expectedVersion"
+  | "reviewedRefundIds";
 
 export type Failure = {
   readonly ok: false;

@@ -111,4 +111,58 @@ export const migrations = [
     FOREIGN KEY (activity_id, to_member_id) REFERENCES activity_members(activity_id, member_id) ON DELETE RESTRICT
   ) STRICT;
   `,
+  `
+  CREATE TABLE expense_revisions (
+    sequence INTEGER PRIMARY KEY CHECK (sequence BETWEEN 1 AND 9007199254740991),
+    id TEXT NOT NULL UNIQUE CHECK (length(trim(id)) > 0),
+    activity_id TEXT NOT NULL,
+    expense_id TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version BETWEEN 2 AND 9007199254740991),
+    occurred_at INTEGER NOT NULL CHECK (occurred_at BETWEEN 0 AND 9007199254740991),
+    currency TEXT NOT NULL,
+    amount_minor INTEGER NOT NULL CHECK (amount_minor BETWEEN 0 AND 9007199254740991),
+    split_mode TEXT NOT NULL CHECK (split_mode IN ('equal', 'treat', 'individual', 'custom')),
+    allocation_version INTEGER NOT NULL CHECK (allocation_version BETWEEN 1 AND 9007199254740991),
+    payer_id TEXT NOT NULL,
+    paid_minor INTEGER NOT NULL CHECK (paid_minor = amount_minor),
+    reviewed_refund_ids TEXT NOT NULL,
+    UNIQUE (expense_id, version),
+    UNIQUE (activity_id, id),
+    FOREIGN KEY (activity_id, expense_id) REFERENCES expenses(activity_id, id) ON DELETE RESTRICT,
+    FOREIGN KEY (activity_id, currency) REFERENCES activities(id, currency) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY (activity_id, payer_id) REFERENCES activity_members(activity_id, member_id) ON DELETE RESTRICT
+  ) STRICT;
+
+  CREATE INDEX expense_revisions_timeline ON expense_revisions(activity_id, occurred_at, sequence);
+
+  CREATE TABLE expense_revision_allocations (
+    activity_id TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    member_id TEXT NOT NULL,
+    amount_minor INTEGER NOT NULL CHECK (amount_minor BETWEEN 0 AND 9007199254740991),
+    position INTEGER NOT NULL CHECK (position BETWEEN 0 AND 9007199254740991),
+    PRIMARY KEY (revision_id, member_id),
+    UNIQUE (revision_id, position),
+    FOREIGN KEY (activity_id, revision_id) REFERENCES expense_revisions(activity_id, id) ON DELETE RESTRICT,
+    FOREIGN KEY (activity_id, member_id) REFERENCES activity_members(activity_id, member_id) ON DELETE RESTRICT
+  ) STRICT;
+
+  -- A refund can reduce a share introduced by a revision. The ledger checks the share at the event's position.
+  CREATE TABLE refund_reductions_v3 (
+    activity_id TEXT NOT NULL,
+    expense_id TEXT NOT NULL,
+    refund_id TEXT NOT NULL,
+    member_id TEXT NOT NULL,
+    amount_minor INTEGER NOT NULL CHECK (amount_minor BETWEEN 0 AND 9007199254740991),
+    PRIMARY KEY (refund_id, member_id),
+    FOREIGN KEY (activity_id, expense_id, refund_id)
+      REFERENCES merchant_refunds(activity_id, expense_id, id) ON DELETE RESTRICT,
+    FOREIGN KEY (activity_id, member_id) REFERENCES activity_members(activity_id, member_id) ON DELETE RESTRICT
+  ) STRICT;
+
+  INSERT INTO refund_reductions_v3 (activity_id, expense_id, refund_id, member_id, amount_minor)
+  SELECT activity_id, expense_id, refund_id, member_id, amount_minor FROM refund_reductions;
+  DROP TABLE refund_reductions;
+  ALTER TABLE refund_reductions_v3 RENAME TO refund_reductions;
+  `,
 ] as const;

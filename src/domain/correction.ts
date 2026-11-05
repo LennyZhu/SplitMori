@@ -1,6 +1,6 @@
 import {
   calculateBalances, type ActivityEventBalances, type BalanceEvent, type Expense,
-  type MemberEventBalance, type MerchantRefund,
+  type MerchantRefund,
 } from "./balance.ts";
 import type { Currency } from "./money.ts";
 import { failure, type Result } from "./result.ts";
@@ -67,48 +67,32 @@ export function previewExpenseCorrection(
 
   const expenseId = original.id;
   let current = expenses.find((expense) => expense.id === expenseId);
-  const revisedEvents: BalanceEvent[] = [];
   const refunds: MerchantRefund[] = [];
   for (const event of events) {
-    if (event.kind === "memberTransfer") continue;
-    if (event.kind === "expense" && event.expense.id === expenseId) {
+    if ((event.kind === "expense" || event.kind === "expenseRevision") && event.expense.id === expenseId) {
       current = event.expense;
-      revisedEvents.push({ ...event, expense: proposed });
-    } else {
-      revisedEvents.push(event);
-      if (event.kind === "merchantRefund" && event.expenseId === expenseId) refunds.push(event);
     }
+    if (event.kind === "merchantRefund" && event.expenseId === expenseId) refunds.push(event);
   }
   if (!current) return failure("EXPENSE_NOT_FOUND", "expenseId");
   if (!matchesSnapshot(current, original)) return failure("EXPENSE_SNAPSHOT_MISMATCH", "expenseId");
 
-  const revisedExpenses = expenses.map((expense) => expense.id === expenseId ? proposed : expense);
-  const revised = calculateBalances(currency, memberIds, revisedExpenses, revisedEvents);
-  if (!revised.ok) return revised;
+  const after = calculateBalances(currency, memberIds, expenses, [...events, { kind: "expenseRevision", expense: proposed }]);
+  if (!after.ok) return after;
 
-  // Transfers were validated against the original timeline. Carry their net effects over exactly once.
-  const balances: MemberEventBalance[] = [];
   const memberChanges: MemberBalanceChange[] = [];
-  for (const [index, balance] of revised.value.balances.entries()) {
-    const { netBalanceMinor: beforeNetBalanceMinor, transferSentMinor, transferReceivedMinor } =
-      before.value.balances[index];
-    const net = BigInt(balance.netBalanceMinor) + BigInt(transferSentMinor) - BigInt(transferReceivedMinor);
-    const delta = net - BigInt(beforeNetBalanceMinor);
-    if (net < -maxMinor || net > maxMinor || delta < -maxMinor || delta > maxMinor) {
+  for (const [index, { memberId, netBalanceMinor: afterNetBalanceMinor }] of after.value.balances.entries()) {
+    const { netBalanceMinor: beforeNetBalanceMinor } = before.value.balances[index];
+    const delta = BigInt(afterNetBalanceMinor) - BigInt(beforeNetBalanceMinor);
+    if (delta < -maxMinor || delta > maxMinor) {
       return failure("AMOUNT_OVERFLOW", "netBalanceMinor");
     }
-
-    const afterNetBalanceMinor = Number(net);
-    balances.push({
-      ...balance, transferSentMinor, transferReceivedMinor, netBalanceMinor: afterNetBalanceMinor,
-    });
     memberChanges.push({
-      memberId: balance.memberId, beforeNetBalanceMinor, afterNetBalanceMinor, deltaMinor: Number(delta),
+      memberId, beforeNetBalanceMinor, afterNetBalanceMinor, deltaMinor: Number(delta),
     });
   }
 
-  const after = { ...revised.value, balances };
-  const suggestions = suggestTransfers(after);
+  const suggestions = suggestTransfers(after.value);
   if (!suggestions.ok) return suggestions;
 
   return {
@@ -116,7 +100,7 @@ export function previewExpenseCorrection(
     value: {
       expense: { before: current, after: proposed, refunds },
       before: before.value,
-      after,
+      after: after.value,
       memberChanges,
       suggestions: suggestions.value,
     },
