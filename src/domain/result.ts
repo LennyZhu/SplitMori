@@ -25,7 +25,8 @@ export type DomainErrorCode =
   | "REFUND_EXCEEDS_EXPENSE"
   | "REFUND_REDUCTION_EXCEEDS_ALLOCATION"
   | "SELF_TRANSFER"
-  | "TRANSFER_EXCEEDS_BALANCE";
+  | "TRANSFER_EXCEEDS_BALANCE"
+  | "UNBALANCED_NET_BALANCES";
 
 type ErrorField =
   | "currency"
@@ -44,7 +45,8 @@ type ErrorField =
   | "eventId"
   | "merchantRefund"
   | "refundReductions"
-  | "memberTransfer";
+  | "memberTransfer"
+  | "netBalanceMinor";
 
 export type Failure = {
   readonly ok: false;

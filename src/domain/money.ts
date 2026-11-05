@@ -19,7 +19,8 @@ type AmountField =
   | "allocations"
   | "merchantRefund"
   | "refundReductions"
-  | "memberTransfer";
+  | "memberTransfer"
+  | "netBalanceMinor";
 
 export function isCurrency(currency: unknown): currency is Currency {
   return typeof currency === "string" && Object.prototype.hasOwnProperty.call(minorDigits, currency);

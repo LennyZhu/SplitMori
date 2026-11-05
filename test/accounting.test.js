@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { calculateBalances } from "../src/domain/balance.ts";
 import { formatAmount, parseAmount } from "../src/domain/money.ts";
+import { suggestTransfers } from "../src/domain/settlement.ts";
 import { splitEqual, splitIndividual, splitTreat } from "../src/domain/split.ts";
 
 function valueOf(result) {
@@ -438,4 +439,91 @@ test("a later expense is applied after an earlier repayment in the supplied sequ
     calculateBalances("HKD", memberIds, [expense], [transfer, { kind: "expense", expense: later }]),
     [-5000, 5000],
   );
+});
+
+test("one merchant payer receives direct suggestions from every debtor", () => {
+  const memberIds = ["e", "b", "a", "d", "c"];
+  const total = { currency: "HKD", amountMinor: 100_000 };
+  const expense = {
+    id: "dinner",
+    split: valueOf(splitEqual(total, memberIds)),
+    merchantPayment: { memberId: "a", ...total },
+  };
+  const balances = valueOf(calculateBalances("HKD", [...memberIds, "idle"], [expense]));
+  const original = structuredClone(balances);
+
+  assert.deepEqual(valueOf(suggestTransfers(balances)), ["b", "c", "d", "e"].map((fromMemberId) => ({
+    fromMemberId,
+    toMemberId: "a",
+    currency: "HKD",
+    amountMinor: 20_000,
+  })));
+  assert.deepEqual(balances, original);
+});
+
+test("multiple debtors and creditors match by remaining balance then stable ID", () => {
+  const balances = [
+    { memberId: "d2", netBalanceMinor: -9 },
+    { memberId: "d1", netBalanceMinor: -9 },
+    { memberId: "d3", netBalanceMinor: -4 },
+    { memberId: "c2", netBalanceMinor: 7 },
+    { memberId: "c1", netBalanceMinor: 7 },
+    { memberId: "c3", netBalanceMinor: 5 },
+    { memberId: "c4", netBalanceMinor: 3 },
+  ];
+  const input = { currency: "JPY", balances };
+  const suggestions = valueOf(suggestTransfers(input));
+  assert.deepEqual(suggestions.map(({ fromMemberId, toMemberId, amountMinor }) => [
+    fromMemberId, toMemberId, amountMinor,
+  ]), [
+    ["d1", "c1", 7],
+    ["d2", "c2", 7],
+    ["d3", "c3", 4],
+    ["d1", "c4", 2],
+    ["d2", "c3", 1],
+    ["d2", "c4", 1],
+  ]);
+  assert.deepEqual(valueOf(suggestTransfers({ ...input, balances: [...balances].reverse() })), suggestions);
+
+  const remaining = new Map(balances.map(({ memberId, netBalanceMinor }) => [memberId, netBalanceMinor]));
+  for (const { fromMemberId, toMemberId, amountMinor } of suggestions) {
+    remaining.set(fromMemberId, remaining.get(fromMemberId) + amountMinor);
+    remaining.set(toMemberId, remaining.get(toMemberId) - amountMinor);
+  }
+  assert.ok([...remaining.values()].every((amount) => amount === 0));
+});
+
+test("a fully settled activity returns no suggestions", () => {
+  const { memberIds, expense, transfer } = repaymentFixture();
+  const balances = valueOf(calculateBalances("HKD", memberIds, [expense], [transfer]));
+  assert.deepEqual(valueOf(suggestTransfers(balances)), []);
+});
+
+test("a refund after repayment can produce a suggestion in the opposite direction", () => {
+  const { memberIds, expense, refund, transfer } = repaymentFixture();
+  const balances = valueOf(calculateBalances("HKD", memberIds, [expense], [transfer, refund]));
+  assert.deepEqual(valueOf(suggestTransfers(balances)), [
+    { fromMemberId: "a", toMemberId: "b", currency: "HKD", amountMinor: 1000 },
+  ]);
+});
+
+test("settlement rejects invalid balances, duplicate members and conflicting currencies", () => {
+  const max = Number.MAX_SAFE_INTEGER;
+  const debtor = { memberId: "a", netBalanceMinor: -max };
+  const creditor = { memberId: "b", netBalanceMinor: max };
+  const input = { currency: "JPY", balances: [debtor, creditor] };
+  assert.equal(valueOf(suggestTransfers(input))[0].amountMinor, max);
+
+  for (const [overrides, code, field] of [
+    [{ currency: "EUR" }, "UNSUPPORTED_CURRENCY", "currency"],
+    [{ balances: [debtor, { ...creditor, currency: "HKD" }] }, "CURRENCY_MISMATCH", "currency"],
+    [{ balances: [debtor, { ...creditor, memberId: "a" }] }, "DUPLICATE_MEMBER_ID", "memberIds"],
+    [{ balances: [{ ...debtor, netBalanceMinor: -1.5 }, creditor] }, "INVALID_AMOUNT", "netBalanceMinor"],
+    [{ balances: [{ ...debtor, netBalanceMinor: Infinity }, creditor] }, "INVALID_AMOUNT", "netBalanceMinor"],
+    [{ balances: [{ ...debtor, netBalanceMinor: -(max + 1) }, creditor] }, "AMOUNT_OVERFLOW", "netBalanceMinor"],
+    [{ balances: [creditor, { memberId: "c", netBalanceMinor: 2 }, debtor, { memberId: "d", netBalanceMinor: -1 }] },
+      "UNBALANCED_NET_BALANCES", "netBalanceMinor"],
+  ]) {
+    assert.deepEqual(suggestTransfers({ ...input, ...overrides }).error, { code, field });
+  }
 });
