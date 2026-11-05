@@ -56,7 +56,12 @@ export type DomainErrorCode =
   | "INVALID_CONVERSION_ID"
   | "CONVERSION_REQUEST_CONFLICT"
   | "INVALID_MEMBER_MAPPING"
-  | "QUICK_CONVERSION_STORAGE_ERROR";
+  | "QUICK_CONVERSION_STORAGE_ERROR"
+  | "INVALID_VOID_TARGET"
+  | "EVENT_ALREADY_VOIDED"
+  | "VOID_OUT_OF_ORDER"
+  | "INVALID_VOID_REASON"
+  | "VOID_LEDGER_CONFLICT";
 
 type ErrorField =
   | "currency"
@@ -93,7 +98,9 @@ type ErrorField =
   | "quickInput"
   | "quickRecordId"
   | "conversionRequestId"
-  | "memberMapping";
+  | "memberMapping"
+  | "targetEventId"
+  | "voidReason";
 
 export type Failure = {
   readonly ok: false;

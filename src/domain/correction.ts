@@ -67,12 +67,13 @@ export function previewExpenseCorrection(
 
   const expenseId = original.id;
   let current = expenses.find((expense) => expense.id === expenseId);
-  const refunds: MerchantRefund[] = [];
+  const refunds = new Map<string, MerchantRefund>();
   for (const event of events) {
     if ((event.kind === "expense" || event.kind === "expenseRevision") && event.expense.id === expenseId) {
       current = event.expense;
     }
-    if (event.kind === "merchantRefund" && event.expenseId === expenseId) refunds.push(event);
+    if (event.kind === "merchantRefund" && event.expenseId === expenseId) refunds.set(event.id, event);
+    if (event.kind === "financialVoid" && event.targetKind === "merchantRefund") refunds.delete(event.targetEventId);
   }
   if (!current) return failure("EXPENSE_NOT_FOUND", "expenseId");
   if (!matchesSnapshot(current, original)) return failure("EXPENSE_SNAPSHOT_MISMATCH", "expenseId");
@@ -98,7 +99,7 @@ export function previewExpenseCorrection(
   return {
     ok: true,
     value: {
-      expense: { before: current, after: proposed, refunds },
+      expense: { before: current, after: proposed, refunds: [...refunds.values()] },
       before: before.value,
       after: after.value,
       memberChanges,

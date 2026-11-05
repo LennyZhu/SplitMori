@@ -197,4 +197,22 @@ export const migrations = [
     FOREIGN KEY (activity_id, expense_id) REFERENCES expenses(activity_id, id) ON DELETE RESTRICT
   ) STRICT;
   `,
+  `
+  CREATE UNIQUE INDEX financial_events_void_target ON financial_events(activity_id, id, kind);
+
+  CREATE TABLE financial_voids (
+    sequence INTEGER PRIMARY KEY CHECK (sequence BETWEEN 1 AND 9007199254740991),
+    id TEXT NOT NULL UNIQUE CHECK (length(trim(id)) > 0),
+    activity_id TEXT NOT NULL,
+    target_event_id TEXT NOT NULL UNIQUE,
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('merchantRefund', 'memberTransfer')),
+    occurred_at INTEGER NOT NULL CHECK (occurred_at BETWEEN 0 AND 9007199254740991),
+    reason TEXT,
+    CHECK (id <> target_event_id),
+    FOREIGN KEY (activity_id, target_event_id, target_kind)
+      REFERENCES financial_events(activity_id, id, kind) ON DELETE RESTRICT
+  ) STRICT;
+
+  CREATE INDEX financial_voids_timeline ON financial_voids(activity_id, occurred_at, sequence);
+  `,
 ] as const;

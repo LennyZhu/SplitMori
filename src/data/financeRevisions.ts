@@ -14,10 +14,11 @@ export type ExpenseVersion = {
 
 export type StoredExpenseRevision = ExpenseVersion & { readonly kind: "expenseRevision" };
 
-// Both tables share one insertion order. BEGIN IMMEDIATE serializes allocation of the next number.
+// Ledger entries share one insertion order. BEGIN IMMEDIATE serializes allocation of the next number.
 export const nextFinanceSequence = `(
   SELECT MAX(COALESCE((SELECT MAX(sequence) FROM financial_events), 0),
-             COALESCE((SELECT MAX(sequence) FROM expense_revisions), 0)) + 1
+             COALESCE((SELECT MAX(sequence) FROM expense_revisions), 0),
+             COALESCE((SELECT MAX(sequence) FROM financial_voids), 0)) + 1
 )`;
 
 type RevisionRow = {

@@ -27,7 +27,14 @@ export type MemberTransfer = Money & {
 
 export type ExpenseRevisionEvent = { readonly kind: "expenseRevision"; readonly expense: Expense };
 
-export type BalanceEvent = MerchantRefund | MemberTransfer | ExpenseRevisionEvent | {
+export type FinancialVoid = {
+  readonly kind: "financialVoid";
+  readonly id: string;
+  readonly targetEventId: string;
+  readonly targetKind: "merchantRefund" | "memberTransfer";
+};
+
+export type BalanceEvent = MerchantRefund | MemberTransfer | ExpenseRevisionEvent | FinancialVoid | {
   readonly kind: "expense";
   readonly expense: Expense;
 };
@@ -202,6 +209,40 @@ function applyTransfer(members: ReadonlyMap<string, MemberTotals>, transfer: Mem
   recipient.transferReceived += amount;
 }
 
+function reverseEvent(
+  members: ReadonlyMap<string, MemberTotals>, expenses: ReadonlyMap<string, ExpenseTotals>,
+  target: MerchantRefund | MemberTransfer,
+): Failure | undefined {
+  const amount = BigInt(target.amountMinor);
+  if (target.kind === "memberTransfer") {
+    const sender = members.get(target.fromMemberId)!;
+    const recipient = members.get(target.toMemberId)!;
+    if (sender.transferSent < amount || recipient.transferReceived < amount) {
+      return failure("VOID_LEDGER_CONFLICT", "targetEventId");
+    }
+    sender.transferSent -= amount;
+    recipient.transferReceived -= amount;
+    return;
+  }
+
+  const expense = expenses.get(target.expenseId);
+  const recipient = members.get(target.recipientId)!;
+  const refundIndex = expense?.refunds.findIndex(({ id }) => id === target.id) ?? -1;
+  if (!expense || refundIndex === -1 || expense.refunded < amount || recipient.refundReceived < amount) {
+    return failure("VOID_LEDGER_CONFLICT", "targetEventId");
+  }
+  for (const { memberId, amountMinor } of target.reductions) {
+    const remaining = expense.remainingAllocations.get(memberId);
+    if (remaining === undefined) return failure("VOID_LEDGER_CONFLICT", "targetEventId");
+    const restored = BigInt(amountMinor);
+    expense.remainingAllocations.set(memberId, remaining + restored);
+    members.get(memberId)!.allocated += restored;
+  }
+  expense.refunds.splice(refundIndex, 1);
+  expense.refunded -= amount;
+  recipient.refundReceived -= amount;
+}
+
 export function calculateBalances(
   currency: Currency,
   memberIds: readonly string[],
@@ -229,6 +270,8 @@ export function calculateBalances(
   }]));
   const expenseTotals = new Map<string, ExpenseTotals>();
   const eventIds = new Set<string>();
+  const recordedEvents = new Map<string, MerchantRefund | MemberTransfer>();
+  const voidedIds = new Set<string>();
   let activityTotal = 0n;
 
   const timeline: readonly BalanceEvent[] = [
@@ -253,12 +296,21 @@ export function calculateBalances(
       }
       continue;
     }
-    if (event?.kind !== "merchantRefund" && event?.kind !== "memberTransfer") {
+    if (event?.kind !== "merchantRefund" && event?.kind !== "memberTransfer" && event?.kind !== "financialVoid") {
       return failure("INVALID_EVENT_TYPE", "events");
     }
     if (typeof event.id !== "string" || event.id.trim() === "") return failure("INVALID_EVENT_ID", "eventId");
     if (eventIds.has(event.id)) return failure("DUPLICATE_EVENT_ID", "eventId");
     eventIds.add(event.id);
+    if (event.kind === "financialVoid") {
+      const target = recordedEvents.get(event.targetEventId);
+      if (!target || target.kind !== event.targetKind) return failure("INVALID_VOID_TARGET", "targetEventId");
+      if (voidedIds.has(target.id)) return failure("EVENT_ALREADY_VOIDED", "targetEventId");
+      const invalid = reverseEvent(members, expenseTotals, target);
+      if (invalid) return invalid;
+      voidedIds.add(target.id);
+      continue;
+    }
     const invalidAmount = validateMoney(event, event.kind);
     if (invalidAmount) return invalidAmount;
     if (event.currency !== currency) return failure("CURRENCY_MISMATCH", event.kind);
@@ -268,6 +320,7 @@ export function calculateBalances(
       ? applyRefund(members, expenseTotals, event)
       : applyTransfer(members, event);
     if (invalidEvent) return invalidEvent;
+    recordedEvents.set(event.id, event);
   }
 
   const balances: MemberBalance[] = [];
