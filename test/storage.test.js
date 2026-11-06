@@ -15,8 +15,10 @@ import { createDatabaseHost, databaseName, restoreFiles } from "../src/data/data
 import { createFinanceRepository } from "../src/data/finance.ts";
 import { migrations } from "../src/data/migrations.ts";
 import { createQuickSplitRepository } from "../src/data/quickSplits.ts";
+import { calculateQuickSplit } from "../src/domain/quickSplit.ts";
 import { splitEqual } from "../src/domain/split.ts";
 import { createBackupService, inspectBackupDatabase, inspectStandaloneBackup } from "../src/services/backup.ts";
+import { createQuickHistorySave } from "../src/services/quickHistorySave.ts";
 import { createQuickSplitConversionService } from "../src/services/quickSplitConversion.ts";
 import { createRestoreService } from "../src/services/restore.ts";
 
@@ -542,6 +544,36 @@ test("quick history with a payer creates suggestions without writing to the acti
   assert.deepEqual(saved.snapshot.suggestions, [{ fromMemberId: "a", toMemberId: "z", currency: "HKD", amountMinor: 5000 }]);
   assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
   valueOf(await quick.deleteQuickHistory("dinner"));
+  assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
+}));
+
+test("quick result save can retry a failed write and coalesces repeated presses", withFinance(async (finance, _activities, database, connection) => {
+  const quick = createQuickSplitRepository(database);
+  const input = quickInput();
+  const snapshot = valueOf(calculateQuickSplit(input));
+  const before = valueOf(await finance.getActivityLedger("trip"));
+  const attempts = [];
+  const save = createQuickHistorySave("result-1", input, (id, value) => {
+    attempts.push(id);
+    return quick.saveQuickHistory(id, value);
+  });
+
+  await connection.execAsync(`
+    CREATE TEMP TRIGGER reject_history BEFORE INSERT ON quick_history
+    BEGIN SELECT RAISE(ABORT, 'history write failed'); END;
+  `);
+  assert.deepEqual(await save(), { ok: false, error: { code: "QUICK_STORAGE_ERROR", field: "storage" } });
+  assert.deepEqual(valueOf(await quick.listQuickHistory()), []);
+  await connection.execAsync("DROP TRIGGER reject_history");
+
+  const [first, repeated] = await Promise.all([save(), save()]);
+  const saved = valueOf(first);
+  assert.deepEqual(valueOf(repeated), saved);
+  assert.deepEqual(valueOf(await save()), saved);
+  assert.deepEqual(attempts, ["result-1", "result-1"]);
+  assert.deepEqual(saved.input, input);
+  assert.deepEqual(saved.snapshot, snapshot);
+  assert.deepEqual(valueOf(await quick.listQuickHistory()), [saved]);
   assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
 }));
 

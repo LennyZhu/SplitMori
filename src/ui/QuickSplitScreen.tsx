@@ -108,9 +108,10 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-export function QuickSplitScreen({ onBack, onResult }: {
+export function QuickSplitScreen({ onBack, onResult, focusPayer }: {
   onBack: () => void;
   onResult: (result: QuickSplitPreview) => void;
+  focusPayer?: boolean;
 }) {
   const { editor, updateEditor, loading, error: draftError, retry, discard, discarding } = useQuickSplitDraft();
   const [validation, setValidation] = useState<EditorError>();
@@ -139,6 +140,12 @@ export function QuickSplitScreen({ onBack, onResult }: {
     const subscription = Keyboard.addListener("keyboardDidShow", revealFocusedInput);
     return () => subscription.remove();
   }, [revealFocusedInput, showCurrencies]);
+
+  useEffect(() => {
+    if (!focusPayer || !editable) return;
+    const frame = requestAnimationFrame(() => scroll.current?.scrollToEnd({ animated: false }));
+    return () => cancelAnimationFrame(frame);
+  }, [editable, focusPayer]);
 
   function onInputFocus() {
     if (Platform.OS === "ios" && Keyboard.isVisible()) requestAnimationFrame(revealFocusedInput);

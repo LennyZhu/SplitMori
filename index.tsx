@@ -4,6 +4,7 @@ import { BackHandler, Pressable, StatusBar, StyleSheet, Text, View } from "react
 import { initialWindowMetrics, SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import type { QuickSplitPreview } from "./src/services/quickSplitEditor.ts";
 import { HomeScreen } from "./src/ui/HomeScreen.tsx";
+import { QuickSplitResultScreen } from "./src/ui/QuickSplitResultScreen.tsx";
 import { QuickSplitScreen } from "./src/ui/QuickSplitScreen.tsx";
 import { colors, Icon, type IconName } from "./src/ui/visuals.tsx";
 
@@ -15,10 +16,17 @@ const tabs = [
 
 type Tab = typeof tabs[number]["name"];
 
+const tabColors = {
+  shell: "#FFFFFFF0",
+  border: "#E8E8E8",
+  selectedBackground: "#F0F0F0",
+  selected: "#202020",
+  unselected: "#898989",
+} as const;
+
 const placeholderTitles = {
   activities: "活動",
   records: "記錄",
-  quickResult: "分帳結果",
   createActivity: "建立活動",
   activityDetails: "活動詳情",
   quickHistory: "快速計算記錄",
@@ -28,15 +36,15 @@ const placeholderTitles = {
 type Destination = keyof typeof placeholderTitles;
 type Route =
   | { name: Tab | "createActivity" | "settings" }
-  | { name: "quickSplit" }
+  | { name: "quickSplit"; focusPayer?: boolean }
   | { name: "quickResult"; result: QuickSplitPreview }
   | { name: "activityDetails"; id: string; title: string }
   | { name: "quickHistory"; id: string };
 
 function TabBar({ active, onSelect }: { active: Tab; onSelect: (tab: Tab) => void }) {
   return (
-    <SafeAreaView edges={["bottom", "left", "right"]} style={styles.tabSurface}>
-      <View accessibilityRole="tablist" style={styles.tabBar}>
+    <SafeAreaView edges={["bottom", "left", "right"]} style={styles.tabDock}>
+      <View accessibilityRole="tablist" style={styles.tabCapsule}>
         {tabs.map(({ name, title, icon }) => {
           const selected = active === name;
           return (
@@ -45,10 +53,10 @@ function TabBar({ active, onSelect }: { active: Tab; onSelect: (tab: Tab) => voi
               accessibilityRole="tab"
               accessibilityState={{ selected }}
               onPress={() => onSelect(name)}
-              style={({ pressed }) => [styles.tab, pressed && styles.pressed]}
+              style={({ pressed }) => [styles.tab, selected && styles.selectedTab, pressed && styles.pressed]}
             >
-              <Icon name={icon} size={26} filled={selected} color={selected ? colors.accent : colors.muted} />
-              <Text style={[styles.tabText, selected && styles.selectedText]}>{title}</Text>
+              <Icon name={icon} size={26} filled={selected} color={selected ? tabColors.selected : tabColors.unselected} />
+              <Text style={[styles.tabText, selected && styles.selectedTabText]}>{title}</Text>
             </Pressable>
           );
         })}
@@ -57,15 +65,15 @@ function TabBar({ active, onSelect }: { active: Tab; onSelect: (tab: Tab) => voi
   );
 }
 
-function Placeholder({ name, context, onBack, backLabel = "返回首頁" }: {
-  name: Destination; context?: string; onBack?: () => void; backLabel?: string;
+function Placeholder({ name, context, onBack }: {
+  name: Destination; context?: string; onBack?: () => void;
 }) {
   return (
     <View style={styles.placeholder}>
       {onBack && (
         <Pressable accessibilityRole="button" onPress={onBack} style={({ pressed }) => [styles.back, pressed && styles.pressed]}>
           <Icon name="back" size={20} color={colors.accentText} />
-          <Text style={styles.selectedText}>{backLabel}</Text>
+          <Text style={styles.selectedText}>返回首頁</Text>
         </Pressable>
       )}
       <Text accessibilityRole="header" style={styles.placeholderTitle}>{placeholderTitles[name]}</Text>
@@ -114,10 +122,15 @@ function App() {
               <QuickSplitScreen
                 onBack={() => setRoute({ name: "home" })}
                 onResult={(result) => setRoute({ name: "quickResult", result })}
+                focusPayer={route.name === "quickSplit" && route.focusPayer}
               />
             </View>
             {isQuickResult && (
-              <Placeholder name="quickResult" backLabel="返回編輯" onBack={() => setRoute({ name: "quickSplit" })} />
+              <QuickSplitResultScreen
+                preview={route.result}
+                onBack={() => setRoute({ name: "quickSplit" })}
+                onAddPayer={() => setRoute({ name: "quickSplit", focusPayer: true })}
+              />
             )}
           </>
         ) : (
@@ -138,10 +151,19 @@ const styles = StyleSheet.create({
   app: { flex: 1, backgroundColor: colors.page },
   main: { flex: 1 },
   hidden: { display: "none" },
-  tabSurface: { backgroundColor: colors.page, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
-  tabBar: { width: "100%", maxWidth: 620, alignSelf: "center", flexDirection: "row", paddingTop: 6, paddingBottom: 3 },
-  tab: { flex: 1, minHeight: 57, paddingVertical: 5, paddingHorizontal: 4, alignItems: "center", justifyContent: "center", gap: 4 },
-  tabText: { color: colors.muted, fontSize: 14 },
+  tabDock: { paddingHorizontal: 24, paddingTop: 8, paddingBottom: 10 },
+  tabCapsule: {
+    width: "100%", maxWidth: 480, alignSelf: "center", flexDirection: "row", gap: 4, padding: 5,
+    backgroundColor: tabColors.shell, borderColor: tabColors.border, borderWidth: 1, borderRadius: 999,
+    boxShadow: "0 4px 14px rgba(32, 32, 32, 0.10)",
+  },
+  tab: {
+    flex: 1, minHeight: 57, minWidth: 44, paddingVertical: 5, paddingHorizontal: 4, borderRadius: 999,
+    alignItems: "center", justifyContent: "center", gap: 4,
+  },
+  selectedTab: { backgroundColor: tabColors.selectedBackground },
+  tabText: { color: tabColors.unselected, fontSize: 14, textAlign: "center" },
+  selectedTabText: { color: tabColors.selected, fontWeight: "600" },
   selectedText: { color: colors.accentText, fontWeight: "600" },
   pressed: { opacity: 0.65 },
   placeholder: { width: "100%", maxWidth: 620, alignSelf: "center", paddingHorizontal: 26, paddingTop: 18, gap: 10 },
