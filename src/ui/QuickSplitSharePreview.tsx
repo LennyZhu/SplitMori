@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, type ComponentRef } from "react";
+import { useLayoutEffect, useRef, useState, type ComponentRef } from "react";
 import { ActivityIndicator, PixelRatio, ScrollView, StyleSheet, Text, View, type LayoutChangeEvent } from "react-native";
 import type { QuickSplitShareCard } from "../services/quickSplitShare.ts";
 import { shareQuickSplitPng, type ShareOutcome } from "../services/shareQuickSplitPng.ts";
@@ -20,14 +20,25 @@ export function QuickSplitSharePreview({ card, onFinish }: {
   const active = useRef(false);
   const started = useRef(false);
   const frame = useRef<number>(undefined);
+  const [phase, setPhase] = useState<"generating" | "sharing">("generating");
+  const previewReady = useRef<() => void>(undefined);
 
   useLayoutEffect(() => {
     active.current = true;
     return () => {
       active.current = false;
       if (frame.current !== undefined) cancelAnimationFrame(frame.current);
+      previewReady.current?.();
     };
   }, []);
+
+  useLayoutEffect(() => {
+    if (phase === "sharing") {
+      // Commit the static preview before asking iOS to present its share sheet.
+      previewReady.current?.();
+      previewReady.current = undefined;
+    }
+  }, [phase]);
 
   function onCardLayout({ nativeEvent: { layout } }: LayoutChangeEvent) {
     if (started.current || layout.width <= 0 || layout.height <= 0) return;
@@ -46,7 +57,10 @@ export function QuickSplitSharePreview({ card, onFinish }: {
         onFinish("capture-failed");
         return;
       }
-      void shareQuickSplitPng(view, () => active.current).then((outcome) => {
+      void shareQuickSplitPng(view, () => active.current, () => new Promise<void>((resolve) => {
+        previewReady.current = resolve;
+        setPhase("sharing");
+      })).then((outcome) => {
         if (active.current) onFinish(outcome);
       });
     });
@@ -54,10 +68,12 @@ export function QuickSplitSharePreview({ card, onFinish }: {
 
   return (
     <View style={[StyleSheet.absoluteFill, styles.preview]} accessibilityViewIsModal>
-      <View style={styles.loading}>
-        <ActivityIndicator color={colors.ink} />
-        <Text accessibilityLiveRegion="polite" style={styles.caption}>正在準備分享圖片…</Text>
-      </View>
+      {phase === "generating" && (
+        <View style={styles.loading}>
+          <ActivityIndicator color={colors.ink} />
+          <Text accessibilityLiveRegion="polite" style={styles.caption}>正在準備分享圖片…</Text>
+        </View>
+      )}
       <ScrollView style={styles.scroll} removeClippedSubviews={false}>
         <View ref={target} onLayout={onCardLayout} collapsable={false} style={styles.card}>
           <View style={styles.summary}>

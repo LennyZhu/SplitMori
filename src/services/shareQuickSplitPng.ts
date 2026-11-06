@@ -29,7 +29,11 @@ function cleanOldShares(directory: Directory) {
   }
 }
 
-export async function shareQuickSplitPng(view: ComponentRef<typeof View>, isCurrent: () => boolean): Promise<ShareOutcome> {
+export async function shareQuickSplitPng(
+  view: ComponentRef<typeof View>,
+  isCurrent: () => boolean,
+  beforePresent: () => Promise<void>,
+): Promise<ShareOutcome> {
   let capture: string | undefined;
   let file: File | undefined;
   let presenting = false;
@@ -49,6 +53,9 @@ export async function shareQuickSplitPng(view: ComponentRef<typeof View>, isCurr
     file = new File(directory, `SplitMori-${uuid.v4()}.png`);
     await new File(uri).copy(file, { overwrite: false });
     if (!file.exists || file.size === 0) return "capture-failed";
+    if (!isCurrent()) return "closed";
+
+    await beforePresent();
     if (!isCurrent()) return "closed";
 
     presenting = true;
