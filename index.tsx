@@ -2,7 +2,9 @@ import { registerRootComponent } from "expo";
 import { useEffect, useState } from "react";
 import { BackHandler, Pressable, StatusBar, StyleSheet, Text, View } from "react-native";
 import { initialWindowMetrics, SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import type { QuickSplitPreview } from "./src/services/quickSplitEditor.ts";
 import { HomeScreen } from "./src/ui/HomeScreen.tsx";
+import { QuickSplitScreen } from "./src/ui/QuickSplitScreen.tsx";
 import { colors, Icon, type IconName } from "./src/ui/visuals.tsx";
 
 const tabs = [
@@ -16,7 +18,7 @@ type Tab = typeof tabs[number]["name"];
 const placeholderTitles = {
   activities: "活動",
   records: "記錄",
-  quickSplit: "快速分帳",
+  quickResult: "分帳結果",
   createActivity: "建立活動",
   activityDetails: "活動詳情",
   quickHistory: "快速計算記錄",
@@ -25,7 +27,9 @@ const placeholderTitles = {
 
 type Destination = keyof typeof placeholderTitles;
 type Route =
-  | { name: Tab | "quickSplit" | "createActivity" | "settings" }
+  | { name: Tab | "createActivity" | "settings" }
+  | { name: "quickSplit" }
+  | { name: "quickResult"; result: QuickSplitPreview }
   | { name: "activityDetails"; id: string; title: string }
   | { name: "quickHistory"; id: string };
 
@@ -53,13 +57,15 @@ function TabBar({ active, onSelect }: { active: Tab; onSelect: (tab: Tab) => voi
   );
 }
 
-function Placeholder({ name, context, onBack }: { name: Destination; context?: string; onBack?: () => void }) {
+function Placeholder({ name, context, onBack, backLabel = "返回首頁" }: {
+  name: Destination; context?: string; onBack?: () => void; backLabel?: string;
+}) {
   return (
     <View style={styles.placeholder}>
       {onBack && (
         <Pressable accessibilityRole="button" onPress={onBack} style={({ pressed }) => [styles.back, pressed && styles.pressed]}>
           <Icon name="back" size={20} color={colors.accentText} />
-          <Text style={styles.selectedText}>返回首頁</Text>
+          <Text style={styles.selectedText}>{backLabel}</Text>
         </Pressable>
       )}
       <Text accessibilityRole="header" style={styles.placeholderTitle}>{placeholderTitles[name]}</Text>
@@ -72,17 +78,19 @@ function Placeholder({ name, context, onBack }: { name: Destination; context?: s
 function App() {
   const [route, setRoute] = useState<Route>({ name: "home" });
   const isHome = route.name === "home";
+  const inQuickSplit = route.name === "quickSplit" || route.name === "quickResult";
+  const isQuickResult = route.name === "quickResult";
   const activeTab = tabs.find((tab) => tab.name === route.name)?.name;
   const detailId = "id" in route ? route.id : undefined;
 
   useEffect(() => {
     if (isHome) return;
     const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
-      setRoute({ name: "home" });
+      setRoute(isQuickResult ? { name: "quickSplit" } : { name: "home" });
       return true;
     });
     return () => subscription.remove();
-  }, [isHome]);
+  }, [isHome, isQuickResult]);
 
   return (
     <SafeAreaProvider initialMetrics={initialWindowMetrics} style={styles.app}>
@@ -100,6 +108,18 @@ function App() {
               ? { name: "activityDetails", id: record.id, title: record.name }
               : { name: "quickHistory", id: record.id })}
           />
+        ) : inQuickSplit ? (
+          <>
+            <View style={isQuickResult ? styles.hidden : styles.main}>
+              <QuickSplitScreen
+                onBack={() => setRoute({ name: "home" })}
+                onResult={(result) => setRoute({ name: "quickResult", result })}
+              />
+            </View>
+            {isQuickResult && (
+              <Placeholder name="quickResult" backLabel="返回編輯" onBack={() => setRoute({ name: "quickSplit" })} />
+            )}
+          </>
         ) : (
           <Placeholder
             key={detailId === undefined ? route.name : `${route.name}:${detailId}`}
@@ -117,6 +137,7 @@ function App() {
 const styles = StyleSheet.create({
   app: { flex: 1, backgroundColor: colors.page },
   main: { flex: 1 },
+  hidden: { display: "none" },
   tabSurface: { backgroundColor: colors.page, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
   tabBar: { width: "100%", maxWidth: 620, alignSelf: "center", flexDirection: "row", paddingTop: 6, paddingBottom: 3 },
   tab: { flex: 1, minHeight: 57, paddingVertical: 5, paddingHorizontal: 4, alignItems: "center", justifyContent: "center", gap: 4 },

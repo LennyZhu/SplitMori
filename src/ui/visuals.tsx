@@ -29,6 +29,13 @@ const paths = {
   receipt: "M5 3h14v18l-3.5-2-3.5 2-3.5-2L5 21V3Zm4 5h6m-6 4h6",
   activity: "M4 7h16a1.5 1.5 0 0 1 1.5 1.5v10A1.5 1.5 0 0 1 20 20H4a1.5 1.5 0 0 1-1.5-1.5v-10A1.5 1.5 0 0 1 4 7Zm4 0V4h8v3M7 7v13M17 7v13",
   clock: "M12 7v5l3.5 2",
+  equalSplit: "M11 3a9 9 0 1 0 10 10H11ZM14 3v7h7a9 9 0 0 0-7-7Z",
+  treatSplit: "M3 10h18v10H3ZM2 7h20v3H2Zm10 0v13m0-13C6 7 6 2 9 3c1.5.5 2.5 2.5 3 4Zm0 0c6 0 6-5 3-4-1.5.5-2.5 2.5-3 4Z",
+  individualSplit: "M3 5h3m3 0h12M3 12h3m3 0h12M3 19h3m3 0h12",
+  customSplit: "M4 6h16M4 12h16M4 18h16M8 3v6m8 0v6m-6 0v6",
+  minus: "M5 12h14",
+  down: "m6 9 6 6 6-6",
+  check: "m5 12 4 4L19 6",
 } as const;
 
 export type IconName = keyof typeof paths;
