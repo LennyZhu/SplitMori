@@ -65,7 +65,7 @@ function ActionButton({ label, onPress, primary = false }: { label: string; onPr
       onPress={onPress}
       style={({ pressed }) => [styles.action, primary ? styles.primary : styles.secondary, pressed && styles.pressed]}
     >
-      <Icon name="plus" color={primary ? colors.white : colors.accentText} size={23} />
+      <Icon name="plus" color={primary ? colors.onPrimary : colors.ink} size={23} />
       <Text style={[styles.actionText, primary && styles.primaryText]}>{label}</Text>
     </Pressable>
   );
@@ -127,7 +127,7 @@ function RecentRow({ record, onPress }: { record: HomeRecentRecord; onPress: () 
           {currencySymbols[total.currency]} {amount}
         </Text>
       </View>
-      <Icon name="next" color={colors.accentText} size={15} />
+      <Icon name="next" color={colors.muted} size={15} />
     </Pressable>
   );
 }
@@ -250,10 +250,10 @@ const styles = StyleSheet.create({
     minHeight: 54, borderRadius: 16, paddingHorizontal: 16, paddingVertical: 12,
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10,
   },
-  primary: { backgroundColor: colors.charcoal, minHeight: 56 },
-  secondary: { backgroundColor: colors.quiet, borderWidth: 1, borderColor: colors.outline },
-  actionText: { color: colors.charcoal, fontSize: 19, fontWeight: "600", flexShrink: 1 },
-  primaryText: { color: colors.white },
+  primary: { backgroundColor: colors.primary, minHeight: 56 },
+  secondary: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line },
+  actionText: { color: colors.ink, fontSize: 19, fontWeight: "600", flexShrink: 1 },
+  primaryText: { color: colors.onPrimary },
   pressed: { opacity: 0.65 },
   section: { marginTop: 26 },
   sectionHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, minHeight: 44 },
@@ -267,7 +267,7 @@ const styles = StyleSheet.create({
   activityCard: {
     minHeight: 136, justifyContent: "space-between", padding: 15, borderRadius: 18,
     borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface,
-    boxShadow: "0 4px 12px rgba(74, 47, 27, 0.07)",
+    boxShadow: `0 4px 12px ${colors.shadow}`,
   },
   activityMain: { flexDirection: "row", alignItems: "flex-start", gap: 12 },
   tile: { width: 44, height: 44, borderRadius: 12, backgroundColor: colors.tile, alignItems: "center", justifyContent: "center" },
@@ -286,7 +286,7 @@ const styles = StyleSheet.create({
   dot: { width: 7, height: 7, borderRadius: 4, backgroundColor: colors.accent },
   outstanding: { color: colors.accentText, fontSize: 14, fontWeight: "600" },
   emptyActivity: {
-    minHeight: 226, backgroundColor: colors.quiet, borderColor: colors.line, borderWidth: 1, borderRadius: 18,
+    minHeight: 226, backgroundColor: colors.surface, borderColor: colors.line, borderWidth: 1, borderRadius: 18,
     paddingHorizontal: 20, paddingVertical: 18, alignItems: "center", justifyContent: "center",
   },
   emptyTitle: { color: colors.ink, fontSize: 19, fontWeight: "700", textAlign: "center", marginTop: 9 },

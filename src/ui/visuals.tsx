@@ -1,18 +1,21 @@
 import Svg, { Circle, G, Path, Rect } from "react-native-svg";
 
+const ink = "#282828";
+const white = "#FFFFFF";
+
 export const colors = {
-  page: "#F9F5F1",
-  surface: "#FFF8F2",
-  quiet: "#F7EFE7",
-  tile: "#F1E5D9",
-  line: "#E8DED6",
-  outline: "#DECEC0",
-  ink: "#171411",
-  charcoal: "#2B2622",
-  muted: "#615953",
-  accent: "#A8734B",
-  accentText: "#79492B",
-  white: "#FFFFFF",
+  page: "#FDFCFB",
+  surface: white,
+  quiet: "#F7F7F7",
+  tile: "#F0F0EF",
+  line: "#E7E5E2",
+  ink,
+  primary: ink,
+  onPrimary: white,
+  muted: "#575757",
+  accent: "#A58A75",
+  accentText: "#705947",
+  shadow: "rgba(40, 40, 40, 0.07)",
 } as const;
 
 const paths = {
@@ -30,7 +33,7 @@ const paths = {
 
 export type IconName = keyof typeof paths;
 
-export function Icon({ name, color = colors.charcoal, size = 24, filled = false }: {
+export function Icon({ name, color = colors.ink, size = 24, filled = false }: {
   name: IconName;
   color?: string;
   size?: number;
@@ -57,10 +60,10 @@ export function Icon({ name, color = colors.charcoal, size = 24, filled = false 
 export function EmptyActivityMark() {
   return (
     <Svg width={102} height={76} viewBox="0 0 102 76" accessible={false} importantForAccessibility="no">
-      <Rect x={22} y={22} width={64} height={45} rx={11} fill="#E8D8C8" transform="rotate(7 54 45)" />
+      <Rect x={22} y={22} width={64} height={45} rx={11} fill={colors.line} transform="rotate(7 54 45)" />
       <G transform="rotate(-9 40 39)">
-        <Rect x={8} y={11} width={67} height={54} rx={11} fill="#F0E3D6" />
-        <G fill="none" stroke={colors.accentText} strokeWidth={2.2} strokeLinecap="round">
+        <Rect x={8} y={11} width={67} height={54} rx={11} fill={colors.tile} />
+        <G fill="none" stroke={colors.muted} strokeWidth={2.2} strokeLinecap="round">
           <Circle cx={25} cy={31} r={2.3} />
           <Circle cx={25} cy={47} r={2.3} />
           <Path d="M34 31h23M34 47h23" />

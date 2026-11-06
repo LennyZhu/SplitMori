@@ -117,7 +117,7 @@ function App() {
 const styles = StyleSheet.create({
   app: { flex: 1, backgroundColor: colors.page },
   main: { flex: 1 },
-  tabSurface: { backgroundColor: colors.page, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.outline },
+  tabSurface: { backgroundColor: colors.page, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
   tabBar: { width: "100%", maxWidth: 620, alignSelf: "center", flexDirection: "row", paddingTop: 6, paddingBottom: 3 },
   tab: { flex: 1, minHeight: 57, paddingVertical: 5, paddingHorizontal: 4, alignItems: "center", justifyContent: "center", gap: 4 },
   tabText: { color: colors.muted, fontSize: 14 },
