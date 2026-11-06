@@ -9,7 +9,7 @@ import { basename, dirname, join } from "node:path";
 import { backup as sqliteBackup, DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { createActivityRepository } from "../src/data/activities.ts";
+import { ActiveActivityLimitError, createActivityRepository } from "../src/data/activities.ts";
 import { backupSnapshotName, DatabaseInitializationError, initializeDatabase } from "../src/data/database.ts";
 import { createDatabaseHost, databaseName, restoreFiles } from "../src/data/databaseHost.ts";
 import { createFinanceRepository } from "../src/data/finance.ts";
@@ -18,6 +18,7 @@ import { createQuickSplitRepository } from "../src/data/quickSplits.ts";
 import { calculateQuickSplit } from "../src/domain/quickSplit.ts";
 import { splitEqual } from "../src/domain/split.ts";
 import { createBackupService, inspectBackupDatabase, inspectStandaloneBackup } from "../src/services/backup.ts";
+import { loadActivityList } from "../src/services/activityList.ts";
 import { createQuickHistorySave } from "../src/services/quickHistorySave.ts";
 import { createQuickSplitConversionService } from "../src/services/quickSplitConversion.ts";
 import { createRestoreService } from "../src/services/restore.ts";
@@ -630,10 +631,10 @@ test("conversion rejects incomplete or merged mappings, wrong currency and compl
     assert.deepEqual((await service.convertQuickHistory(conversionRequest({ memberMapping }))).error,
       { code: "INVALID_MEMBER_MAPPING", field: "memberMapping" });
   }
+  await activities.completeActivity("trip");
   await activities.createActivity({ id: "yen", name: "Yen trip", currency: "JPY", members: [{ id: "j", displayName: "Jo" }] });
   assert.deepEqual((await service.convertQuickHistory(conversionRequest({ activityId: "yen" }))).error,
     { code: "CURRENCY_MISMATCH", field: "currency" });
-  await activities.completeActivity("trip");
   assert.deepEqual((await service.convertQuickHistory(conversionRequest())).error,
     { code: "ACTIVITY_COMPLETED", field: "activityId" });
   assert.deepEqual(valueOf(await finance.listEvents("trip")), []);
@@ -744,6 +745,7 @@ test("voiding a refund restores revised shares and preserves repayments legal at
 test("void requests are idempotent and reject duplicate, invalid or backdated targets", withFinance(async (finance, activities) => {
   valueOf(await finance.createExpense("trip", 100, expense()));
   valueOf(await finance.recordMemberTransfer("trip", 200, repayment));
+  await activities.completeActivity("trip");
   await activities.createActivity({ id: "other", name: "Other", currency: "HKD", members: [{ id: "c", displayName: "Cy" }] });
   const request = { id: "void-repayment", targetEventId: repayment.id, occurredAt: 200, reason: "Duplicate entry" };
   for (const [result, code, field] of [
@@ -1242,6 +1244,7 @@ test("a failure after switching to the new file rolls back and makes the origina
   directory, live, activities, managed, faults, service, exportSource, prepare,
 }) => {
   const original = [...managed.opened][0];
+  await activities.completeActivity("old");
   await activities.createActivity({
     id: "original-trip", name: "Original trip", currency: "HKD", members: quickInput().members,
   });
@@ -1287,4 +1290,67 @@ test("startup recovers a durable marker when switching and immediate rollback ar
   } finally {
     await restarted.close();
   }
+}));
+
+test("Free creation commits the first activity and leaves no records for a rejected second activity", withTestFile(async (path) => {
+  const connection = openTestConnection(path);
+  try {
+    const activities = createActivityRepository(await initializeDatabase(connection));
+    assert.equal(await activities.getCreationBlocker(), null);
+    const first = await activities.createActivity({
+      id: "first", name: " Weekend dinner ", currency: "HKD", members: [{ id: "m1", displayName: " Sam " }],
+    });
+    assert.equal(first.name, "Weekend dinner");
+    assert.equal(first.members[0].displayName, "Sam");
+    assert.equal(first.status, "active");
+    assert.equal(first.createdAt, first.updatedAt);
+    assert.deepEqual(await activities.getCreationBlocker(), { id: "first", name: "Weekend dinner", activeCount: 1 });
+    await assert.rejects(activities.createActivity({
+      id: "second", name: "Second", currency: "JPY", members: [{ id: "m2", displayName: "Second" }],
+    }), (error) => error instanceof ActiveActivityLimitError && error.blocker.id === "first");
+    assert.equal(await activities.getActivity("second"), null);
+    assert.equal(await connection.getFirstAsync("SELECT id FROM members WHERE id = 'm2'"), null);
+    assert.equal(await connection.getFirstAsync("SELECT activity_id FROM activity_members WHERE activity_id = 'second'"), null);
+  } finally {
+    connection.close();
+  }
+}));
+
+test("concurrent Free requests cannot bypass the active slot and completed activities stay readable", withTestFile(async (path) => {
+  const connection = openTestConnection(path);
+  try {
+    const database = await initializeDatabase(connection);
+    const activities = createActivityRepository(database);
+    const candidate = (id) => ({ id, name: id, currency: "HKD", members: [{ id: `member-${id}`, displayName: id }] });
+    const [first, second] = await Promise.allSettled([
+      activities.createActivity(candidate("a")), createActivityRepository(database).createActivity(candidate("b")),
+    ]);
+    assert.equal(first.status, "fulfilled");
+    assert.equal(second.status, "rejected");
+    assert.ok(second.reason instanceof ActiveActivityLimitError);
+    await activities.completeActivity("a");
+    assert.equal((await activities.createActivity(candidate("b"))).status, "active");
+    await assert.rejects(activities.reopenActivity("a"), ActiveActivityLimitError);
+    assert.equal((await activities.getActivity("a")).status, "completed");
+    assert.equal((await activities.listActivities()).length, 2);
+  } finally {
+    connection.close();
+  }
+}));
+
+test("activity list projects effective totals and outstanding balances for completed activities", withFinance(async (finance, activities, database) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  valueOf(await finance.recordMerchantRefund("trip", 200, refund));
+  await activities.completeActivity("trip");
+  await activities.createActivity({
+    id: "yen", name: "Yen trip", currency: "JPY", members: [{ id: "j", displayName: "Jo" }],
+  });
+  const rows = await loadActivityList(database);
+  const completed = rows.find(({ id }) => id === "trip");
+  assert.equal(completed.status, "completed");
+  assert.deepEqual(completed.total, { currency: "HKD", amountMinor: 8000 });
+  assert.deepEqual([completed.memberCount, completed.expenseCount, completed.hasOutstanding], [2, 1, true]);
+  const active = rows.find(({ id }) => id === "yen");
+  assert.deepEqual(active.total, { currency: "JPY", amountMinor: 0 });
+  assert.deepEqual([active.memberCount, active.expenseCount, active.hasOutstanding], [1, 0, false]);
 }));

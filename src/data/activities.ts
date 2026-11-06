@@ -1,5 +1,5 @@
 import { isCurrency, type Currency } from "../domain/money.ts";
-import type { LocalDatabase, SQLiteConnection } from "./database.ts";
+import type { LocalDatabase, SQLiteConnection, SQLiteReader } from "./database.ts";
 
 export type ActivityStatus = "active" | "completed";
 
@@ -26,7 +26,32 @@ export type NewActivity = Pick<Activity, "id" | "name" | "currency"> & {
   readonly members: readonly NewMember[];
 };
 
+export type ActivityCreationBlocker = Pick<Activity, "id" | "name"> & { readonly activeCount: number };
+
+export class ActiveActivityLimitError extends Error {
+  readonly blocker: ActivityCreationBlocker;
+
+  constructor(blocker: ActivityCreationBlocker) {
+    super("The Free active activity limit has been reached");
+    this.name = "ActiveActivityLimitError";
+    this.blocker = blocker;
+  }
+}
+
 const activityColumns = "id, name, currency, status, created_at AS createdAt, updated_at AS updatedAt";
+
+function readCreationBlocker(connection: SQLiteReader) {
+  return connection.getFirstAsync<ActivityCreationBlocker>(`
+    SELECT id, name, COUNT(*) OVER () AS activeCount FROM activities
+    WHERE status = 'active' ORDER BY updated_at DESC, id LIMIT 1
+  `);
+}
+
+async function requireActiveActivitySlot(transaction: SQLiteConnection) {
+  const blocker = await readCreationBlocker(transaction);
+  // Central write-time eligibility check for creating or reopening an activity.
+  if (blocker) throw new ActiveActivityLimitError(blocker);
+}
 
 function requireText(value: string, label: string): string {
   if (typeof value !== "string" || value.trim() === "") throw new Error(`${label} is required`);
@@ -77,7 +102,7 @@ export function createActivityRepository(database: LocalDatabase) {
     return database.write(async (transaction) => {
       const current = requireActivity(await selectActivity(transaction, id), id);
       if (current.status === status) return current;
-      // An entitlement service can check the active-activity limit in this same transaction.
+      if (status === "active") await requireActiveActivitySlot(transaction);
       const activity = await transaction.getFirstAsync<Activity>(`
         UPDATE activities SET status = ?, updated_at = MAX(updated_at, ?) WHERE id = ?
         RETURNING ${activityColumns}
@@ -87,12 +112,15 @@ export function createActivityRepository(database: LocalDatabase) {
   }
 
   return {
+    getCreationBlocker: () => database.read(readCreationBlocker),
+
     createActivity(input: NewActivity): Promise<ActivityDetail> {
       return database.write(async (transaction) => {
         requireText(input.id, "Activity ID");
         const name = requireText(input.name, "Activity name");
         if (!isCurrency(input.currency)) throw new Error("Unsupported activity currency");
         if (input.members.length === 0) throw new Error("An activity needs at least one member");
+        await requireActiveActivitySlot(transaction);
 
         const now = Date.now();
         const activity: Activity = {

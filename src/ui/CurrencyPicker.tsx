@@ -15,6 +15,10 @@ const currencies: readonly { code: Currency; name: string; aliases?: readonly st
   { code: "JPY", name: "日圓", aliases: ["日元", "日幣"] },
 ];
 
+export function currencyName(code: Currency): string {
+  return currencies.find((currency) => currency.code === code)?.name ?? code;
+}
+
 export function CurrencyPicker({ selected, onSelect, onClose }: {
   selected: Currency; onSelect: (currency: Currency) => void; onClose: () => void;
 }) {

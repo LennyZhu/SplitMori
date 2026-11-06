@@ -1,8 +1,13 @@
 import { registerRootComponent } from "expo";
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { BackHandler, Pressable, StatusBar, StyleSheet, Text, View } from "react-native";
 import { initialWindowMetrics, SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { createActivityRepository, type ActivityCreationBlocker } from "./src/data/activities.ts";
+import { getLocalDatabase } from "./src/data/database.ts";
 import type { QuickSplitPreview } from "./src/services/quickSplitEditor.ts";
+import { ActivityListScreen } from "./src/ui/ActivityListScreen.tsx";
+import { ActivityQuotaSheet } from "./src/ui/ActivityQuotaSheet.tsx";
+import { CreateActivityScreen } from "./src/ui/CreateActivityScreen.tsx";
 import { HomeScreen } from "./src/ui/HomeScreen.tsx";
 import { QuickSplitResultScreen } from "./src/ui/QuickSplitResultScreen.tsx";
 import { QuickSplitScreen } from "./src/ui/QuickSplitScreen.tsx";
@@ -15,6 +20,7 @@ const tabs = [
 ] as const satisfies readonly { name: string; title: string; icon: IconName }[];
 
 type Tab = typeof tabs[number]["name"];
+type ActivityOrigin = "home" | "activities";
 
 const tabColors = {
   shell: "#FFFFFFF0",
@@ -25,9 +31,7 @@ const tabColors = {
 } as const;
 
 const placeholderTitles = {
-  activities: "活動",
   records: "記錄",
-  createActivity: "建立活動",
   activityDetails: "活動詳情",
   quickHistory: "快速計算記錄",
   settings: "設定",
@@ -35,11 +39,23 @@ const placeholderTitles = {
 
 type Destination = keyof typeof placeholderTitles;
 type Route =
-  | { name: Tab | "createActivity" | "settings" }
+  | { name: Tab | "settings" }
+  | { name: "createActivity"; origin: ActivityOrigin }
   | { name: "quickSplit"; focusPayer?: boolean }
   | { name: "quickResult"; result: QuickSplitPreview }
-  | { name: "activityDetails"; id: string; title: string }
+  | { name: "activityDetails"; id: string; title: string; origin?: ActivityOrigin; resumeCreation?: boolean }
   | { name: "quickHistory"; id: string };
+
+function backRoute(route: Route): Route {
+  if (route.name === "quickResult") return { name: "quickSplit" };
+  if (route.name === "activityDetails" && route.resumeCreation) {
+    return { name: "createActivity", origin: route.origin ?? "home" };
+  }
+  if (route.name === "activityDetails" || route.name === "createActivity") {
+    return { name: route.origin ?? "home" };
+  }
+  return { name: "home" };
+}
 
 function TabBar({ active, onSelect }: { active: Tab; onSelect: (tab: Tab) => void }) {
   return (
@@ -65,15 +81,15 @@ function TabBar({ active, onSelect }: { active: Tab; onSelect: (tab: Tab) => voi
   );
 }
 
-function Placeholder({ name, context, onBack }: {
-  name: Destination; context?: string; onBack?: () => void;
+function Placeholder({ name, context, onBack, backLabel = "返回首頁" }: {
+  name: Destination; context?: string; onBack?: () => void; backLabel?: string;
 }) {
   return (
     <View style={styles.placeholder}>
       {onBack && (
         <Pressable accessibilityRole="button" onPress={onBack} style={({ pressed }) => [styles.back, pressed && styles.pressed]}>
           <Icon name="back" size={20} color={colors.accentText} />
-          <Text style={styles.selectedText}>返回首頁</Text>
+          <Text style={styles.selectedText}>{backLabel}</Text>
         </Pressable>
       )}
       <Text accessibilityRole="header" style={styles.placeholderTitle}>{placeholderTitles[name]}</Text>
@@ -85,20 +101,54 @@ function Placeholder({ name, context, onBack }: {
 
 function App() {
   const [route, setRoute] = useState<Route>({ name: "home" });
+  const [creationBlocker, setCreationBlocker] = useState<ActivityCreationBlocker | null>(null);
+  const entryCheck = useRef<object>(undefined);
   const isHome = route.name === "home";
   const inQuickSplit = route.name === "quickSplit" || route.name === "quickResult";
   const isQuickResult = route.name === "quickResult";
   const activeTab = tabs.find((tab) => tab.name === route.name)?.name;
   const detailId = "id" in route ? route.id : undefined;
+  const createOrigin = route.name === "createActivity" || (route.name === "activityDetails" && route.resumeCreation)
+    ? route.origin ?? "home" : undefined;
+
+  useLayoutEffect(() => {
+    entryCheck.current = undefined;
+    return () => { entryCheck.current = undefined; };
+  }, [route]);
+
+  async function startActivityCreation(origin: ActivityOrigin) {
+    if (entryCheck.current) return;
+    const request = {};
+    entryCheck.current = request;
+    let blocker: ActivityCreationBlocker | null = null;
+    try {
+      blocker = await createActivityRepository(await getLocalDatabase()).getCreationBlocker();
+    } catch {
+      // The form can still open. Its transaction will enforce eligibility and report storage failures.
+    }
+    if (entryCheck.current !== request) return;
+    entryCheck.current = undefined;
+    if (blocker) setCreationBlocker(blocker);
+    else setRoute({ name: "createActivity", origin });
+  }
+
+  function openExistingActivity(blocker: ActivityCreationBlocker) {
+    setCreationBlocker(null);
+    setRoute({
+      name: "activityDetails", id: blocker.id, title: blocker.name,
+      origin: createOrigin ?? (route.name === "activities" ? "activities" : "home"),
+      resumeCreation: route.name === "createActivity",
+    });
+  }
 
   useEffect(() => {
     if (isHome) return;
     const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
-      setRoute(isQuickResult ? { name: "quickSplit" } : { name: "home" });
+      setRoute(backRoute);
       return true;
     });
     return () => subscription.remove();
-  }, [isHome, isQuickResult]);
+  }, [isHome]);
 
   return (
     <SafeAreaProvider initialMetrics={initialWindowMetrics} style={styles.app}>
@@ -108,7 +158,7 @@ function App() {
           <HomeScreen
             onSettings={() => setRoute({ name: "settings" })}
             onQuickSplit={() => setRoute({ name: "quickSplit" })}
-            onCreateActivity={() => setRoute({ name: "createActivity" })}
+            onCreateActivity={() => { void startActivityCreation("home"); }}
             onActivities={() => setRoute({ name: "activities" })}
             onRecords={() => setRoute({ name: "records" })}
             onActivity={(activity) => setRoute({ name: "activityDetails", id: activity.id, title: activity.name })}
@@ -116,6 +166,24 @@ function App() {
               ? { name: "activityDetails", id: record.id, title: record.name }
               : { name: "quickHistory", id: record.id })}
           />
+        ) : route.name === "activities" ? (
+          <ActivityListScreen
+            onCreate={() => { void startActivityCreation("activities"); }}
+            onActivity={({ id, name }) => setRoute({ name: "activityDetails", id, title: name, origin: "activities" })}
+          />
+        ) : route.name === "createActivity" || createOrigin !== undefined ? (
+          <>
+            <View style={route.name === "createActivity" ? styles.main : styles.hidden}>
+              <CreateActivityScreen
+                onBack={() => setRoute(backRoute)}
+                onBlocked={setCreationBlocker}
+                onCreated={({ id, name }) => setRoute({ name: "activityDetails", id, title: name, origin: "activities" })}
+              />
+            </View>
+            {route.name === "activityDetails" && (
+              <Placeholder name="activityDetails" context={route.title} backLabel="返回建立活動" onBack={() => setRoute(backRoute)} />
+            )}
+          </>
         ) : inQuickSplit ? (
           <>
             <View style={isQuickResult ? styles.hidden : styles.main}>
@@ -138,11 +206,14 @@ function App() {
             key={detailId === undefined ? route.name : `${route.name}:${detailId}`}
             name={route.name}
             context={route.name === "activityDetails" ? route.title : undefined}
-            onBack={activeTab ? undefined : () => setRoute({ name: "home" })}
+            backLabel={route.name === "activityDetails" && route.origin === "activities" ? "返回活動" : undefined}
+            onBack={activeTab ? undefined : () => setRoute(backRoute)}
           />
         )}
       </SafeAreaView>
       {activeTab && <TabBar active={activeTab} onSelect={(tab) => setRoute({ name: tab })} />}
+      {creationBlocker && <ActivityQuotaSheet blocker={creationBlocker}
+        onClose={() => setCreationBlocker(null)} onView={() => openExistingActivity(creationBlocker)} />}
     </SafeAreaProvider>
   );
 }

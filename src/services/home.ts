@@ -1,17 +1,11 @@
-import { createActivityRepository, type Activity } from "../data/activities.ts";
-import { getLocalDatabase, type LocalDatabase } from "../data/database.ts";
+import { createActivityRepository } from "../data/activities.ts";
+import type { LocalDatabase } from "../data/database.ts";
 import { createFinanceRepository } from "../data/finance.ts";
 import { createQuickSplitRepository } from "../data/quickSplits.ts";
 import { validateMoney, type Money } from "../domain/money.ts";
+import { summarizeActivity, withActivityReadSnapshot, type ActivitySummary } from "./activityList.ts";
 
-export type HomeActivity = {
-  readonly id: string;
-  readonly name: string;
-  readonly total: Money;
-  readonly memberCount: number;
-  readonly expenseCount: number;
-  readonly hasOutstanding: boolean;
-};
+export type HomeActivity = Pick<ActivitySummary, "id" | "name" | "total" | "memberCount" | "expenseCount" | "hasOutstanding">;
 
 export type HomeRecentRecord =
   | (HomeActivity & { readonly kind: "activity"; readonly timestamp: number })
@@ -31,32 +25,12 @@ export type HomeData = {
 const recentLimit = 3;
 
 export async function loadHomeData(database?: LocalDatabase): Promise<HomeData> {
-  const local = database ?? await getLocalDatabase();
-  return local.read(async (connection) => {
-    // All repository reads share one transaction so the home reflects one ledger snapshot.
-    const readOnly: LocalDatabase = {
-      read: (task) => task(connection),
-      async write() { throw new Error("The home snapshot is read-only"); },
-      async backupSnapshot() { throw new Error("The home snapshot is read-only"); },
-    };
+  return withActivityReadSnapshot(database, async (readOnly) => {
     const activities = createActivityRepository(readOnly);
     const finance = createFinanceRepository(readOnly);
     const history = await createQuickSplitRepository(readOnly).listQuickHistory();
     if (!history.ok) throw new Error(`Could not read quick split history (${history.error.code})`);
     const rows = await activities.listActivities();
-
-    async function summarize(activity: Activity): Promise<HomeActivity> {
-      const ledger = await finance.getActivityLedger(activity.id);
-      if (!ledger.ok) throw new Error(`Could not read activity ledger (${ledger.error.code})`);
-      const { balances, currency, effectiveExpenses } = ledger.value.balanceSnapshot;
-      // The ledger bounds gross totals to safe integers, and effective totals only subtract refunds.
-      const amountMinor = effectiveExpenses.reduce((sum, expense) => sum + expense.effectiveTotalMinor, 0);
-      return {
-        id: activity.id, name: activity.name, total: { currency, amountMinor },
-        memberCount: balances.length, expenseCount: effectiveExpenses.length,
-        hasOutstanding: balances.some(({ netBalanceMinor }) => netBalanceMinor !== 0),
-      };
-    }
 
     const recent = [
       ...rows.filter(({ status }) => status === "completed").map((activity) => ({
@@ -70,13 +44,13 @@ export async function loadHomeData(database?: LocalDatabase): Promise<HomeData> 
 
     const activeActivities: HomeActivity[] = [];
     for (const activity of rows.filter(({ status }) => status === "active")) {
-      activeActivities.push(await summarize(activity));
+      activeActivities.push(await summarizeActivity(finance, activity));
     }
     const recentRecords: HomeRecentRecord[] = [];
     for (const item of recent) {
       const { kind, id, timestamp } = item;
       if (kind === "activity") {
-        recentRecords.push({ kind, timestamp, ...await summarize(item.activity) });
+        recentRecords.push({ kind, timestamp, ...await summarizeActivity(finance, item.activity) });
       } else {
         const total = item.record.snapshot.split.total;
         if (validateMoney(total, "total")) throw new Error("Invalid saved quick split total");
