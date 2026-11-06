@@ -36,6 +36,8 @@ const paths = {
   minus: "M5 12h14",
   down: "m6 9 6 6 6-6",
   check: "m5 12 4 4L19 6",
+  member: "M8 8a4 4 0 1 0 8 0 4 4 0 0 0-8 0Zm-4 12v-1a5 5 0 0 1 5-5h6a5 5 0 0 1 5 5v1Z",
+  more: "M5 12h.1m6.9 0h.1m6.9 0h.1",
 } as const;
 
 export type IconName = keyof typeof paths;

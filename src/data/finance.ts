@@ -78,6 +78,14 @@ function currentExpense(
   return { ...original, expense: latest?.expense ?? original.expense, currentVersion: latest?.version ?? 1 };
 }
 
+export function projectCurrentExpenses(
+  events: readonly AuditEvent[], revisions: readonly StoredExpenseRevision[],
+): CurrentExpense[] {
+  const latest = new Map(revisions.map((revision) => [revision.expense.id, revision]));
+  return events.filter((event) => event.kind === "expense")
+    .map((event) => currentExpense(event, latest.get(event.expense.id)));
+}
+
 function latestRevision(revisions: readonly StoredExpenseRevision[], expenseId: string): StoredExpenseRevision | undefined {
   for (let index = revisions.length - 1; index >= 0; index -= 1) {
     if (revisions[index].expense.id === expenseId) return revisions[index];
@@ -547,12 +555,9 @@ export function createFinanceRepository(database: LocalDatabase) {
       record(activityId, occurredAt, { ...transfer, kind: "memberTransfer" }),
     voidMerchantRefund: (activityId: string, request: FinancialVoidRequest) => voidFinancialEvent(activityId, "merchantRefund", request),
     voidMemberTransfer: (activityId: string, request: FinancialVoidRequest) => voidFinancialEvent(activityId, "memberTransfer", request),
-    listExpenses: (activityId: string) => readLedger(activityId, (_activity, events, revisions) => {
-      const latest = new Map(revisions.map((revision) => [revision.expense.id, revision]));
-      const expenses = events.filter((event) => event.kind === "expense")
-        .map((event) => currentExpense(event, latest.get(event.expense.id)));
-      return { ok: true, value: expenses };
-    }),
+    listExpenses: (activityId: string) => readLedger(activityId, (_activity, events, revisions) => ({
+      ok: true, value: projectCurrentExpenses(events, revisions),
+    })),
     getExpense: (activityId: string, expenseId: string) => readLedger<ExpenseDetail>(activityId, (_activity, events, revisions, voids) => {
       const expense = events.find((event) => event.kind === "expense" && event.expense.id === expenseId);
       if (expense?.kind !== "expense") return failure("EXPENSE_NOT_FOUND", "expenseId");

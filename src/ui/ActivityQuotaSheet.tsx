@@ -3,8 +3,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { ActivityCreationBlocker } from "../data/activities.ts";
 import { colors } from "./visuals.tsx";
 
-export function ActivityQuotaSheet({ blocker, onView, onClose }: {
-  blocker: ActivityCreationBlocker; onView: () => void; onClose: () => void;
+export function ActivityQuotaSheet({ blocker, onView, onClose, purpose = "create" }: {
+  blocker: ActivityCreationBlocker; onView: () => void; onClose: () => void; purpose?: "create" | "reopen";
 }) {
   const { top, bottom, left, right } = useSafeAreaInsets();
   return (
@@ -19,9 +19,14 @@ export function ActivityQuotaSheet({ blocker, onView, onClose }: {
           <View style={styles.handle} />
           <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
             <View style={styles.mark}><Text style={styles.markText}>!</Text></View>
-            <Text accessibilityRole="header" style={styles.title}>已有進行中的活動</Text>
+            <Text accessibilityRole="header" style={styles.title}>
+              {purpose === "reopen" ? "暫時無法重新開啟" : "已有進行中的活動"}
+            </Text>
             <Text style={styles.copy}>
-              免費版同時只可有 <Text style={styles.strong}>1 個進行中的活動</Text>。你可以繼續使用「{blocker.name}」，或先將現有活動標記完成後再建立新活動。
+              免費版同時只可有 <Text style={styles.strong}>1 個進行中的活動</Text>。
+              {purpose === "reopen"
+                ? `請先完成「${blocker.name}」，再重新開啟這個活動。記錄還款毋須重新開啟。`
+                : `你可以繼續使用「${blocker.name}」，或先將現有活動標記完成後再建立新活動。`}
             </Text>
             <Pressable accessibilityRole="button" onPress={onView} style={({ pressed }) => [styles.button, styles.primary, pressed && styles.pressed]}>
               <Text style={styles.primaryText}>查看現有活動</Text>

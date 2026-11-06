@@ -19,6 +19,7 @@ import { calculateQuickSplit } from "../src/domain/quickSplit.ts";
 import { splitEqual } from "../src/domain/split.ts";
 import { createBackupService, inspectBackupDatabase, inspectStandaloneBackup } from "../src/services/backup.ts";
 import { loadActivityList } from "../src/services/activityList.ts";
+import { loadActivityDetail } from "../src/services/activityDetail.ts";
 import { createQuickHistorySave } from "../src/services/quickHistorySave.ts";
 import { createQuickSplitConversionService } from "../src/services/quickSplitConversion.ts";
 import { createRestoreService } from "../src/services/restore.ts";
@@ -1353,4 +1354,66 @@ test("activity list projects effective totals and outstanding balances for compl
   const active = rows.find(({ id }) => id === "yen");
   assert.deepEqual(active.total, { currency: "JPY", amountMinor: 0 });
   assert.deepEqual([active.memberCount, active.expenseCount, active.hasOutstanding], [1, 0, false]);
+}));
+
+test("new activity detail keeps all stable members with zero expense and outstanding totals", withFinance(async (_finance, _activities, database) => {
+  assert.equal(await loadActivityDetail("missing", database), null);
+  const detail = await loadActivityDetail("trip", database);
+  assert.equal(detail.activity.status, "active");
+  assert.deepEqual(detail.activity.members.map(({ id, displayName }) => [id, displayName]), [["z", "Alex"], ["a", "Bo"]]);
+  assert.deepEqual(detail.expenses, []);
+  assert.deepEqual(detail.history, []);
+  assert.deepEqual([detail.grossMinor, detail.refundMinor, detail.effectiveMinor, detail.outstandingMinor], [0n, 0n, 0n, 0n]);
+}));
+
+test("activity detail reads revised expenses, effective refunds and repayments from the ledger snapshot", withFinance(async (finance, _activities, database) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  valueOf(await finance.createExpense("trip", 110, expense("second", 4000)));
+  valueOf(await finance.recordMerchantRefund("trip", 200, refund));
+  valueOf(await finance.recordMemberTransfer("trip", 250, { ...repayment, amountMinor: 3000 }));
+  valueOf(await finance.commitExpenseCorrection("trip", correction(8000, { reviewedRefundIds: [refund.id] })));
+  valueOf(await finance.voidMerchantRefund("trip", { id: "void-refund", targetEventId: refund.id, occurredAt: 400 }));
+  valueOf(await finance.recordMerchantRefund("trip", 450, {
+    ...refund, id: "second-refund", expenseId: "second", amountMinor: 1000,
+    reductions: [{ memberId: "z", amountMinor: 500 }, { memberId: "a", amountMinor: 500 }],
+  }));
+
+  const beforeVoid = await loadActivityDetail("trip", database);
+  assert.deepEqual([beforeVoid.grossMinor, beforeVoid.refundMinor, beforeVoid.effectiveMinor], [12000n, 1000n, 11000n]);
+  assert.equal(beforeVoid.outstandingMinor, 2500n);
+  valueOf(await finance.voidMemberTransfer("trip", { id: "void-transfer", targetEventId: repayment.id, occurredAt: 500 }));
+  const detail = await loadActivityDetail("trip", database);
+  assert.deepEqual([detail.grossMinor, detail.refundMinor, detail.effectiveMinor, detail.outstandingMinor], [12000n, 1000n, 11000n, 5500n]);
+  assert.deepEqual(detail.expenses.map(({ id, payerName, grossMinor, effectiveMinor, refundMinor }) =>
+    [id, payerName, grossMinor, effectiveMinor, refundMinor]), [
+    ["second", "Alex", 4000, 3000, 1000], ["dinner", "Alex", 8000, 8000, 0],
+  ]);
+  assert.deepEqual([...detail.balances], [["z", 5500], ["a", -5500]]);
+  assert.equal(detail.history.find(({ id }) => id === "refund:refund").voided, true);
+  assert.equal(detail.history.find(({ id }) => id === "transfer:repayment").voided, true);
+}));
+
+test("completing and reopening preserves the original finance ledger and an outstanding balance", withFinance(async (finance, activities, database) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  const before = valueOf(await finance.getActivityLedger("trip"));
+  await activities.completeActivity("trip");
+  const completed = await loadActivityDetail("trip", database);
+  assert.equal(completed.activity.status, "completed");
+  assert.equal(completed.outstandingMinor, 5000n);
+  assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
+
+  await activities.reopenActivity("trip");
+  const reopened = await loadActivityDetail("trip", database);
+  assert.equal(reopened.activity.status, "active");
+  assert.equal(reopened.outstandingMinor, completed.outstandingMinor);
+  assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
+}));
+
+test("reopen is rejected by the current Free slot while a completed ledger remains readable", withFinance(async (finance, activities, database) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  await activities.completeActivity("trip");
+  await activities.createActivity({ id: "active", name: "Other activity", currency: "JPY", members: [{ id: "new", displayName: "New" }] });
+  const before = await loadActivityDetail("trip", database);
+  await assert.rejects(activities.reopenActivity("trip"), (error) => error instanceof ActiveActivityLimitError && error.blocker.id === "active");
+  assert.deepEqual(await loadActivityDetail("trip", database), before);
 }));
