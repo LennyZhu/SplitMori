@@ -11,6 +11,7 @@ import { ActivityListScreen } from "./src/ui/ActivityListScreen.tsx";
 import { ActivityMembersScreen } from "./src/ui/ActivityMembersScreen.tsx";
 import { ActivityRepaymentHistoryScreen } from "./src/ui/ActivityRepaymentHistoryScreen.tsx";
 import { ActivityRepaymentScreen } from "./src/ui/ActivityRepaymentScreen.tsx";
+import { ActivitySettlementPngScreen } from "./src/ui/ActivitySettlementPngScreen.tsx";
 import { ActivitySettlementScreen } from "./src/ui/ActivitySettlementScreen.tsx";
 import { ActivityQuotaSheet } from "./src/ui/ActivityQuotaSheet.tsx";
 import { CreateActivityScreen } from "./src/ui/CreateActivityScreen.tsx";
@@ -62,6 +63,7 @@ type Route =
   | { name: "expenseDetails"; expenseId: string; previous: ActivityDetailRoute }
   | { name: "activityMembers"; previous: ActivityDetailRoute }
   | ActivitySettlementRoute
+  | { name: "activitySettlementPng"; previous: ActivitySettlementRoute; appLocale: string }
   | { name: "activityRepayment"; previous: ActivitySettlementRoute; suggestion: TransferSuggestion }
   | { name: "activityRepaymentHistory"; previous: ActivitySettlementRoute }
   | { name: "quickSplit"; focusPayer?: boolean }
@@ -75,7 +77,7 @@ function backRoute(route: Route): Route {
   if (route.name === "quickHistory") return { name: route.origin ?? "home" };
   if (route.name === "quickConversion") return route.previous;
   if (route.name === "createExpense" || route.name === "expenseDetails" || route.name === "activityMembers" || route.name === "activitySettlement"
-    || route.name === "activityRepayment" || route.name === "activityRepaymentHistory") return route.previous;
+    || route.name === "activityRepayment" || route.name === "activityRepaymentHistory" || route.name === "activitySettlementPng") return route.previous;
   if (route.name === "activityDetails" && route.previous) return route.previous;
   if (route.name === "activityDetails" && route.resumeCreation) {
     return { name: "createActivity", origin: route.origin ?? "home" };
@@ -136,7 +138,7 @@ function App() {
   const inQuickSplit = quickRoute.name === "quickSplit" || quickRoute.name === "quickResult";
   const isQuickResult = quickRoute.name === "quickResult";
   const activeTab = tabs.find((tab) => tab.name === route.name)?.name;
-  const activityRoute = route.name === "activityRepayment" || route.name === "activityRepaymentHistory" ? route.previous.previous
+  const activityRoute = route.name === "activityRepayment" || route.name === "activityRepaymentHistory" || route.name === "activitySettlementPng" ? route.previous.previous
     : route.name === "createExpense" || route.name === "expenseDetails" || route.name === "activityMembers"
       || route.name === "activitySettlement" ? route.previous : route;
   const createOrigin = activityRoute.name === "createActivity" || (activityRoute.name === "activityDetails" && activityRoute.resumeCreation)
@@ -163,11 +165,16 @@ function App() {
     <ActivityMembersScreen key={route.previous.id} activityId={route.previous.id} onBack={() => setRoute(route.previous)} />
   ) : route.name === "activitySettlement" ? (
     <ActivitySettlementScreen key={route.previous.id} activityId={route.previous.id} initialTab={route.initialTab}
-      onBack={() => setRoute(route.previous)} onViewRepaymentHistory={(tab) => setRoute({ name: "activityRepaymentHistory",
+      onBack={() => setRoute(route.previous)}
+      onSharePng={(appLocale) => setRoute({ name: "activitySettlementPng", previous: { ...route, initialTab: "overview" }, appLocale })}
+      onViewRepaymentHistory={(tab) => setRoute({ name: "activityRepaymentHistory",
         previous: { ...route, initialTab: tab },
       })} onRecordRepayment={(suggestion) => setRoute({ name: "activityRepayment", suggestion,
         previous: { ...route, initialTab: "transfers" },
       })} />
+  ) : route.name === "activitySettlementPng" ? (
+    <ActivitySettlementPngScreen key={route.previous.previous.id} activityId={route.previous.previous.id} appLocale={route.appLocale}
+      onBack={() => setRoute(route.previous)} />
   ) : route.name === "activityRepayment" ? (
     <ActivityRepaymentScreen key={route.previous.previous.id} activityId={route.previous.previous.id}
       suggestion={route.suggestion} onBack={() => setRoute(route.previous)} />

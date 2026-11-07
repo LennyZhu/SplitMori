@@ -3,6 +3,20 @@
     "name": "SplitMori",
     "slug": "splitmori",
     "version": "1.0.0",
-    "platforms": ["ios", "android"]
+    "platforms": ["ios", "android"],
+    "plugins": [
+      ["expo-media-library", {
+        "photosPermission": false,
+        "savePhotosPermission": "允許 SplitMori 將結算圖儲存到相簿。 Allow SplitMori to save settlement images to Photos.",
+        "granularPermissions": []
+      }]
+    ],
+    "android": {
+      "blockedPermissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
+      ]
+    }
   }
 }

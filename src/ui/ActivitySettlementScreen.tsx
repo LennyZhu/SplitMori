@@ -4,6 +4,7 @@ import {
 } from "react-native";
 import type { TransferSuggestion } from "../domain/settlement.ts";
 import { loadActivitySettlement, type ActivitySettlementData } from "../services/activitySettlement.ts";
+import { settlementPngCopy } from "../services/activitySettlementPng.ts";
 import { formatResultMoney } from "../services/quickSplitResult.ts";
 import { colors, Icon } from "./visuals.tsx";
 
@@ -22,7 +23,8 @@ type SettlementRow =
 type Section = SectionListData<SettlementRow, { title: string; caption?: string }>;
 type FormatMoney = (minor: number | bigint) => string;
 
-const dateFormat = new Intl.DateTimeFormat("zh-HK", { year: "numeric", month: "long", day: "numeric" });
+const activitySettlementUiLocale = "zh-HK";
+const dateFormat = new Intl.DateTimeFormat(activitySettlementUiLocale, { year: "numeric", month: "long", day: "numeric" });
 
 function AmountLine({ label, value, divider = true }: { label: string; value: string; divider?: boolean }) {
   return (
@@ -265,10 +267,11 @@ function TransferRow({ from, to, amount, note, onSelect, selected }: {
   </Pressable>;
 }
 
-function SettlementContent({ data, tab, setTab, onBack, refreshing, onRefresh, onRecordRepayment, onViewRepaymentHistory }: {
+function SettlementContent({ data, tab, setTab, onBack, refreshing, onRefresh, onRecordRepayment, onViewRepaymentHistory, onSharePng }: {
   data: ActivitySettlementData; tab: Tab; setTab: (tab: Tab) => void; onBack: () => void; refreshing: boolean; onRefresh: () => void;
   onRecordRepayment: (suggestion: TransferSuggestion) => void;
   onViewRepaymentHistory: (tab: HistoryOrigin) => void;
+  onSharePng: (appLocale: string) => void;
 }) {
   const [expandedId, setExpandedId] = useState<string | null | undefined>();
   const [selectedPair, setSelectedPair] = useState<string>();
@@ -314,6 +317,17 @@ function SettlementContent({ data, tab, setTab, onBack, refreshing, onRefresh, o
         ))}
       </View>
       {tab === "overview" && <Overview data={data} money={money} />}
+      {tab === "overview" && (
+        <Pressable accessibilityRole="button" onPress={() => onSharePng(activitySettlementUiLocale)}
+          style={({ pressed }) => [styles.card, styles.historyLink, pressed && styles.pressed]}>
+          <View style={styles.avatar}><Icon name="receipt" size={19} /></View>
+          <View style={styles.memberCopy}>
+            <Text style={styles.memberName}>{settlementPngCopy[activitySettlementUiLocale].entry}</Text>
+            <Text style={styles.caption}>預覽並分享目前的活動結算</Text>
+          </View>
+          <Icon name="next" size={17} color={colors.muted} />
+        </Pressable>
+      )}
       {tab === "overview" && <RepaymentHistoryLink data={data} money={money} onPress={() => onViewRepaymentHistory(tab)} />}
       {tab === "members" && data.status === "empty" && <NoFinancialRecords />}
       {tab === "transfers" && <TransferOverview data={data} money={money} />}
@@ -375,9 +389,10 @@ function SettlementContent({ data, tab, setTab, onBack, refreshing, onRefresh, o
   );
 }
 
-export function ActivitySettlementScreen({ activityId, onBack, initialTab = "overview", onRecordRepayment, onViewRepaymentHistory }: {
+export function ActivitySettlementScreen({ activityId, onBack, initialTab = "overview", onRecordRepayment, onViewRepaymentHistory, onSharePng }: {
   activityId: string; onBack: () => void; initialTab?: Tab; onRecordRepayment: (suggestion: TransferSuggestion) => void;
   onViewRepaymentHistory: (tab: HistoryOrigin) => void;
+  onSharePng: (appLocale: string) => void;
 }) {
   const [tab, setTab] = useState<Tab>(initialTab);
   const [data, setData] = useState<ActivitySettlementData | null>();
@@ -422,7 +437,7 @@ export function ActivitySettlementScreen({ activityId, onBack, initialTab = "ove
         <View style={styles.headerSide} />
       </View>
       {data ? <SettlementContent data={data} tab={tab} setTab={setTab} onBack={onBack} refreshing={loading} onRefresh={reload}
-        onRecordRepayment={onRecordRepayment} onViewRepaymentHistory={onViewRepaymentHistory} />
+        onRecordRepayment={onRecordRepayment} onViewRepaymentHistory={onViewRepaymentHistory} onSharePng={onSharePng} />
         : <View style={[styles.content, styles.group]}>
           {loading && <ActivityIndicator accessibilityLabel="正在讀取結算資料" color={colors.ink} />}
           {readError && <View style={[styles.card, styles.group]}>

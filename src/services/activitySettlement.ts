@@ -25,7 +25,7 @@ export function loadActivitySettlement(activityId: string, database?: LocalDatab
       ? [{ transfer: event, voidEvent: voidsByTarget.get(event.id) }] : []).reverse();
     const repayments = repaymentHistory.filter(({ voidEvent }) => !voidEvent).map(({ transfer }) => transfer);
     const outstandingMinor = balances.reduce((sum, balance) => sum + BigInt(Math.max(0, balance.netBalanceMinor)), 0n);
-    const status = events.length === 0 && revisions.length === 0 ? "empty" : outstandingMinor === 0n ? "settled" : "unsettled";
+    const status: "empty" | "settled" | "unsettled" = events.length === 0 && revisions.length === 0 ? "empty" : outstandingMinor === 0n ? "settled" : "unsettled";
     const balancesById = new Map(balances.map((balance) => [balance.memberId, balance]));
     const members = activity.members.map(({ id, displayName }) => {
       const balance = balancesById.get(id);

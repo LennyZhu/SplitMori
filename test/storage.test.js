@@ -22,6 +22,7 @@ import { loadActivityList } from "../src/services/activityList.ts";
 import { loadActivityDetail } from "../src/services/activityDetail.ts";
 import { loadActivityMembers } from "../src/services/activityMembers.ts";
 import { loadActivitySettlement } from "../src/services/activitySettlement.ts";
+import { buildSettlementPngCard, loadSettlementPngSnapshot } from "../src/services/activitySettlementPng.ts";
 import { loadExpenseCorrectionPreview, loadExpenseDetail, saveReviewedExpenseCorrection, summarizeCorrectionBalances } from "../src/services/expenseDetail.ts";
 import { createExpenseEditor, expenseDateInput, expenseDateTimestamp, hydrateExpenseEditor, prepareExpenseEdit, prepareNewExpense } from "../src/services/expenseEditor.ts";
 import { inspectRepaymentDraft } from "../src/services/memberRepayment.ts";
@@ -2452,5 +2453,40 @@ test("3B7B rolls back both refund writes and resolves an uncertain submission wi
     assert.deepEqual(await saveReviewedMerchantRefund("trip", reversal, { database: intercepted }), { status: "saved" });
     assert.equal(writes, 2);
     assert.equal(valueOf(await finance.listEvents("trip")).filter(({ kind }) => kind === "financialVoid").length, 1);
+  },
+));
+
+test("S11 reads revised and voided activity ledgers without writes and retains the old preview after settlement", withFinance(
+  async (finance, activities, database) => {
+    const empty = await loadSettlementPngSnapshot("trip", database);
+    assert.equal(empty.status, "empty");
+    await seedRefundTrip(finance, activities, true);
+    const refundReview = valueOf(await loadMerchantRefundPreview("trip", 400, refundInput, database));
+    assert.deepEqual(await saveReviewedMerchantRefund("trip", { kind: "record", preview: refundReview }, { database }), { status: "saved" });
+    const refunded = await loadSettlementPngSnapshot("trip", database);
+    assert.deepEqual([refunded.effectiveMinor, refunded.refundMinor, refunded.outstandingMinor], [92_000n, 20_000n, 55_000n]);
+
+    const voidReview = valueOf(await loadMerchantRefundVoidPreview("trip", "dinner",
+      { id: "refund-void", targetEventId: refundInput.id, occurredAt: 500 }, database));
+    assert.deepEqual(await saveReviewedMerchantRefund("trip", { kind: "void", preview: voidReview }, { database }), { status: "saved" });
+    await activities.completeActivity("trip");
+    const ledger = valueOf(await finance.getActivityLedger("trip"));
+    const preview = await loadSettlementPngSnapshot("trip", database);
+    const png = buildSettlementPngCard(preview, "zh-HK");
+    assert.deepEqual([png.activityStatus, png.settlementStatus], ["已完成", "未結清"]);
+    assert.deepEqual([png.effective, png.refund, png.repayment, png.outstanding], ["HKD 1,120.00", "HKD 0.00", "HKD 0.00", "HKD 700.00"]);
+    assert.deepEqual(png.transfers.map(({ from, to, amount }) => [from, to, amount]),
+      [["Bo", "Alex", "HKD 420.00"], ["Chris", "Alex", "HKD 140.00"], ["d", "Alex", "HKD 140.00"]]);
+    assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), ledger);
+
+    for (const { fromMemberId, toMemberId, amountMinor } of preview.suggestions) {
+      valueOf(await finance.recordMemberTransfer("trip", 600, { id: `actual-${fromMemberId}`, fromMemberId, toMemberId, amountMinor, currency: "HKD" }));
+    }
+    const refreshed = buildSettlementPngCard(await loadSettlementPngSnapshot("trip", database), "zh-HK");
+    assert.deepEqual([refreshed.activityStatus, refreshed.settlementStatus, refreshed.outstanding, refreshed.repayment],
+      ["已完成", "已結清", "HKD 0.00", "HKD 700.00"]);
+    assert.equal(refreshed.effective, png.effective);
+    assert.equal(refreshed.transfers.length, 0);
+    assert.equal(buildSettlementPngCard(preview, "en").outstanding, "HKD 700.00");
   },
 ));

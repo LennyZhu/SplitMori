@@ -52,8 +52,8 @@ export function QuickRecordSummary({ history, target, destination }: {
   );
 }
 
-export function ConversionPage({ title, endLabel, endAction, onBack, children, footer, scrollRef, busy = false }: {
-  title: string; endLabel?: string; onBack: () => void; children: ReactNode; footer?: ReactNode;
+export function ConversionPage({ title, backLabel = "返回", endLabel, endAction, onBack, children, footer, scrollRef, busy = false }: {
+  title: string; backLabel?: string; endLabel?: string; onBack: () => void; children: ReactNode; footer?: ReactNode;
   endAction?: { label: string; onPress: () => void };
   scrollRef?: RefObject<ComponentRef<typeof ScrollView> | null>; busy?: boolean;
 }) {
@@ -66,7 +66,7 @@ export function ConversionPage({ title, endLabel, endAction, onBack, children, f
   return (
     <KeyboardAvoidingView style={styles.screen} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={top}>
       <View style={styles.header}>
-        <Pressable accessibilityRole="button" accessibilityLabel="返回" disabled={busy} onPress={onBack} style={styles.headerSide}>
+        <Pressable accessibilityRole="button" accessibilityLabel={backLabel} disabled={busy} onPress={onBack} style={styles.headerSide}>
           <Icon name="back" size={23} />
         </Pressable>
         <Text accessibilityRole="header" style={styles.title}>{title}</Text>
