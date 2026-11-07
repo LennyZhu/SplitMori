@@ -1,8 +1,9 @@
 import type { LocalDatabase } from "../data/database.ts";
+import { normalizeAppLanguage, type AppLanguage } from "./appPreferences.ts";
 import { loadActivitySettlement, type ActivitySettlementData } from "./activitySettlement.ts";
 import { formatResultMoney } from "./quickSplitResult.ts";
 
-export type SettlementPngLanguage = "zh-HK" | "en";
+export type SettlementPngLanguage = AppLanguage;
 
 export const settlementPngCopy = {
   "zh-HK": {
@@ -54,12 +55,6 @@ export const settlementPngCopy = {
   },
 } as const;
 
-function normalizeLanguage(locale?: string): SettlementPngLanguage | undefined {
-  const primaryTag = locale?.trim().toLowerCase().split(/[-_]/)[0];
-  if (primaryTag === "zh") return "zh-HK";
-  if (primaryTag === "en") return "en";
-}
-
 export function resolveSettlementPngLanguages({ appLocale, preferredLocale, systemLocale, selectedOutputLanguage }: {
   appLocale?: string;
   preferredLocale?: string;
@@ -67,7 +62,7 @@ export function resolveSettlementPngLanguages({ appLocale, preferredLocale, syst
   selectedOutputLanguage?: SettlementPngLanguage;
 }) {
   // A locale already resolved by the App takes precedence over device settings.
-  const appLanguage = normalizeLanguage(appLocale) ?? normalizeLanguage(preferredLocale) ?? normalizeLanguage(systemLocale) ?? "en";
+  const appLanguage = normalizeAppLanguage(appLocale) ?? normalizeAppLanguage(preferredLocale) ?? normalizeAppLanguage(systemLocale) ?? "en";
   return { appLanguage, outputLanguage: selectedOutputLanguage ?? appLanguage, copy: settlementPngCopy[appLanguage] };
 }
 

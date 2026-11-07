@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { Currency } from "../domain/money.ts";
 import { getLocalDatabase } from "../data/database.ts";
 import { createQuickSplitRepository, type QuickDraftInput } from "../data/quickSplits.ts";
 import {
@@ -23,8 +24,8 @@ type DraftSession = {
 // Keep capture times increasing through rapid edits, clock changes and screen remounts.
 let lastCapturedAt = 0;
 
-export function useQuickSplitDraft() {
-  const [editor, setEditor] = useState(createQuickSplitEditor);
+export function useQuickSplitDraft(defaultCurrency: Currency) {
+  const [editor, setEditor] = useState(() => createQuickSplitEditor(defaultCurrency));
   const [loading, setLoading] = useState(true);
   const [discarding, setDiscarding] = useState(false);
   const [error, setError] = useState<DraftError>();
@@ -110,7 +111,7 @@ export function useQuickSplitDraft() {
         return;
       }
       session.pending = undefined;
-      session.editor = createQuickSplitEditor();
+      session.editor = createQuickSplitEditor(defaultCurrency);
       setEditor(session.editor);
     });
   }

@@ -5,6 +5,7 @@
     "version": "1.0.0",
     "platforms": ["ios", "android"],
     "plugins": [
+      ["expo-localization", { "supportedLocales": ["zh-HK", "en"] }],
       ["expo-media-library", {
         "photosPermission": false,
         "savePhotosPermission": "允許 SplitMori 將結算圖儲存到相簿。 Allow SplitMori to save settlement images to Photos.",

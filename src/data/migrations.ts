@@ -238,6 +238,10 @@ export const migrations = [
   ALTER TABLE merchant_refunds ADD COLUMN distribution TEXT CHECK (distribution IS NULL OR distribution = 'proportional');
   ALTER TABLE merchant_refunds ADD COLUMN recorded_at INTEGER CHECK (recorded_at BETWEEN 0 AND 9007199254740991);
   `,
+  `
+  -- Some existing ledgers reached v11 without the v2 single-payer index.
+  CREATE UNIQUE INDEX IF NOT EXISTS merchant_payments_single_payer ON merchant_payments(expense_id);
+  `,
 ] as const;
 
 export async function applyMigration(

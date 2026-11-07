@@ -4,7 +4,7 @@ import {
   Text, TextInput, View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { parseAmount } from "../domain/money.ts";
+import { parseAmount, type Currency } from "../domain/money.ts";
 import {
   addEditorMember, calculateQuickSplitEditor, editorMemberName, removeEditorMember,
   type EditorError, type EditorField, type QuickSplitEditorState, type QuickSplitPreview,
@@ -78,12 +78,12 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-export function QuickSplitScreen({ onBack, onResult, focusPayer }: {
+export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency }: {
   onBack: () => void;
   onResult: (result: QuickSplitPreview) => void;
-  focusPayer?: boolean;
+  focusPayer?: boolean; defaultCurrency: Currency;
 }) {
-  const { editor, updateEditor, loading, error: draftError, retry, discard, discarding } = useQuickSplitDraft();
+  const { editor, updateEditor, loading, error: draftError, retry, discard, discarding } = useQuickSplitDraft(defaultCurrency);
   const [validation, setValidation] = useState<EditorError>();
   const [showCurrencies, setShowCurrencies] = useState(false);
   const scroll = useRef<ComponentRef<typeof ScrollView>>(null);

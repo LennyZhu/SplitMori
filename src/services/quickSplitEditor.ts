@@ -46,9 +46,9 @@ function createMember(number: number): EditorMember {
   return { id: `member-${number}`, displayName: "", included: true, shareCommon: true, personalAmount: "" };
 }
 
-export function createQuickSplitEditor(): QuickSplitEditorState {
+export function createQuickSplitEditor(currency: Currency = "HKD"): QuickSplitEditorState {
   return {
-    currency: "HKD", mode: "equal", members: [createMember(1), createMember(2)], nextMemberNumber: 3,
+    currency, mode: "equal", members: [createMember(1), createMember(2)], nextMemberNumber: 3,
     finalTotal: "", chargeMode: "finalTotal", subtotal: "", discount: "", serviceFeeMode: "none", serviceFee: "",
     serviceFeeBasis: "beforeDiscount", coverKind: "fixed", coverAmount: "", coverPercentage: "",
     includeHostInRemainder: false, sharedAmount: "",

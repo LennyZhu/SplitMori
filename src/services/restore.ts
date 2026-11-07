@@ -48,6 +48,7 @@ function difference(current: BackupCounts, backup: BackupCounts): BackupCounts {
     expenseCount: backup.expenseCount - current.expenseCount,
     financialEventCount: backup.financialEventCount - current.financialEventCount,
     repaymentCount: backup.repaymentCount - current.repaymentCount,
+    refundCount: backup.refundCount - current.refundCount,
     quickHistoryCount: backup.quickHistoryCount - current.quickHistoryCount,
   };
 }

@@ -13,7 +13,7 @@ import { ActiveActivityLimitError, createActivityRepository, MemberManagementErr
 import { backupSnapshotName, DatabaseInitializationError, initializeDatabase } from "../src/data/database.ts";
 import { createDatabaseHost, databaseName, restoreFiles } from "../src/data/databaseHost.ts";
 import { createFinanceRepository, validateStoredLedgers } from "../src/data/finance.ts";
-import { migrations } from "../src/data/migrations.ts";
+import { applyMigration, migrations } from "../src/data/migrations.ts";
 import { createQuickSplitRepository } from "../src/data/quickSplits.ts";
 import { calculateQuickSplit } from "../src/domain/quickSplit.ts";
 import { splitEqual } from "../src/domain/split.ts";
@@ -23,6 +23,7 @@ import { loadActivityDetail } from "../src/services/activityDetail.ts";
 import { loadActivityMembers } from "../src/services/activityMembers.ts";
 import { loadActivitySettlement } from "../src/services/activitySettlement.ts";
 import { buildSettlementPngCard, loadSettlementPngSnapshot } from "../src/services/activitySettlementPng.ts";
+import { createAppPreferencesStore } from "../src/services/appPreferences.ts";
 import { loadExpenseCorrectionPreview, loadExpenseDetail, saveReviewedExpenseCorrection, summarizeCorrectionBalances } from "../src/services/expenseDetail.ts";
 import { createExpenseEditor, expenseDateInput, expenseDateTimestamp, hydrateExpenseEditor, prepareExpenseEdit, prepareNewExpense } from "../src/services/expenseEditor.ts";
 import { inspectRepaymentDraft } from "../src/services/memberRepayment.ts";
@@ -974,11 +975,12 @@ test("WAL backup preserves every ledger and quick-split record without changing 
   assert.equal(manifest.schemaVersion, migrations.length);
   const preview = valueOf(await service.previewBackup(uri));
   assert.deepEqual(preview.manifest, manifest);
+  assert.equal(sha256(unpackBackup(uri).payload), manifest.sha256);
   assert.ok(preview.fileModifiedAt > 0);
   assert.deepEqual(
     [preview.validationStatus, preview.activityCount, preview.memberCount, preview.expenseCount, preview.financialEventCount,
-      preview.repaymentCount, preview.quickHistoryCount],
-    ["valid", 1, 2, 2, 6, 1, 1],
+      preview.repaymentCount, preview.refundCount, preview.quickHistoryCount],
+    ["valid", 1, 2, 2, 6, 1, 1, 1],
   );
   assert.deepEqual(readFileSync(uri), exportedBytes);
 
@@ -1064,6 +1066,30 @@ test("backup validation rejects corrupt and future files and can preview an olde
   assert.equal(preview.financialEventCount, 0);
 }));
 
+test("S13 backup schema accepts the known standard and early revision layouts in v9 through v11", withTestFile(async (path) => {
+  const service = backupService(path);
+  for (const version of [9, 10, 11]) {
+    for (const early of [false, true]) {
+      const fixture = `${path}-${version}-${early}.sqlite`;
+      const connection = openTestConnection(fixture);
+      try {
+        for (let index = 0; index < version; index += 1) {
+          if (index === 2 && early) await connection.execAsync(migrations[2].replace("    reviewed_refund_ids TEXT NOT NULL,\n", ""));
+          else await applyMigration(connection, index);
+        }
+        await connection.execAsync(`PRAGMA user_version = ${version}`);
+      } finally {
+        connection.close();
+      }
+      const payload = readFileSync(fixture);
+      const uri = `${fixture}.splitmori-backup`;
+      const manifest = { formatVersion: 1, schemaVersion: version, createdAt: null, byteLength: payload.length, sha256: sha256(payload), assets: [] };
+      writeBackup(uri, manifest, payload);
+      assert.deepEqual(valueOf(await service.previewBackup(uri)).manifest, manifest);
+    }
+  }
+}));
+
 test("backup validation checks SQLite schema, foreign keys, and financial totals beyond the checksum", withFinance(async (finance, _activities, database, _connection, _reopen, path) => {
   valueOf(await finance.createExpense("trip", 100, expense()));
   const service = backupService(path);
@@ -1073,6 +1099,9 @@ test("backup validation checks SQLite schema, foreign keys, and financial totals
   const invalid = join(dirname(path), "altered.splitmori-backup");
   for (const [sql, code] of [
     ["DROP TABLE quick_history", "BACKUP_SCHEMA_MISMATCH"],
+    ["DROP INDEX merchant_payments_single_payer", "BACKUP_SCHEMA_MISMATCH"],
+    ["ALTER TABLE merchant_refunds DROP COLUMN recorded_at", "BACKUP_SCHEMA_MISMATCH"],
+    ["CREATE INDEX unexpected_payment_index ON merchant_payments(member_id)", "BACKUP_SCHEMA_MISMATCH"],
     ["UPDATE merchant_payments SET member_id = 'missing'", "BACKUP_FOREIGN_KEYS_FAILED"],
     ["UPDATE expense_allocations SET amount_minor = 4999 WHERE member_id = 'a'", "BACKUP_LEDGER_INVALID"],
     [`PRAGMA user_version = ${migrations.length + 1}`, "UNSUPPORTED_BACKUP_VERSION"],
@@ -1090,22 +1119,122 @@ test("backup validation checks SQLite schema, foreign keys, and financial totals
   }
 }));
 
+test("S13 v12 repairs the missing v11 payer index and exports the complete unchanged ledger", withFinance(async (
+  finance, activities, _database, connection, _reopen, path,
+) => {
+  await seedRefundTrip(finance, activities, true);
+  valueOf(await finance.commitReviewedMerchantRefund("trip", valueOf(await finance.previewMerchantRefund("trip", 400, refundInput))));
+  await connection.execAsync("DROP INDEX merchant_payments_single_payer; PRAGMA user_version = 11;");
+  const before = valueOf(await finance.getActivityLedger("trip"));
+  assert.equal((await inspectBackupDatabase(backupPlatform(path), connection, 11)).error?.code, "BACKUP_SCHEMA_MISMATCH");
+
+  const upgraded = await initializeDatabase(connection, connection.writeSnapshot);
+  await applyMigration(connection, 11);
+  assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 12);
+  assert.equal((await connection.getFirstAsync("SELECT sql FROM sqlite_schema WHERE name = 'merchant_payments_single_payer'")).sql,
+    "CREATE UNIQUE INDEX merchant_payments_single_payer ON merchant_payments(expense_id)");
+  assert.deepEqual(valueOf(await createFinanceRepository(upgraded).getActivityLedger("trip")), before);
+
+  const service = backupService(path);
+  const { uri, manifest } = valueOf(await service.exportBackup(upgraded));
+  const preview = valueOf(await service.previewBackup(uri));
+  assert.deepEqual([manifest.schemaVersion, preview.refundCount, preview.repaymentCount], [12, 1, 1]);
+  assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
+}));
+
+test("S13 v12 rolls back the index repair if a legacy expense has duplicate payers", withFinance(async (finance, _activities, _db, connection) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  await connection.execAsync(`
+    DROP INDEX merchant_payments_single_payer;
+    PRAGMA user_version = 11;
+    INSERT INTO merchant_payments (activity_id, expense_id, member_id, amount_minor)
+    SELECT activity_id, expense_id, 'a', 1 FROM merchant_payments WHERE member_id = 'z';
+  `);
+  const readPayments = () => connection.getAllAsync("SELECT * FROM merchant_payments ORDER BY member_id");
+  const before = await readPayments();
+  assert.equal(before.length, 2);
+  await assert.rejects(initializeDatabase(connection), (error) => error instanceof DatabaseInitializationError && error.stage === "migration");
+  assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 11);
+  assert.deepEqual(await readPayments(), before);
+}));
+
 test("snapshot and publishing failures leave the current ledger usable", withFinance(async (finance, _activities, database, _connection, _reopen, path) => {
   valueOf(await finance.createExpense("trip", 100, expense()));
   const before = valueOf(await finance.getActivityLedger("trip"));
   const service = backupService(path);
-  assert.equal((await service.exportBackup(database, { destinationDirectoryUri: join(dirname(path), "missing") })).error.code,
-    "BACKUP_EXPORT_FAILED");
-  assert.equal((await service.exportBackup({
+  const publishFailure = await service.exportBackup(database, { destinationDirectoryUri: join(dirname(path), "missing") });
+  assert.deepEqual([publishFailure.stage, publishFailure.error.code], ["publish", "BACKUP_EXPORT_FAILED"]);
+  const snapshotFailure = await service.exportBackup({
     ...database,
     async backupSnapshot(directory) {
       writeFileSync(join(directory, backupSnapshotName), "partial snapshot");
       throw new Error("Snapshot failed");
     },
-  })).error.code, "BACKUP_EXPORT_FAILED");
+  });
+  assert.deepEqual([snapshotFailure.stage, snapshotFailure.error.code], ["snapshot", "BACKUP_EXPORT_FAILED"]);
   assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
   valueOf(await finance.recordMemberTransfer("trip", 200, repayment));
   assert.equal(valueOf(await finance.getActivityLedger("trip")).events.length, 2);
+}));
+
+test("S13 refuses to export an inconsistent snapshot without altering the source", withFinance(async (finance, _activities, database, connection, _reopen, path) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  await database.write((tx) => tx.runAsync("UPDATE expense_allocations SET amount_minor = 4999 WHERE member_id = 'a'"));
+  const original = await connection.getAllAsync("SELECT * FROM expense_allocations ORDER BY member_id");
+  const result = await backupService(path).exportBackup(database);
+  assert.deepEqual([result.stage, result.error?.code], ["validate", "BACKUP_LEDGER_INVALID"]);
+  assert.deepEqual(await connection.getAllAsync("SELECT * FROM expense_allocations ORDER BY member_id"), original);
+}));
+
+test("S13 refuses to publish a truncated backup and can retry safely", withFinance(async (finance, _activities, database, _connection, _reopen, path) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  const before = valueOf(await finance.getActivityLedger("trip"));
+  const platform = backupPlatform(path);
+  let published = false;
+  const service = createBackupService({
+    ...platform,
+    createWorkspace() {
+      const workspace = platform.createWorkspace();
+      return {
+        ...workspace,
+        file(name) {
+          const file = workspace.file(name);
+          if (!name.endsWith(".splitmori-backup")) return file;
+          return Object.assign(file, {
+            open() {
+              const handle = backupFile(file.uri).open("write");
+              return { ...handle, writeBytes: (bytes) => handle.writeBytes(bytes.subarray(0, -1)) };
+            },
+          });
+        },
+      };
+    },
+    async publish() {
+      published = true;
+      throw new Error("Truncated output must never be published");
+    },
+  });
+  const result = await service.exportBackup(database);
+  assert.deepEqual([result.stage, result.error?.code], ["verify-output", "BACKUP_EXPORT_FAILED"]);
+  assert.equal(published, false);
+  assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
+  const retry = createBackupService(platform);
+  const exported = valueOf(await retry.exportBackup(database));
+  assert.deepEqual(valueOf(await retry.previewBackup(exported.uri)).manifest, exported.manifest);
+}));
+
+test("S13 creates a new activity with the saved USD default and preserves the original HKD activity", withFinance(async (_finance, activities) => {
+  const preferences = await createAppPreferencesStore({
+    getItem: async () => JSON.stringify({ language: "en", defaultCurrency: "USD" }),
+    setItem: async () => {},
+  }).load();
+  await activities.completeActivity("trip");
+  const created = await activities.createActivity({
+    id: "new-usd", name: "New activity", currency: preferences.defaultCurrency,
+    members: [{ id: "new-member", displayName: "New member" }],
+  });
+  assert.equal(created.currency, "USD");
+  assert.equal((await activities.getActivity("trip")).currency, "HKD");
 }));
 
 function restoreHost(directoryUri, platform, faults = {}) {
@@ -1201,6 +1330,9 @@ test("confirmed restore replaces the full database and retained repositories use
   const preview = await prepare(await exportSource());
   assert.equal(preview.effect, "replace-all-local-data");
   assert.deepEqual([preview.current.activityCount, preview.current.expenseCount, preview.difference.expenseCount], [1, 0, 2]);
+  assert.deepEqual([preview.current.refundCount, preview.current.repaymentCount], [0, 0]);
+  assert.deepEqual([preview.backup.refundCount, preview.backup.repaymentCount], [1, 1]);
+  assert.deepEqual([preview.difference.refundCount, preview.difference.repaymentCount], [1, 1]);
   faults.beforeCheck = async () => {
     await assert.rejects(activities.renameActivity("old", "Blocked during restore"), /restore in progress/);
   };
@@ -1216,6 +1348,9 @@ test("confirmed restore replaces the full database and retained repositories use
   }
   assert.deepEqual(valueOf(await createFinanceRepository(live).getActivityLedger("trip")),
     valueOf(await finance.getActivityLedger("trip")));
+  const restoredSettlement = await loadActivitySettlement("trip", live);
+  assert.equal(restoredSettlement.expenseCount, preview.backup.expenseCount);
+  assert.equal(await loadActivitySettlement("old", live), null);
   await activities.renameActivity("trip", "New connection works");
   assert.equal((await activities.getActivity("trip")).name, "New connection works");
 }));
@@ -1227,13 +1362,26 @@ test("restore rejects invalid paths, damaged backups and a valid backup swapped 
     assert.deepEqual(await service.prepareRestore(uri), { status: "validation-failed", code: "INVALID_BACKUP_URI" });
   }
   const bad = join(directory, "bad.splitmori-backup");
-  writeFileSync(bad, "invalid");
+  // An empty ZIP with the backup extension still fails the SplitMori format check.
+  writeFileSync(bad, Buffer.from("504b0506" + "00".repeat(18), "hex"));
   assert.deepEqual(await service.prepareRestore(pathToFileURL(bad).href), { status: "validation-failed", code: "INVALID_BACKUP_FORMAT" });
   const original = await exportSource();
   const { manifest, payload } = unpackBackup(original);
   writeBackup(bad, { ...manifest, schemaVersion: migrations.length + 1 }, payload);
   assert.deepEqual(await service.prepareRestore(pathToFileURL(bad).href),
     { status: "validation-failed", code: "UNSUPPORTED_BACKUP_VERSION" });
+  const altered = join(directory, "missing-index.sqlite");
+  writeFileSync(altered, payload);
+  const malformed = openTestConnection(altered);
+  try {
+    await malformed.execAsync("DROP INDEX merchant_payments_single_payer");
+  } finally {
+    malformed.close();
+  }
+  const malformedPayload = readFileSync(altered);
+  writeBackup(bad, { ...manifest, byteLength: malformedPayload.length, sha256: sha256(malformedPayload) }, malformedPayload);
+  assert.deepEqual(await service.prepareRestore(pathToFileURL(bad).href),
+    { status: "validation-failed", code: "BACKUP_SCHEMA_MISMATCH" });
   const preview = await prepare(original);
   valueOf(await finance.createExpense("trip", 100, expense()));
   copyFileSync(await exportSource(), original);
@@ -1249,6 +1397,8 @@ test("cancel consumes the confirmation and leaves both the main SQLite file and 
   const files = [databaseName, databaseName + "-wal"];
   const before = files.map((name) => readFileSync(join(directory, name)));
   const preview = await prepare(await exportSource());
+  assert.deepEqual(await service.restoreBackup({ confirmation: {}, confirmed: true }),
+    { status: "validation-failed", code: "INVALID_CONFIRMATION" });
   assert.deepEqual(await service.restoreBackup({ confirmation: preview.confirmation, confirmed: false }), { status: "cancelled" });
   assert.deepEqual(await service.restoreBackup({ confirmation: preview.confirmation, confirmed: true }),
     { status: "validation-failed", code: "INVALID_CONFIRMATION" });

@@ -4,16 +4,12 @@ import {
 } from "react-native";
 import type { TransferSuggestion } from "../domain/settlement.ts";
 import { loadActivitySettlement, type ActivitySettlementData } from "../services/activitySettlement.ts";
-import { settlementPngCopy } from "../services/activitySettlementPng.ts";
 import { formatResultMoney } from "../services/quickSplitResult.ts";
+import { useSettlementCopy } from "./settlementCopy.ts";
 import { colors, Icon } from "./visuals.tsx";
 
-const tabs = [
-  { id: "overview", label: "結算總覽" },
-  { id: "members", label: "每人收支" },
-  { id: "transfers", label: "轉帳建議" },
-] as const;
-type Tab = typeof tabs[number]["id"];
+const tabs = ["overview", "members", "transfers"] as const;
+type Tab = typeof tabs[number];
 type HistoryOrigin = Exclude<Tab, "members">;
 type Member = ActivitySettlementData["members"][number];
 type SettlementRow =
@@ -22,9 +18,6 @@ type SettlementRow =
   | ({ kind: "repayment" } & Omit<ActivitySettlementData["repayments"][number], "kind">);
 type Section = SectionListData<SettlementRow, { title: string; caption?: string }>;
 type FormatMoney = (minor: number | bigint) => string;
-
-const activitySettlementUiLocale = "zh-HK";
-const dateFormat = new Intl.DateTimeFormat(activitySettlementUiLocale, { year: "numeric", month: "long", day: "numeric" });
 
 function AmountLine({ label, value, divider = true }: { label: string; value: string; divider?: boolean }) {
   return (
@@ -49,51 +42,55 @@ function FooterButton({ label, onPress, secondary = false, disabled = false }: {
 }
 
 function ActivityHeading({ activity }: { activity: ActivitySettlementData["activity"] }) {
+  const copy = useSettlementCopy();
   const date = new Date(activity.createdAt);
-  const formattedDate = Number.isNaN(date.getTime()) ? "日期未能讀取" : dateFormat.format(date);
+  const formattedDate = Number.isNaN(date.getTime()) ? copy.dateUnavailable : new Intl.DateTimeFormat(copy.locale, { year: "numeric", month: "long", day: "numeric" }).format(date);
   return (
     <View style={[styles.amountRow, styles.activityHeading]}>
       <View style={styles.memberCopy}>
         <Text accessibilityRole="header" style={styles.activityName}>{activity.name}</Text>
         <Text style={styles.caption}>{formattedDate} · {activity.currency}</Text>
       </View>
-      <Text style={[styles.caption, styles.badge]}>{activity.status === "active" ? "進行中" : "已完成"}</Text>
+      <Text style={[styles.caption, styles.badge]}>{activity.status === "active" ? copy.active : copy.completed}</Text>
     </View>
   );
 }
 
 function SettledMessage() {
+  const copy = useSettlementCopy();
   return (
     <View style={styles.settled}>
       <View style={styles.settledIcon}><Icon name="check" size={31} /></View>
-      <Text accessibilityRole="header" style={styles.settledTitle}>款項已全部結清</Text>
-      <Text style={[styles.caption, styles.center]}>結清狀態與活動是否完成無關。</Text>
+      <Text accessibilityRole="header" style={styles.settledTitle}>{copy.allSettled}</Text>
+      <Text style={[styles.caption, styles.center]}>{copy.independent}</Text>
     </View>
   );
 }
 
 function NoFinancialRecords({ transfers = false }: { transfers?: boolean }) {
+  const copy = useSettlementCopy();
   return (
     <View style={[styles.card, styles.empty]}>
-      <Text accessibilityRole="header" style={styles.heading}>暫無財務紀錄</Text>
-      <Text style={styles.caption}>{transfers ? "新增費用後，即可查看轉帳建議。" : "新增費用後，即可查看成員收支及結算狀態。"}</Text>
+      <Text accessibilityRole="header" style={styles.heading}>{copy.empty}</Text>
+      <Text style={styles.caption}>{transfers ? copy.addForTransfers : copy.addForSummary}</Text>
     </View>
   );
 }
 
 function Overview({ data, money }: { data: ActivitySettlementData; money: FormatMoney }) {
+  const copy = useSettlementCopy();
   if (data.status === "empty") return <NoFinancialRecords />;
   if (data.status === "settled") {
     return (
       <View style={styles.contentStack}>
         <SettledMessage />
         <View style={styles.card}>
-          <Text accessibilityRole="header" style={styles.heading}>最新結算</Text>
-          <AmountLine label={`活動有效費用 · ${data.expenseCount} 筆`} value={money(data.effectiveMinor)} divider={false} />
-          <AmountLine label="有效商家退款" value={money(data.refundMinor)} />
-          <AmountLine label="已登記成員還款" value={money(data.repaymentMinor)} />
-          <AmountLine label="尚待結算" value={money(data.outstandingMinor)} />
-          <AmountLine label="轉帳建議" value={`${data.suggestions.length} 筆`} />
+          <Text accessibilityRole="header" style={styles.heading}>{copy.latest}</Text>
+          <AmountLine label={`${copy.effective} · ${copy.expenses(data.expenseCount)}`} value={money(data.effectiveMinor)} divider={false} />
+          <AmountLine label={copy.refund} value={money(data.refundMinor)} />
+          <AmountLine label={copy.repayment} value={money(data.repaymentMinor)} />
+          <AmountLine label={copy.outstanding} value={money(data.outstandingMinor)} />
+          <AmountLine label={copy.transfers} value={copy.transferCount(data.suggestions.length)} />
         </View>
       </View>
     );
@@ -102,24 +99,24 @@ function Overview({ data, money }: { data: ActivitySettlementData; money: Format
   return (
     <View style={styles.contentStack}>
       <View style={styles.card}>
-        <Text style={styles.caption}>活動有效費用 · {data.expenseCount} 筆</Text>
+        <Text style={styles.caption}>{copy.effective} · {copy.expenses(data.expenseCount)}</Text>
         <Text style={styles.heroAmount}>{money(data.effectiveMinor)}</Text>
-        <AmountLine label="有效商家退款" value={money(data.refundMinor)} divider={false} />
-        <AmountLine label="已登記成員還款" value={money(data.repaymentMinor)} />
+        <AmountLine label={copy.refund} value={money(data.refundMinor)} divider={false} />
+        <AmountLine label={copy.repayment} value={money(data.repaymentMinor)} />
       </View>
       <View style={styles.group}>
         <View style={styles.amountRow}>
-          <Text accessibilityRole="header" style={styles.heading}>目前結算狀態</Text>
-          <Text style={[styles.caption, styles.badge]}>未結清</Text>
+          <Text accessibilityRole="header" style={styles.heading}>{copy.settlementStatus}</Text>
+          <Text style={[styles.caption, styles.badge]}>{copy.unsettled}</Text>
         </View>
         <View style={[styles.card, styles.metrics]}>
           <View style={styles.metric}>
             <Text style={[styles.metricValue, styles.center]}>{money(data.outstandingMinor)}</Text>
-            <Text style={[styles.caption, styles.center]}>尚待結算</Text>
+            <Text style={[styles.caption, styles.center]}>{copy.outstanding}</Text>
           </View>
           <View style={styles.metric}>
-            <Text style={styles.metricValue}>{data.suggestions.length} 筆</Text>
-            <Text style={[styles.caption, styles.center]}>轉帳建議</Text>
+            <Text style={styles.metricValue}>{copy.transferCount(data.suggestions.length)}</Text>
+            <Text style={[styles.caption, styles.center]}>{copy.transfers}</Text>
           </View>
         </View>
       </View>
@@ -128,24 +125,25 @@ function Overview({ data, money }: { data: ActivitySettlementData; money: Format
 }
 
 function TransferOverview({ data, money }: { data: ActivitySettlementData; money: FormatMoney }) {
+  const copy = useSettlementCopy();
   if (data.status === "empty") return <NoFinancialRecords transfers />;
   if (data.status === "settled") {
     return (
       <View style={styles.contentStack}>
         <View style={[styles.card, styles.transferTotal]}>
-          <Text style={styles.caption}>目前款項狀態</Text>
-          <Text accessibilityRole="header" style={styles.transferStatus}>款項已全部結清</Text>
-          <AmountLine label="活動有效費用" value={money(data.effectiveMinor)} />
-          <AmountLine label="有效已登記還款" value={money(data.repaymentMinor)} />
+          <Text style={styles.caption}>{copy.paymentStatus}</Text>
+          <Text accessibilityRole="header" style={styles.transferStatus}>{copy.allSettled}</Text>
+          <AmountLine label={copy.effective} value={money(data.effectiveMinor)} />
+          <AmountLine label={copy.validRepayments} value={money(data.repaymentMinor)} />
         </View>
         <View style={styles.group}>
-          <Text accessibilityRole="header" style={styles.heading}>轉帳建議</Text>
+          <Text accessibilityRole="header" style={styles.heading}>{copy.transfers}</Text>
           <View style={[styles.card, styles.group]}>
             <View style={styles.amountRow}>
               <Icon name="check" size={26} />
-              <Text style={styles.caption}>目前無需再轉帳</Text>
+              <Text style={styles.caption}>{copy.noMoreTransfers}</Text>
             </View>
-            <Text style={styles.caption}>完成活動與款項結清是兩個獨立狀態。</Text>
+            <Text style={styles.caption}>{copy.independentDetail}</Text>
           </View>
         </View>
       </View>
@@ -154,20 +152,20 @@ function TransferOverview({ data, money }: { data: ActivitySettlementData; money
   if (data.voidedRepaymentMinor > 0n) {
     return (
       <View style={styles.card}>
-        <Text style={styles.caption}>目前尚待結算</Text>
+        <Text style={styles.caption}>{copy.currentOutstanding}</Text>
         <Text style={styles.heroAmount}>{money(data.outstandingMinor)}</Text>
-        <AmountLine label="活動有效費用" value={money(data.effectiveMinor)} />
-        <AmountLine label="有效已登記還款" value={money(data.repaymentMinor)} />
+        <AmountLine label={copy.effective} value={money(data.effectiveMinor)} />
+        <AmountLine label={copy.validRepayments} value={money(data.repaymentMinor)} />
       </View>
     );
   }
   return (
     <View style={styles.group}>
-      <Text accessibilityRole="header" style={styles.heading}>尚待轉帳</Text>
+      <Text accessibilityRole="header" style={styles.heading}>{copy.pendingTransfers}</Text>
       <View style={[styles.card, styles.transferTotal]}>
-        <Text style={styles.caption}>依目前帳務自動計算</Text>
+        <Text style={styles.caption}>{copy.autoCalculated}</Text>
         <Text style={styles.heroAmount}>{money(data.outstandingMinor)}</Text>
-        <Text style={styles.caption}>共 {data.suggestions.length} 筆建議 · 尚未記錄這些轉帳</Text>
+        <Text style={styles.caption}>{copy.suggestionCount(data.suggestions.length)}</Text>
       </View>
     </View>
   );
@@ -176,15 +174,16 @@ function TransferOverview({ data, money }: { data: ActivitySettlementData; money
 function RepaymentHistoryLink({ data, money, onPress }: {
   data: ActivitySettlementData; money: FormatMoney; onPress: () => void;
 }) {
+  const copy = useSettlementCopy();
   return (
     <View style={styles.historyGroup}>
-      <Text accessibilityRole="header" style={styles.heading}>歷史記錄</Text>
+      <Text accessibilityRole="header" style={styles.heading}>{copy.history}</Text>
       <Pressable accessibilityRole="button" onPress={onPress}
         style={({ pressed }) => [styles.card, styles.historyLink, pressed && styles.pressed]}>
         <View style={styles.memberCopy}>
-          <Text style={styles.memberName}>查看還款記錄</Text>
-          <Text style={styles.caption}>{data.repaymentHistory.length} 筆歷史 · 有效 {money(data.repaymentMinor)}</Text>
-          {data.voidedRepaymentMinor > 0n && <Text style={styles.caption}>已作廢 {money(data.voidedRepaymentMinor)}</Text>}
+          <Text style={styles.memberName}>{copy.viewHistory}</Text>
+          <Text style={styles.caption}>{copy.historyLine(data.repaymentHistory.length, money(data.repaymentMinor))}</Text>
+          {data.voidedRepaymentMinor > 0n && <Text style={styles.caption}>{copy.voided} {money(data.voidedRepaymentMinor)}</Text>}
         </View>
         <Icon name="next" size={17} color={colors.muted} />
       </Pressable>
@@ -196,8 +195,9 @@ function MemberRow({ member, money, currency, first, last, separate, expanded, o
   member: Member; money: FormatMoney; currency: string; first: boolean; last: boolean;
   separate: boolean; expanded: boolean; onToggle?: () => void;
 }) {
+  const copy = useSettlementCopy();
   const net = member.netBalanceMinor;
-  const direction = net > 0 ? "應收" : net < 0 ? "應付" : "淨額";
+  const direction = net > 0 ? copy.receive : net < 0 ? copy.pay : copy.net;
   const fullAmount = money(Math.abs(net));
   const memberAmount = fullAmount.slice(currency.length + 1);
   const signedAmount = net === 0 ? fullAmount : `${net > 0 ? "+" : "−"} ${fullAmount}`;
@@ -206,7 +206,7 @@ function MemberRow({ member, money, currency, first, last, separate, expanded, o
       <View style={styles.avatar}><Icon name="member" size={17} color={colors.muted} /></View>
       <View style={styles.memberCopy}>
         <Text style={styles.memberName}>{member.displayName}</Text>
-        {expanded && <Text style={styles.caption}>{net === 0 ? "已平衡" : direction}</Text>}
+        {expanded && <Text style={styles.caption}>{net === 0 ? copy.balanced : direction}</Text>}
       </View>
       <View style={styles.memberAmount}>
         <Text style={expanded ? styles.expandedAmount : net === 0 ? styles.caption : styles.amount}>
@@ -222,20 +222,20 @@ function MemberRow({ member, money, currency, first, last, separate, expanded, o
       {!first && <View style={styles.divider} />}
       {onToggle ? (
         <Pressable accessibilityRole="button" accessibilityState={{ expanded }}
-          accessibilityLabel={`${member.displayName}，${net === 0 ? "淨額" : direction} ${fullAmount}`}
+          accessibilityLabel={`${member.displayName}, ${direction} ${fullAmount}`}
           onPress={onToggle} style={({ pressed }) => [styles.memberHeader, pressed && styles.pressed]}>
           {header}
         </Pressable>
       ) : <View style={styles.memberHeader}>{header}</View>}
       {expanded && (
         <View style={styles.memberDetails}>
-          <AmountLine label="實際商家付款" value={money(member.merchantPaidMinor)} />
-          <AmountLine label="已收到商家退款" value={money(member.merchantRefundReceivedMinor)} />
-          <AmountLine label="應承擔費用" value={money(member.allocatedMinor)} />
-          <AmountLine label="已支付成員還款" value={money(member.transferSentMinor)} />
-          <AmountLine label="已收到成員還款" value={money(member.transferReceivedMinor)} />
+          <AmountLine label={copy.paidMerchant} value={money(member.merchantPaidMinor)} />
+          <AmountLine label={copy.receivedRefund} value={money(member.merchantRefundReceivedMinor)} />
+          <AmountLine label={copy.allocated} value={money(member.allocatedMinor)} />
+          <AmountLine label={copy.sentRepayment} value={money(member.transferSentMinor)} />
+          <AmountLine label={copy.receivedRepayment} value={money(member.transferReceivedMinor)} />
           <View style={[styles.amountRow, styles.netLine]}>
-            <Text style={styles.memberName}>目前淨額</Text><Text style={styles.metricValue}>{signedAmount}</Text>
+            <Text style={styles.memberName}>{copy.currentNet}</Text><Text style={styles.metricValue}>{signedAmount}</Text>
           </View>
         </View>
       )}
@@ -246,22 +246,23 @@ function MemberRow({ member, money, currency, first, last, separate, expanded, o
 function TransferRow({ from, to, amount, note, onSelect, selected }: {
   from: string; to: string; amount: string; note?: string; onSelect?: () => void; selected?: boolean;
 }) {
+  const copy = useSettlementCopy();
   const content = (
     <>
       <View style={[styles.amountRow, styles.transferAmountRow]}>
         <View style={styles.memberCopy}>
           <Text style={styles.memberName}>{from} → {to}</Text>
-          <Text style={styles.caption}>{onSelect ? `由 ${from} 轉給 ${to}` : "已登記的實際還款"}</Text>
+          <Text style={styles.caption}>{onSelect ? copy.transferFromTo(from, to) : copy.recordedPayment}</Text>
         </View>
         <Text style={styles.metricValue}>{amount}</Text>
       </View>
-      {onSelect && <Text style={[styles.caption, styles.suggestionNote]}>此筆為建議，不代表已付款或已登記還款。</Text>}
-      {note && <Text style={[styles.caption, styles.suggestionNote]}>備註：{note}</Text>}
+      {onSelect && <Text style={[styles.caption, styles.suggestionNote]}>{copy.suggestionOnly}</Text>}
+      {note && <Text style={[styles.caption, styles.suggestionNote]}>{copy.note} · {note}</Text>}
     </>
   );
   if (!onSelect) return <View style={[styles.card, styles.transferRow]}>{content}</View>;
   return <Pressable accessibilityRole="radio" accessibilityState={{ checked: !!selected }}
-    accessibilityLabel={`${from} 轉給 ${to}，${amount}`} onPress={onSelect}
+    accessibilityLabel={`${copy.transferFromTo(from, to)}, ${amount}`} onPress={onSelect}
     style={({ pressed }) => [styles.card, styles.transferRow, selected && styles.selectedTransfer, pressed && styles.pressed]}>
     {content}
   </Pressable>;
@@ -271,8 +272,9 @@ function SettlementContent({ data, tab, setTab, onBack, refreshing, onRefresh, o
   data: ActivitySettlementData; tab: Tab; setTab: (tab: Tab) => void; onBack: () => void; refreshing: boolean; onRefresh: () => void;
   onRecordRepayment: (suggestion: TransferSuggestion) => void;
   onViewRepaymentHistory: (tab: HistoryOrigin) => void;
-  onSharePng: (appLocale: string) => void;
+  onSharePng: () => void;
 }) {
+  const copy = useSettlementCopy();
   const [expandedId, setExpandedId] = useState<string | null | undefined>();
   const [selectedPair, setSelectedPair] = useState<string>();
   const pairKey = ({ fromMemberId, toMemberId }: TransferSuggestion) => JSON.stringify([fromMemberId, toMemberId]);
@@ -283,24 +285,24 @@ function SettlementContent({ data, tab, setTab, onBack, refreshing, onRefresh, o
   const { currency } = data.activity;
   const money: FormatMoney = (minor) => formatResultMoney(currency, minor);
   const names = new Map(data.members.map(({ memberId, displayName }) => [memberId, displayName]));
-  const nameFor = (id: string) => names.get(id) ?? "未知成員";
+  const nameFor = (id: string) => names.get(id) ?? copy.unknownMember;
   const sections: Section[] = [];
   if (tab === "transfers") {
     if (data.suggestions.length > 0) {
       sections.push({
-        key: "suggestions", title: "建議付款方向",
-        caption: multipleSuggestions ? "請選擇一筆建議，再記錄實際還款。" : undefined,
+        key: "suggestions", title: copy.direction,
+        caption: multipleSuggestions ? copy.selectSuggestion : undefined,
         data: data.suggestions.map((suggestion) => ({ ...suggestion, kind: "suggestion", id: pairKey(suggestion) })),
       });
     }
   } else {
     if (tab === "overview" && data.status === "settled" && data.repayments.length > 0) {
-      sections.push({ key: "repayments", title: "已登記的還款",
+      sections.push({ key: "repayments", title: copy.recorded,
         data: data.repayments.map(({ kind: _kind, ...repayment }) => ({ ...repayment, kind: "repayment" })) });
     }
     sections.push({
-      key: "members", title: tab === "members" ? "成員收支明細" : "每位成員",
-      caption: tab === "members" ? "付款與分攤分開計算。有效退款及已登記還款均計入淨額。" : undefined,
+      key: "members", title: tab === "members" ? copy.memberDetails : copy.eachMember,
+      caption: tab === "members" ? copy.memberNote : undefined,
       data: data.members.map((member) => ({ kind: "member", id: member.memberId, member })),
     });
   }
@@ -309,21 +311,21 @@ function SettlementContent({ data, tab, setTab, onBack, refreshing, onRefresh, o
     <View style={styles.contentStack}>
       {tab !== "members" && <ActivityHeading activity={data.activity} />}
       <View accessibilityRole="tablist" style={styles.segmented}>
-        {tabs.map(({ id, label }) => (
+        {tabs.map((id) => (
           <Pressable key={id} accessibilityRole="tab" accessibilityState={{ selected: tab === id }}
             onPress={() => setTab(id)} style={[styles.segment, tab === id && styles.segmentSelected]}>
-            <Text style={[styles.segmentText, tab === id && styles.segmentTextSelected]}>{label}</Text>
+            <Text style={[styles.segmentText, tab === id && styles.segmentTextSelected]}>{id === "members" ? copy.membersTab : copy[id]}</Text>
           </Pressable>
         ))}
       </View>
       {tab === "overview" && <Overview data={data} money={money} />}
       {tab === "overview" && (
-        <Pressable accessibilityRole="button" onPress={() => onSharePng(activitySettlementUiLocale)}
+        <Pressable accessibilityRole="button" onPress={onSharePng}
           style={({ pressed }) => [styles.card, styles.historyLink, pressed && styles.pressed]}>
           <View style={styles.avatar}><Icon name="receipt" size={19} /></View>
           <View style={styles.memberCopy}>
-            <Text style={styles.memberName}>{settlementPngCopy[activitySettlementUiLocale].entry}</Text>
-            <Text style={styles.caption}>預覽並分享目前的活動結算</Text>
+            <Text style={styles.memberName}>{copy.entry}</Text>
+            <Text style={styles.caption}>{copy.shareHint}</Text>
           </View>
           <Icon name="next" size={17} color={colors.muted} />
         </Pressable>
@@ -370,21 +372,21 @@ function SettlementContent({ data, tab, setTab, onBack, refreshing, onRefresh, o
             <RepaymentHistoryLink data={data} money={money} onPress={() => onViewRepaymentHistory(tab)} />
             {data.suggestions.length > 0 && <>
               <View style={styles.notice}>
-                <Text style={styles.noteTitle}>重要說明</Text>
-                <Text style={styles.caption}>轉帳建議依目前淨額產生。實際轉帳後，須另行記錄還款，帳本才會更新。</Text>
+                <Text style={styles.noteTitle}>{copy.important}</Text>
+                <Text style={styles.caption}>{copy.actualTransfer}</Text>
               </View>
               <View style={styles.updateNote}>
-                <Text style={styles.noteTitle}>資料如何更新？</Text>
-                <Text style={styles.caption}>新增費用、商家退款、費用更正或登記還款後，建議會依最新帳務更新。</Text>
+                <Text style={styles.noteTitle}>{copy.howUpdated}</Text>
+                <Text style={styles.caption}>{copy.updateNote}</Text>
               </View>
             </>}
           </View>
         ) : undefined}
       />
-      {tab === "overview" && data.status === "unsettled" && <FooterButton label="查看轉帳建議" onPress={() => setTab("transfers")} />}
-      {tab === "transfers" && data.suggestions.length > 0 && <FooterButton label="記錄還款" disabled={!selectedSuggestion || refreshing}
+      {tab === "overview" && data.status === "unsettled" && <FooterButton label={copy.viewTransfers} onPress={() => setTab("transfers")} />}
+      {tab === "transfers" && data.suggestions.length > 0 && <FooterButton label={copy.recordRepayment} disabled={!selectedSuggestion || refreshing}
         onPress={() => { if (selectedSuggestion) onRecordRepayment(selectedSuggestion); }} />}
-      {tab !== "members" && data.status !== "unsettled" && <FooterButton label="返回活動詳情" onPress={onBack} secondary />}
+      {tab !== "members" && data.status !== "unsettled" && <FooterButton label={copy.back} onPress={onBack} secondary />}
     </>
   );
 }
@@ -392,8 +394,9 @@ function SettlementContent({ data, tab, setTab, onBack, refreshing, onRefresh, o
 export function ActivitySettlementScreen({ activityId, onBack, initialTab = "overview", onRecordRepayment, onViewRepaymentHistory, onSharePng }: {
   activityId: string; onBack: () => void; initialTab?: Tab; onRecordRepayment: (suggestion: TransferSuggestion) => void;
   onViewRepaymentHistory: (tab: HistoryOrigin) => void;
-  onSharePng: (appLocale: string) => void;
+  onSharePng: () => void;
 }) {
+  const copy = useSettlementCopy();
   const [tab, setTab] = useState<Tab>(initialTab);
   const [data, setData] = useState<ActivitySettlementData | null>();
   const [loading, setLoading] = useState(true);
@@ -430,21 +433,21 @@ export function ActivitySettlementScreen({ activityId, onBack, initialTab = "ove
   return (
     <View style={styles.screen}>
       <View style={styles.header}>
-        <Pressable accessibilityRole="button" accessibilityLabel="返回活動詳情" onPress={onBack} style={styles.headerSide}>
+        <Pressable accessibilityRole="button" accessibilityLabel={copy.back} onPress={onBack} style={styles.headerSide}>
           <Icon name="back" size={23} />
         </Pressable>
-        <Text accessibilityRole="header" style={styles.title}>活動結算</Text>
+        <Text accessibilityRole="header" style={styles.title}>{copy.title}</Text>
         <View style={styles.headerSide} />
       </View>
       {data ? <SettlementContent data={data} tab={tab} setTab={setTab} onBack={onBack} refreshing={loading} onRefresh={reload}
         onRecordRepayment={onRecordRepayment} onViewRepaymentHistory={onViewRepaymentHistory} onSharePng={onSharePng} />
         : <View style={[styles.content, styles.group]}>
-          {loading && <ActivityIndicator accessibilityLabel="正在讀取結算資料" color={colors.ink} />}
+          {loading && <ActivityIndicator accessibilityLabel={copy.loading} color={colors.ink} />}
           {readError && <View style={[styles.card, styles.group]}>
-            <Text accessibilityRole="alert" style={styles.body}>未能讀取結算資料，請重試。</Text>
-            <Pressable accessibilityRole="button" style={styles.retry} onPress={reload}><Text style={styles.amount}>重新讀取</Text></Pressable>
+            <Text accessibilityRole="alert" style={styles.body}>{copy.loadFailed}</Text>
+            <Pressable accessibilityRole="button" style={styles.retry} onPress={reload}><Text style={styles.amount}>{copy.retry}</Text></Pressable>
           </View>}
-          {data === null && !loading && <Text style={styles.caption}>找不到這個活動。</Text>}
+          {data === null && !loading && <Text style={styles.caption}>{copy.notFound}</Text>}
         </View>}
     </View>
   );

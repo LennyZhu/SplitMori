@@ -15,11 +15,11 @@ import { colors, Icon } from "./visuals.tsx";
 const dateFormat = new Intl.DateTimeFormat("zh-HK", { year: "numeric", month: "long", day: "numeric" });
 const newMember = (): NewMember => ({ id: uuid.v4(), displayName: "" });
 
-export function CreateActivityScreen({ onBack, onCreated, onBlocked }: {
-  onBack: () => void; onCreated: (activity: Activity) => void; onBlocked: (blocker: ActivityCreationBlocker) => void;
+export function CreateActivityScreen({ onBack, onCreated, onBlocked, defaultCurrency }: {
+  defaultCurrency: Currency; onBack: () => void; onCreated: (activity: Activity) => void; onBlocked: (blocker: ActivityCreationBlocker) => void;
 }) {
   const [name, setName] = useState("");
-  const [currency, setCurrency] = useState<Currency>("HKD");
+  const [currency, setCurrency] = useState(defaultCurrency);
   const [members, setMembers] = useState<readonly NewMember[]>(() => [newMember(), newMember()]);
   const [currencyPicker, setCurrencyPicker] = useState(false);
   const [validation, setValidation] = useState<"name" | "members">();

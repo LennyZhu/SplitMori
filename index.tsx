@@ -1,10 +1,11 @@
 import { registerRootComponent } from "expo";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { BackHandler, Pressable, StatusBar, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, BackHandler, Pressable, StatusBar, StyleSheet, Text, View } from "react-native";
 import { initialWindowMetrics, SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { createActivityRepository, type ActivityCreationBlocker } from "./src/data/activities.ts";
-import { getLocalDatabase } from "./src/data/database.ts";
+import { DatabaseInitializationError, getLocalDatabase } from "./src/data/database.ts";
 import type { TransferSuggestion } from "./src/domain/settlement.ts";
+import type { AppLanguage } from "./src/services/appPreferences.ts";
 import type { QuickSplitPreview } from "./src/services/quickSplitEditor.ts";
 import { ActivityDetailScreen } from "./src/ui/ActivityDetailScreen.tsx";
 import { ActivityListScreen } from "./src/ui/ActivityListScreen.tsx";
@@ -14,6 +15,7 @@ import { ActivityRepaymentScreen } from "./src/ui/ActivityRepaymentScreen.tsx";
 import { ActivitySettlementPngScreen } from "./src/ui/ActivitySettlementPngScreen.tsx";
 import { ActivitySettlementScreen } from "./src/ui/ActivitySettlementScreen.tsx";
 import { ActivityQuotaSheet } from "./src/ui/ActivityQuotaSheet.tsx";
+import { AppLanguageContext } from "./src/ui/AppLanguageContext.ts";
 import { CreateActivityScreen } from "./src/ui/CreateActivityScreen.tsx";
 import { CreateExpenseScreen } from "./src/ui/CreateExpenseScreen.tsx";
 import { ExpenseCorrectionScreen } from "./src/ui/ExpenseCorrectionScreen.tsx";
@@ -22,13 +24,16 @@ import { QuickHistoryListScreen, QuickHistoryScreen } from "./src/ui/QuickHistor
 import { QuickSplitConversionScreen } from "./src/ui/QuickSplitConversionScreen.tsx";
 import { QuickSplitResultScreen } from "./src/ui/QuickSplitResultScreen.tsx";
 import { QuickSplitScreen } from "./src/ui/QuickSplitScreen.tsx";
+import { SettingsScreen } from "./src/ui/SettingsScreen.tsx";
+import { settingsCopy } from "./src/ui/settingsCopy.ts";
+import { useAppPreferences } from "./src/ui/useAppPreferences.ts";
 import { colors, Icon, type IconName } from "./src/ui/visuals.tsx";
 
 const tabs = [
-  { name: "home", title: "首頁", icon: "home" },
-  { name: "activities", title: "活動", icon: "calendar" },
-  { name: "records", title: "記錄", icon: "records" },
-] as const satisfies readonly { name: string; title: string; icon: IconName }[];
+  { name: "home", title: { "zh-HK": "首頁", en: "Home" }, icon: "home" },
+  { name: "activities", title: { "zh-HK": "活動", en: "Activities" }, icon: "calendar" },
+  { name: "records", title: { "zh-HK": "記錄", en: "Records" }, icon: "records" },
+] as const satisfies readonly { name: string; title: Record<AppLanguage, string>; icon: IconName }[];
 
 type Tab = typeof tabs[number]["name"];
 type ActivityOrigin = "home" | "activities";
@@ -41,11 +46,6 @@ const tabColors = {
   unselected: "#898989",
 } as const;
 
-const placeholderTitles = {
-  settings: "設定",
-};
-
-type Destination = keyof typeof placeholderTitles;
 type QuickHistoryRoute = { name: "quickHistory"; id: string; origin?: "records" };
 type QuickResultRoute = { name: "quickResult"; result: QuickSplitPreview };
 type ActivityDetailRoute = {
@@ -57,13 +57,14 @@ type ActivityDetailRoute = {
 };
 type ActivitySettlementRoute = { name: "activitySettlement"; previous: ActivityDetailRoute; initialTab?: "overview" | "transfers" };
 type Route =
-  | { name: Tab | "settings" }
+  | { name: Tab }
+  | { name: "settings"; restored?: boolean; recoveryRequired?: boolean }
   | { name: "createActivity"; origin: ActivityOrigin }
   | { name: "createExpense"; previous: ActivityDetailRoute }
   | { name: "expenseDetails"; expenseId: string; previous: ActivityDetailRoute }
   | { name: "activityMembers"; previous: ActivityDetailRoute }
   | ActivitySettlementRoute
-  | { name: "activitySettlementPng"; previous: ActivitySettlementRoute; appLocale: string }
+  | { name: "activitySettlementPng"; previous: ActivitySettlementRoute }
   | { name: "activityRepayment"; previous: ActivitySettlementRoute; suggestion: TransferSuggestion }
   | { name: "activityRepaymentHistory"; previous: ActivitySettlementRoute }
   | { name: "quickSplit"; focusPayer?: boolean }
@@ -88,7 +89,7 @@ function backRoute(route: Route): Route {
   return { name: "home" };
 }
 
-function TabBar({ active, onSelect }: { active: Tab; onSelect: (tab: Tab) => void }) {
+function TabBar({ active, language, onSelect }: { active: Tab; language: AppLanguage; onSelect: (tab: Tab) => void }) {
   return (
     <SafeAreaView edges={["bottom", "left", "right"]} style={styles.tabDock}>
       <View accessibilityRole="tablist" style={styles.tabCapsule}>
@@ -103,7 +104,7 @@ function TabBar({ active, onSelect }: { active: Tab; onSelect: (tab: Tab) => voi
               style={({ pressed }) => [styles.tab, selected && styles.selectedTab, pressed && styles.pressed]}
             >
               <Icon name={icon} size={26} filled={selected} color={selected ? tabColors.selected : tabColors.unselected} />
-              <Text style={[styles.tabText, selected && styles.selectedTabText]}>{title}</Text>
+              <Text style={[styles.tabText, selected && styles.selectedTabText]}>{title[language]}</Text>
             </Pressable>
           );
         })}
@@ -112,24 +113,11 @@ function TabBar({ active, onSelect }: { active: Tab; onSelect: (tab: Tab) => voi
   );
 }
 
-function Placeholder({ name, onBack }: {
-  name: Destination; onBack?: () => void;
-}) {
-  return (
-    <View style={styles.placeholder}>
-      {onBack && (
-        <Pressable accessibilityRole="button" onPress={onBack} style={({ pressed }) => [styles.back, pressed && styles.pressed]}>
-          <Icon name="back" size={20} color={colors.accentText} />
-          <Text style={styles.selectedText}>返回首頁</Text>
-        </Pressable>
-      )}
-      <Text accessibilityRole="header" style={styles.placeholderTitle}>{placeholderTitles[name]}</Text>
-      <Text style={styles.placeholderBody}>此頁面仍在開發中。</Text>
-    </View>
-  );
-}
-
 function App() {
+  const settings = useAppPreferences();
+  const { language, preferences } = settings;
+  const [ledgerReady, setLedgerReady] = useState(false);
+  const [ledgerEpoch, setLedgerEpoch] = useState(0);
   const [route, setRoute] = useState<Route>({ name: "home" });
   const [creationBlocker, setCreationBlocker] = useState<ActivityCreationBlocker | null>(null);
   const entryCheck = useRef<object>(undefined);
@@ -137,7 +125,7 @@ function App() {
   const quickRoute = route.name === "quickConversion" ? route.previous : route;
   const inQuickSplit = quickRoute.name === "quickSplit" || quickRoute.name === "quickResult";
   const isQuickResult = quickRoute.name === "quickResult";
-  const activeTab = tabs.find((tab) => tab.name === route.name)?.name;
+  const activeTab = ledgerReady && preferences ? tabs.find((tab) => tab.name === route.name)?.name : undefined;
   const activityRoute = route.name === "activityRepayment" || route.name === "activityRepaymentHistory" || route.name === "activitySettlementPng" ? route.previous.previous
     : route.name === "createExpense" || route.name === "expenseDetails" || route.name === "activityMembers"
       || route.name === "activitySettlement" ? route.previous : route;
@@ -166,14 +154,14 @@ function App() {
   ) : route.name === "activitySettlement" ? (
     <ActivitySettlementScreen key={route.previous.id} activityId={route.previous.id} initialTab={route.initialTab}
       onBack={() => setRoute(route.previous)}
-      onSharePng={(appLocale) => setRoute({ name: "activitySettlementPng", previous: { ...route, initialTab: "overview" }, appLocale })}
+      onSharePng={() => setRoute({ name: "activitySettlementPng", previous: { ...route, initialTab: "overview" } })}
       onViewRepaymentHistory={(tab) => setRoute({ name: "activityRepaymentHistory",
         previous: { ...route, initialTab: tab },
       })} onRecordRepayment={(suggestion) => setRoute({ name: "activityRepayment", suggestion,
         previous: { ...route, initialTab: "transfers" },
       })} />
   ) : route.name === "activitySettlementPng" ? (
-    <ActivitySettlementPngScreen key={route.previous.previous.id} activityId={route.previous.previous.id} appLocale={route.appLocale}
+    <ActivitySettlementPngScreen key={route.previous.previous.id} activityId={route.previous.previous.id} appLocale={language}
       onBack={() => setRoute(route.previous)} />
   ) : route.name === "activityRepayment" ? (
     <ActivityRepaymentScreen key={route.previous.previous.id} activityId={route.previous.previous.id}
@@ -193,6 +181,24 @@ function App() {
     entryCheck.current = undefined;
     return () => { entryCheck.current = undefined; };
   }, [route]);
+
+  useEffect(() => {
+    let current = true;
+    // Opening through the host resolves any durable restore marker before pages read the ledger.
+    void getLocalDatabase().catch((error: unknown) => {
+      if (current && error instanceof DatabaseInitializationError && error.stage === "recovery") {
+        setRoute({ name: "settings", recoveryRequired: true });
+      }
+    }).finally(() => { if (current) setLedgerReady(true); });
+    return () => { current = false; };
+  }, []);
+
+  function onRestored() {
+    entryCheck.current = undefined;
+    setCreationBlocker(null);
+    setRoute({ name: "settings", restored: true });
+    setLedgerEpoch((epoch) => epoch + 1);
+  }
 
   async function startActivityCreation(origin: ActivityOrigin) {
     if (entryCheck.current) return;
@@ -220,88 +226,94 @@ function App() {
   }
 
   useEffect(() => {
-    if (isHome) return;
+    if (isHome || route.name === "settings") return;
     const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
       setRoute(backRoute);
       return true;
     });
     return () => subscription.remove();
-  }, [isHome]);
+  }, [isHome, route.name]);
 
   return (
-    <SafeAreaProvider initialMetrics={initialWindowMetrics} style={styles.app}>
-      <StatusBar barStyle="dark-content" />
-      <SafeAreaView edges={activeTab ? ["top", "left", "right"] : ["top", "bottom", "left", "right"]} style={styles.main}>
-        {route.name === "home" ? (
-          <HomeScreen
-            onSettings={() => setRoute({ name: "settings" })}
-            onQuickSplit={() => setRoute({ name: "quickSplit" })}
-            onCreateActivity={() => { void startActivityCreation("home"); }}
-            onActivities={() => setRoute({ name: "activities" })}
-            onRecords={() => setRoute({ name: "records" })}
-            onActivity={(activity) => setRoute({ name: "activityDetails", id: activity.id })}
-            onRecord={(record) => setRoute(record.kind === "activity"
-              ? { name: "activityDetails", id: record.id }
-              : { name: "quickHistory", id: record.id })}
-          />
-        ) : route.name === "activities" ? (
-          <ActivityListScreen
-            onCreate={() => { void startActivityCreation("activities"); }}
-            onActivity={({ id }) => setRoute({ name: "activityDetails", id, origin: "activities" })}
-          />
-        ) : route.name === "records" ? (
-          <QuickHistoryListScreen onRecord={(id) => setRoute({ name: "quickHistory", id, origin: "records" })} />
-        ) : route.name === "createActivity" || createOrigin !== undefined ? (
-          <>
-            <View style={route.name === "createActivity" ? styles.main : styles.hidden}>
-              <CreateActivityScreen
-                onBack={() => setRoute(backRoute)}
-                onBlocked={setCreationBlocker}
-                onCreated={({ id }) => setRoute({ name: "activityDetails", id, origin: "activities" })}
-              />
-            </View>
-            {activityDetails}
-          </>
-        ) : activityDetails ? (
-          activityDetails
-        ) : inQuickSplit ? (
-          <>
-            <View style={isQuickResult ? styles.hidden : styles.main}>
-              <QuickSplitScreen
-                onBack={() => setRoute({ name: "home" })}
-                onResult={(result) => setRoute({ name: "quickResult", result })}
-                focusPayer={route.name === "quickSplit" && route.focusPayer}
-              />
-            </View>
-            {isQuickResult && (
-              <View style={conversion ? styles.hidden : styles.main}>
-                <QuickSplitResultScreen
-                  preview={quickRoute.result}
-                  onBack={() => setRoute({ name: "quickSplit" })}
-                  onAddPayer={() => setRoute({ name: "quickSplit", focusPayer: true })}
-                  onConvert={(historyId) => setRoute({ name: "quickConversion", historyId, previous: quickRoute })}
+    <AppLanguageContext.Provider value={language}>
+      <SafeAreaProvider initialMetrics={initialWindowMetrics} style={styles.app}>
+        <StatusBar barStyle="dark-content" />
+        <SafeAreaView key={ledgerEpoch} edges={activeTab ? ["top", "left", "right"] : ["top", "bottom", "left", "right"]} style={styles.main}>
+          {!preferences || !ledgerReady ? (
+            <View style={styles.loading}><ActivityIndicator color={colors.ink} accessibilityLabel={settingsCopy(language).working} /></View>
+          ) : route.name === "home" ? (
+            <HomeScreen
+              onSettings={() => setRoute({ name: "settings" })}
+              onQuickSplit={() => setRoute({ name: "quickSplit" })}
+              onCreateActivity={() => { void startActivityCreation("home"); }}
+              onActivities={() => setRoute({ name: "activities" })}
+              onRecords={() => setRoute({ name: "records" })}
+              onActivity={(activity) => setRoute({ name: "activityDetails", id: activity.id })}
+              onRecord={(record) => setRoute(record.kind === "activity"
+                ? { name: "activityDetails", id: record.id }
+                : { name: "quickHistory", id: record.id })}
+            />
+          ) : route.name === "activities" ? (
+            <ActivityListScreen
+              onCreate={() => { void startActivityCreation("activities"); }}
+              onActivity={({ id }) => setRoute({ name: "activityDetails", id, origin: "activities" })}
+            />
+          ) : route.name === "records" ? (
+            <QuickHistoryListScreen onRecord={(id) => setRoute({ name: "quickHistory", id, origin: "records" })} />
+          ) : route.name === "createActivity" || createOrigin !== undefined ? (
+            <>
+              <View style={route.name === "createActivity" ? styles.main : styles.hidden}>
+                <CreateActivityScreen
+                  defaultCurrency={preferences.defaultCurrency}
+                  onBack={() => setRoute(backRoute)}
+                  onBlocked={setCreationBlocker}
+                  onCreated={({ id }) => setRoute({ name: "activityDetails", id, origin: "activities" })}
                 />
               </View>
-            )}
-            {conversion}
-          </>
-        ) : route.name === "quickHistory" ? (
-          <QuickHistoryScreen key={route.id} historyId={route.id} onBack={() => setRoute(backRoute)}
-            onConvert={() => setRoute({ name: "quickConversion", historyId: route.id, previous: route })}
-            onViewActivity={(id) => setRoute({ name: "activityDetails", id, previous: route })} />
-        ) : route.name === "quickConversion" ? (
-          conversion
-        ) : route.name === "settings" ? (
-          <Placeholder
-            name={route.name}
-            onBack={activeTab ? undefined : () => setRoute(backRoute)}
-          />
-        ) : null}
-      </SafeAreaView>
-      {activeTab && <TabBar active={activeTab} onSelect={(tab) => setRoute({ name: tab })} />}
-      {creationBlocker && <ActivityQuotaSheet blocker={creationBlocker}
-        onClose={() => setCreationBlocker(null)} onView={() => openExistingActivity(creationBlocker)} />}
-    </SafeAreaProvider>
+              {activityDetails}
+            </>
+          ) : activityDetails ? (
+            activityDetails
+          ) : inQuickSplit ? (
+            <>
+              <View style={isQuickResult ? styles.hidden : styles.main}>
+                <QuickSplitScreen
+                  defaultCurrency={preferences.defaultCurrency}
+                  onBack={() => setRoute({ name: "home" })}
+                  onResult={(result) => setRoute({ name: "quickResult", result })}
+                  focusPayer={route.name === "quickSplit" && route.focusPayer}
+                />
+              </View>
+              {isQuickResult && (
+                <View style={conversion ? styles.hidden : styles.main}>
+                  <QuickSplitResultScreen
+                    preview={quickRoute.result}
+                    onBack={() => setRoute({ name: "quickSplit" })}
+                    onAddPayer={() => setRoute({ name: "quickSplit", focusPayer: true })}
+                    onConvert={(historyId) => setRoute({ name: "quickConversion", historyId, previous: quickRoute })}
+                  />
+                </View>
+              )}
+              {conversion}
+            </>
+          ) : route.name === "quickHistory" ? (
+            <QuickHistoryScreen key={route.id} historyId={route.id} onBack={() => setRoute(backRoute)}
+              onConvert={() => setRoute({ name: "quickConversion", historyId: route.id, previous: route })}
+              onViewActivity={(id) => setRoute({ name: "activityDetails", id, previous: route })} />
+          ) : route.name === "quickConversion" ? (
+            conversion
+          ) : route.name === "settings" ? (
+            <SettingsScreen preferences={preferences} systemLanguage={settings.systemLanguage} saving={settings.saving}
+              preferenceError={settings.error} onSave={settings.save} onBack={() => setRoute({ name: "home" })}
+              restored={route.restored} recoveryRequired={route.recoveryRequired} onRestored={onRestored}
+              onReturnToSettings={() => setRoute({ name: "settings" })} />
+          ) : null}
+        </SafeAreaView>
+        {activeTab && <TabBar active={activeTab} language={language} onSelect={(tab) => setRoute({ name: tab })} />}
+        {creationBlocker && <ActivityQuotaSheet blocker={creationBlocker}
+          onClose={() => setCreationBlocker(null)} onView={() => openExistingActivity(creationBlocker)} />}
+      </SafeAreaProvider>
+    </AppLanguageContext.Provider>
   );
 }
 
@@ -322,12 +334,8 @@ const styles = StyleSheet.create({
   selectedTab: { backgroundColor: tabColors.selectedBackground },
   tabText: { color: tabColors.unselected, fontSize: 14, textAlign: "center" },
   selectedTabText: { color: tabColors.selected, fontWeight: "600" },
-  selectedText: { color: colors.accentText, fontWeight: "600" },
   pressed: { opacity: 0.65 },
-  placeholder: { width: "100%", maxWidth: 620, alignSelf: "center", paddingHorizontal: 26, paddingTop: 18, gap: 10 },
-  back: { minHeight: 44, alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: 4 },
-  placeholderTitle: { color: colors.ink, fontSize: 28, fontWeight: "700" },
-  placeholderBody: { color: colors.muted, fontSize: 16 },
+  loading: { flex: 1, alignItems: "center", justifyContent: "center" },
 });
 
 registerRootComponent(App);
