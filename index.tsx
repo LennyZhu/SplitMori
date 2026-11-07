@@ -11,6 +11,8 @@ import { ActivityQuotaSheet } from "./src/ui/ActivityQuotaSheet.tsx";
 import { CreateActivityScreen } from "./src/ui/CreateActivityScreen.tsx";
 import { CreateExpenseScreen } from "./src/ui/CreateExpenseScreen.tsx";
 import { HomeScreen } from "./src/ui/HomeScreen.tsx";
+import { QuickHistoryListScreen, QuickHistoryScreen } from "./src/ui/QuickHistoryScreen.tsx";
+import { QuickSplitConversionScreen } from "./src/ui/QuickSplitConversionScreen.tsx";
 import { QuickSplitResultScreen } from "./src/ui/QuickSplitResultScreen.tsx";
 import { QuickSplitScreen } from "./src/ui/QuickSplitScreen.tsx";
 import { colors, Icon, type IconName } from "./src/ui/visuals.tsx";
@@ -33,30 +35,33 @@ const tabColors = {
 } as const;
 
 const placeholderTitles = {
-  records: "記錄",
-  quickHistory: "快速計算記錄",
   settings: "設定",
 };
 
 type Destination = keyof typeof placeholderTitles;
+type QuickHistoryRoute = { name: "quickHistory"; id: string; origin?: "records" };
+type QuickResultRoute = { name: "quickResult"; result: QuickSplitPreview };
 type ActivityDetailRoute = {
   name: "activityDetails";
   id: string;
   origin?: ActivityOrigin;
   resumeCreation?: boolean;
-  previous?: ActivityDetailRoute;
+  previous?: ActivityDetailRoute | QuickHistoryRoute;
 };
 type Route =
   | { name: Tab | "settings" }
   | { name: "createActivity"; origin: ActivityOrigin }
   | { name: "createExpense"; previous: ActivityDetailRoute }
   | { name: "quickSplit"; focusPayer?: boolean }
-  | { name: "quickResult"; result: QuickSplitPreview }
-  | ActivityDetailRoute
-  | { name: "quickHistory"; id: string };
+  | QuickResultRoute
+  | QuickHistoryRoute
+  | { name: "quickConversion"; historyId: string; previous: QuickHistoryRoute | QuickResultRoute }
+  | ActivityDetailRoute;
 
 function backRoute(route: Route): Route {
   if (route.name === "quickResult") return { name: "quickSplit" };
+  if (route.name === "quickHistory") return { name: route.origin ?? "home" };
+  if (route.name === "quickConversion") return route.previous;
   if (route.name === "createExpense") return route.previous;
   if (route.name === "activityDetails" && route.previous) return route.previous;
   if (route.name === "activityDetails" && route.resumeCreation) {
@@ -114,8 +119,9 @@ function App() {
   const [creationBlocker, setCreationBlocker] = useState<ActivityCreationBlocker | null>(null);
   const entryCheck = useRef<object>(undefined);
   const isHome = route.name === "home";
-  const inQuickSplit = route.name === "quickSplit" || route.name === "quickResult";
-  const isQuickResult = route.name === "quickResult";
+  const quickRoute = route.name === "quickConversion" ? route.previous : route;
+  const inQuickSplit = quickRoute.name === "quickSplit" || quickRoute.name === "quickResult";
+  const isQuickResult = quickRoute.name === "quickResult";
   const activeTab = tabs.find((tab) => tab.name === route.name)?.name;
   const activityRoute = route.name === "createExpense" ? route.previous : route;
   const createOrigin = activityRoute.name === "createActivity" || (activityRoute.name === "activityDetails" && activityRoute.resumeCreation)
@@ -131,6 +137,12 @@ function App() {
   ) : route.name === "createExpense" ? (
     <CreateExpenseScreen key={route.previous.id} activityId={route.previous.id}
       onBack={() => setRoute(route.previous)} onSaved={() => setRoute(route.previous)} />
+  ) : null;
+  const conversion = route.name === "quickConversion" ? (
+    <QuickSplitConversionScreen key={route.historyId} historyId={route.historyId}
+      onBack={() => setRoute(route.previous)} onJoined={(id) => setRoute({ name: "activityDetails", id,
+        previous: route.previous.name === "quickHistory" ? route.previous : { name: "quickHistory", id: route.historyId },
+      })} />
   ) : null;
 
   useLayoutEffect(() => {
@@ -193,6 +205,8 @@ function App() {
             onCreate={() => { void startActivityCreation("activities"); }}
             onActivity={({ id }) => setRoute({ name: "activityDetails", id, origin: "activities" })}
           />
+        ) : route.name === "records" ? (
+          <QuickHistoryListScreen onRecord={(id) => setRoute({ name: "quickHistory", id, origin: "records" })} />
         ) : route.name === "createActivity" || createOrigin !== undefined ? (
           <>
             <View style={route.name === "createActivity" ? styles.main : styles.hidden}>
@@ -216,20 +230,29 @@ function App() {
               />
             </View>
             {isQuickResult && (
-              <QuickSplitResultScreen
-                preview={route.result}
-                onBack={() => setRoute({ name: "quickSplit" })}
-                onAddPayer={() => setRoute({ name: "quickSplit", focusPayer: true })}
-              />
+              <View style={conversion ? styles.hidden : styles.main}>
+                <QuickSplitResultScreen
+                  preview={quickRoute.result}
+                  onBack={() => setRoute({ name: "quickSplit" })}
+                  onAddPayer={() => setRoute({ name: "quickSplit", focusPayer: true })}
+                  onConvert={(historyId) => setRoute({ name: "quickConversion", historyId, previous: quickRoute })}
+                />
+              </View>
             )}
+            {conversion}
           </>
-        ) : (
+        ) : route.name === "quickHistory" ? (
+          <QuickHistoryScreen key={route.id} historyId={route.id} onBack={() => setRoute(backRoute)}
+            onConvert={() => setRoute({ name: "quickConversion", historyId: route.id, previous: route })}
+            onViewActivity={(id) => setRoute({ name: "activityDetails", id, previous: route })} />
+        ) : route.name === "quickConversion" ? (
+          conversion
+        ) : route.name === "settings" ? (
           <Placeholder
-            key={route.name === "quickHistory" ? `quickHistory:${route.id}` : route.name}
             name={route.name}
             onBack={activeTab ? undefined : () => setRoute(backRoute)}
           />
-        )}
+        ) : null}
       </SafeAreaView>
       {activeTab && <TabBar active={activeTab} onSelect={(tab) => setRoute({ name: tab })} />}
       {creationBlocker && <ActivityQuotaSheet blocker={creationBlocker}

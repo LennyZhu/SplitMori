@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { QuickSplitPreview } from "../services/quickSplitEditor.ts";
 import { describeQuickSplitResult, formatResultMoney, type QuickSplitResultView } from "../services/quickSplitResult.ts";
@@ -105,8 +105,8 @@ function DetailsSheet({ result, onClose }: { result: QuickSplitResultView; onClo
   );
 }
 
-export function QuickSplitResultScreen({ preview, onBack, onAddPayer }: {
-  preview: QuickSplitPreview; onBack: () => void; onAddPayer: () => void;
+export function QuickSplitResultScreen({ preview, onBack, onAddPayer, onConvert }: {
+  preview: QuickSplitPreview; onBack: () => void; onAddPayer: () => void; onConvert: (historyId: string) => void;
 }) {
   const result = useMemo(() => describeQuickSplitResult(preview), [preview]);
   const { state, save } = useQuickHistorySave(preview.input);
@@ -224,15 +224,23 @@ export function QuickSplitResultScreen({ preview, onBack, onAddPayer }: {
                 {state.code === "QUICK_STORAGE_ERROR" ? "未能寫入本機記錄，請重試。" : `未能儲存計算記錄（${state.code}）。`}
               </Text>
             )}
-            <Pressable
-              accessibilityRole="button"
-              accessibilityState={{ disabled: !canSave, busy: saving }}
-              disabled={!canSave}
-              onPress={save}
-              style={({ pressed }) => [styles.saveButton, (pressed || !canSave) && styles.pressed]}
-            >
-              <Text style={styles.saveText}>{saving ? "正在儲存…" : saved ? "已儲存計算記錄" : "儲存計算記錄"}</Text>
-            </Pressable>
+            <View style={styles.resultActions}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ disabled: !canSave, busy: saving }}
+                disabled={!canSave}
+                onPress={save}
+                style={({ pressed }) => [styles.saveButton, styles.actionCell, (pressed || !canSave) && styles.pressed]}
+              >
+                <Text style={styles.saveText}>{saving ? "正在儲存…" : saved ? "已儲存計算記錄" : "儲存計算記錄"}</Text>
+              </Pressable>
+              <Pressable accessibilityRole="button" disabled={saving || !!shareCard || !result.balanced}
+                onPress={() => state.status === "saved" ? onConvert(state.historyId)
+                  : Alert.alert("請先儲存計算記錄", "儲存後即可選擇活動，再確認成員及實際付款人。")}
+                style={({ pressed }) => [styles.saveButton, styles.actionCell, (pressed || saving || !result.balanced) && styles.pressed]}>
+                <Text style={styles.saveText}>加入活動</Text>
+              </Pressable>
+            </View>
           </View>
         </View>
         {details && <DetailsSheet result={result} onClose={() => setDetails(false)} />}
@@ -292,6 +300,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12, paddingVertical: 8, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface,
   },
   saveText: { color: colors.ink, fontSize: 15, fontWeight: "600", textAlign: "center" },
+  resultActions: { flexDirection: "row", gap: 6 },
+  actionCell: { flex: 1 },
   pressed: { opacity: 0.65 },
   error: { color: "#9A372B", fontSize: 14 },
   overlay: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(40, 40, 40, 0.35)" },

@@ -6,7 +6,8 @@ import type { QuickSplitInput } from "../domain/quickSplit.ts";
 import type { DomainErrorCode } from "../domain/result.ts";
 import { createQuickHistorySave } from "../services/quickHistorySave.ts";
 
-type SaveState = { readonly status: "idle" | "saving" | "saved" }
+type SaveState = { readonly status: "idle" | "saving" }
+  | { readonly status: "saved"; readonly historyId: string }
   | { readonly status: "error"; readonly code: DomainErrorCode };
 
 export function useQuickHistorySave(input: QuickSplitInput) {
@@ -30,7 +31,7 @@ export function useQuickHistorySave(input: QuickSplitInput) {
       });
       const result = await saveAttempt.current();
       if (!mounted.current) return;
-      setState(result.ok ? { status: "saved" } : { status: "error", code: result.error.code });
+      setState(result.ok ? { status: "saved", historyId: result.value.id } : { status: "error", code: result.error.code });
     } catch {
       if (mounted.current) setState({ status: "error", code: "QUICK_STORAGE_ERROR" });
     }
