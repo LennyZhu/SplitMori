@@ -3,6 +3,7 @@ import {
 } from "../domain/balance.ts";
 import { previewExpenseCorrection, type ExpenseCorrectionPreview } from "../domain/correction.ts";
 import type { Currency } from "../domain/money.ts";
+import { calculateQuickSplit, type QuickSplitInput } from "../domain/quickSplit.ts";
 import { failure, type Result } from "../domain/result.ts";
 import { suggestTransfers, type TransferSuggestion } from "../domain/settlement.ts";
 import type { Allocation } from "../domain/split.ts";
@@ -18,8 +19,10 @@ import { migrations } from "./migrations.ts";
 
 const splitModes = ["equal", "treat", "individual", "custom"] as const;
 export type FinanceExpense = Expense & {
-  /** Display metadata of the original expense, shared by its financial revisions. */
   readonly name?: string;
+  /** The bill date is separate from the audit event's position in the ledger. */
+  readonly expenseDate?: number;
+  readonly splitInput?: QuickSplitInput;
   readonly splitMode: typeof splitModes[number];
   readonly allocationVersion: number;
 };
@@ -63,10 +66,18 @@ export type ExpenseCorrectionRequest = {
   readonly proposed: FinanceExpense;
   /** Refund IDs whose unchanged reductions were explicitly reviewed in the preview. */
   readonly reviewedRefundIds?: readonly string[];
+  /** The interactive flow submits the token from its reviewed ledger. */
+  readonly expectedLedger?: string;
 };
+
+export type ReviewedExpenseCorrectionRequest = ExpenseCorrectionRequest & { readonly expectedLedger: string };
 
 export type FinanceCorrectionPreview = Omit<ExpenseCorrectionPreview, "expense"> & {
   readonly currentVersion: number;
+  readonly ledgerToken: string;
+  readonly beforeSuggestions: readonly TransferSuggestion[];
+  readonly beforeDate: number;
+  readonly afterDate: number;
   readonly expense: ExpenseCorrectionPreview["expense"] & {
     readonly before: FinanceExpense;
     readonly after: FinanceExpense;
@@ -88,6 +99,11 @@ function orderedTimeline(
 function ledgerSequence(timeline: readonly LedgerEntry[]): number {
   // A backdated write can sort earlier while still changing the reviewed ledger.
   return timeline.reduce((latest, entry) => Math.max(latest, entry.sequence), 0);
+}
+
+function correctionLedgerToken(activity: ActivityContext, timeline: readonly LedgerEntry[], replacement: FinanceExpense): string {
+  // The exact facts and proposed snapshot also distinguish a restored ledger with matching sequence numbers.
+  return JSON.stringify([activity, timeline, replacement]);
 }
 
 function prepareFinancialVoid(
@@ -144,6 +160,8 @@ type ActivityContext = {
   id: string;
   currency: Currency;
   status: ActivityStatus;
+  updatedAt: number;
+  activeCount: number;
   memberIds: readonly string[];
 };
 
@@ -155,6 +173,8 @@ type EventRow = {
   amountMinor: number | null;
   expenseCurrency: Currency | null;
   expenseName: string | null;
+  expenseDate: number | null;
+  splitInput: string | null;
   splitMode: FinanceExpense["splitMode"] | null;
   allocationVersion: number | null;
   expenseId: string | null;
@@ -166,13 +186,27 @@ type EventRow = {
 
 async function readActivity(connection: SQLiteReader, id: string): Promise<ActivityContext | null> {
   const activity = await connection.getFirstAsync<Omit<ActivityContext, "memberIds">>(
-    "SELECT id, currency, status FROM activities WHERE id = ?", id,
+    `SELECT id, currency, status, updated_at AS updatedAt,
+      (SELECT COUNT(*) FROM activities WHERE status = 'active') AS activeCount FROM activities WHERE id = ?`, id,
   );
   if (!activity) return null;
   const members = await connection.getAllAsync<{ memberId: string }>(`
     SELECT member_id AS memberId FROM activity_members WHERE activity_id = ? ORDER BY position
   `, id);
   return { ...activity, memberIds: members.map(({ memberId }) => memberId) };
+}
+
+export function expenseEditBlocker(status: ActivityStatus, activeCount: number, mode: FinanceExpense["splitMode"]):
+  "ACTIVITY_COMPLETED" | "EXPENSE_EDIT_LIMIT" | "UNSUPPORTED_EXPENSE_EDIT" | undefined {
+  if (status === "completed") return "ACTIVITY_COMPLETED";
+  if (activeCount > 1) return "EXPENSE_EDIT_LIMIT";
+  if (mode === "custom") return "UNSUPPORTED_EXPENSE_EDIT";
+}
+
+function correctionReplacement(previous: FinanceExpense, proposed: FinanceExpense): FinanceExpense {
+  const name = proposed.name ?? previous.name;
+  const expenseDate = proposed.expenseDate ?? previous.expenseDate;
+  return { ...proposed, ...(name === undefined ? {} : { name }), ...(expenseDate === undefined ? {} : { expenseDate }) };
 }
 
 function groupAllocations(rows: readonly (Allocation & { ownerId: string })[]): Map<string, Allocation[]> {
@@ -192,6 +226,8 @@ async function readEvents(connection: SQLiteReader, activity: ActivityContext, s
     SELECT f.id, f.kind, f.occurred_at AS occurredAt, f.sequence,
            COALESCE(e.amount_minor, r.amount_minor, t.amount_minor) AS amountMinor,
            e.currency AS expenseCurrency, ${schemaVersion >= 7 ? "e.name" : "NULL"} AS expenseName,
+           ${schemaVersion >= 9 ? "e.expense_date" : "NULL"} AS expenseDate,
+           ${schemaVersion >= 9 ? "e.split_input" : "NULL"} AS splitInput,
            e.split_mode AS splitMode, e.allocation_version AS allocationVersion,
            r.expense_id AS expenseId, r.recipient_id AS recipientId,
            t.from_member_id AS fromMemberId, t.to_member_id AS toMemberId,
@@ -229,6 +265,8 @@ async function readEvents(connection: SQLiteReader, activity: ActivityContext, s
           ...order, kind, expense: {
             id, splitMode: row.splitMode, allocationVersion: row.allocationVersion,
             ...(row.expenseName === null ? {} : { name: row.expenseName }),
+            ...(row.expenseDate === null ? {} : { expenseDate: row.expenseDate }),
+            ...(row.splitInput === null ? {} : { splitInput: JSON.parse(row.splitInput) as QuickSplitInput }),
             split: { total: { currency: row.expenseCurrency, amountMinor }, allocations: expenseAllocations },
             merchantPayment: { ...merchantPayments[0], currency: row.expenseCurrency },
           },
@@ -257,8 +295,13 @@ export async function validateStoredLedgers(connection: SQLiteReader, schemaVers
     const activity = await readActivity(connection, id);
     if (!activity) return failure("ACTIVITY_NOT_FOUND", "activityId");
     const events = schemaVersion >= 2 ? await readEvents(connection, activity, schemaVersion) : [];
-    const revisions = schemaVersion >= 3 ? await readExpenseRevisions(connection, id, schemaVersion >= 7) : [];
+    const revisions = schemaVersion >= 3 ? await readExpenseRevisions(connection, id, schemaVersion) : [];
     const voids = schemaVersion >= 6 ? await readFinancialVoids(connection, id) : [];
+    for (const entry of [...events, ...revisions]) {
+      if (entry.kind !== "expense" && entry.kind !== "expenseRevision") continue;
+      const invalid = validateSplitSnapshot(entry.expense);
+      if (invalid) return invalid;
+    }
     const balances = calculateBalances(activity.currency, activity.memberIds, [], orderedTimeline(events, revisions, voids));
     if (!balances.ok) return balances;
   }
@@ -277,7 +320,7 @@ function sameAllocations(saved: readonly Allocation[], requested: readonly Alloc
 
 function sameEvent(saved: FinanceEvent, requested: FinanceEvent): boolean {
   if (saved.kind === "expense" && requested.kind === "expense") {
-    return saved.expense.name === requested.expense.name && sameExpense(saved.expense, requested.expense);
+    return sameExpense(saved.expense, requested.expense);
   }
   if (saved.kind === "merchantRefund" && requested.kind === "merchantRefund") {
     return saved.expenseId === requested.expenseId && saved.recipientId === requested.recipientId
@@ -293,6 +336,8 @@ function sameEvent(saved: FinanceEvent, requested: FinanceEvent): boolean {
 
 function sameExpense(original: FinanceExpense, input: FinanceExpense): boolean {
   return original.id === input.id
+    && original.name === input.name && original.expenseDate === input.expenseDate
+    && JSON.stringify(original.splitInput) === JSON.stringify(input.splitInput)
     && original.splitMode === input.splitMode && original.allocationVersion === input.allocationVersion
     && original.split.total.currency === input.split.total.currency
     && original.split.total.amountMinor === input.split.total.amountMinor
@@ -307,12 +352,32 @@ function copyExpense(expense: FinanceExpense): FinanceExpense {
     ...expense,
     split: { total: { ...expense.split.total }, allocations: expense.split.allocations.map((row) => ({ ...row })) },
     merchantPayment: expense.merchantPayment && { ...expense.merchantPayment },
+    ...(expense.splitInput === undefined ? {} : { splitInput: JSON.parse(JSON.stringify(expense.splitInput)) as QuickSplitInput }),
   };
 }
 
 function validateSplitSnapshot(expense: FinanceExpense) {
   if (!splitModes.includes(expense.splitMode)
     || !Number.isSafeInteger(expense.allocationVersion) || expense.allocationVersion < 1) {
+    return failure("INVALID_SPLIT_SNAPSHOT", "allocations");
+  }
+  if (expense.name !== undefined && (typeof expense.name !== "string" || expense.name.trim() === "")) {
+    return failure("INVALID_EXPENSE_NAME", "expenseName");
+  }
+  if (expense.expenseDate !== undefined && (!Number.isSafeInteger(expense.expenseDate) || expense.expenseDate < 0
+    || !Number.isFinite(new Date(expense.expenseDate).getTime()))) return failure("INVALID_EVENT_TIME", "occurredAt");
+  if (expense.splitInput !== undefined) {
+    try {
+      const input = expense.splitInput;
+      const result = calculateQuickSplit(input);
+      if (input.merchantPayerId === undefined && input.method.kind === expense.splitMode && result.ok
+        && result.value.split.total.currency === expense.split.total.currency
+        && result.value.split.total.amountMinor === expense.split.total.amountMinor
+        && result.value.split.allocationVersion === expense.allocationVersion
+        && sameAllocations(result.value.split.allocations, expense.split.allocations)) return;
+    } catch {
+      // Invalid input metadata must never be persisted as part of a financial snapshot.
+    }
     return failure("INVALID_SPLIT_SNAPSHOT", "allocations");
   }
 }
@@ -331,12 +396,14 @@ async function insertEvent(
   const order = { occurredAt, sequence: inserted.sequence };
 
   if (event.kind === "expense") {
-    const { split, merchantPayment, splitMode, allocationVersion, name } = event.expense;
+    const { expense } = event;
+    const { split, merchantPayment, splitMode, allocationVersion, name, expenseDate, splitInput } = expense;
     const { currency, amountMinor } = split.total;
     await transaction.runAsync(`
-      INSERT INTO expenses (id, activity_id, currency, amount_minor, split_mode, allocation_version, name)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `, id, activityId, currency, amountMinor, splitMode, allocationVersion, name ?? null);
+      INSERT INTO expenses (id, activity_id, currency, amount_minor, split_mode, allocation_version, name, expense_date, split_input)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, id, activityId, currency, amountMinor, splitMode, allocationVersion, name ?? null, expenseDate ?? null,
+    splitInput === undefined ? null : JSON.stringify(splitInput));
 
     const amounts = new Map(split.allocations.map((allocation) => [allocation.memberId, allocation.amountMinor]));
     const allocations: Allocation[] = [];
@@ -354,7 +421,7 @@ async function insertEvent(
     `, activityId, id, merchantPayment.memberId, merchantPayment.amountMinor);
     return {
       ...order, kind: "expense", expense: {
-        id, splitMode, allocationVersion, ...(name === undefined ? {} : { name }),
+        ...expense,
         split: { total: { currency, amountMinor }, allocations },
         merchantPayment: { memberId: merchantPayment.memberId, currency, amountMinor: merchantPayment.amountMinor },
       },
@@ -388,12 +455,58 @@ async function insertEvent(
     ...(note === undefined ? {} : { note }) };
 }
 
-async function withStorage<T>(task: () => Promise<Result<T>>): Promise<Result<T>> {
+async function withStorage<T>(task: () => Promise<Result<T>>, onError?: (error: unknown) => void): Promise<Result<T>> {
   try {
     return await task();
-  } catch {
+  } catch (error) {
+    onError?.(error);
     return failure("FINANCE_STORAGE_ERROR", "storage");
   }
+}
+
+function logCorrectionStorageError(revisionId: string, stage: string, error: unknown) {
+  if (typeof __DEV__ === "undefined" || !__DEV__) return;
+  const rawCode = error instanceof Error && "code" in error ? error.code : undefined;
+  const code = typeof rawCode === "string" && /^[A-Z0-9_]{1,64}$/.test(rawCode) ? rawCode : "FINANCE_STORAGE_ERROR";
+  console.warn("[SplitMori correction]", {
+    revisionId, stage, code, errorType: error instanceof AggregateError ? "AggregateError" : error instanceof Error ? "Error" : typeof error,
+  });
+}
+
+function refundReviewKey(ids: ReadonlySet<string>): string {
+  return JSON.stringify([...ids].sort());
+}
+
+async function readCorrectionReceipt(
+  connection: SQLiteReader, activityId: string, request: ExpenseCorrectionRequest,
+): Promise<Result<StoredExpenseRevision | null>> {
+  const { expenseId, revisionId, expectedVersion, occurredAt, proposed } = request;
+  if (revisionId === expenseId) return failure("REVISION_ID_CONFLICT", "revisionId");
+  const receipt = await connection.getFirstAsync<{ activityId: string; expenseId: string; refundReview: string }>(
+    "SELECT activity_id AS activityId, expense_id AS expenseId, reviewed_refund_ids AS refundReview FROM expense_revisions WHERE id = ?",
+    revisionId,
+  );
+  if (!receipt) return { ok: true, value: null };
+  if (receipt.activityId !== activityId || receipt.expenseId !== expenseId
+    || receipt.refundReview !== refundReviewKey(new Set(request.reviewedRefundIds))) {
+    return failure("REVISION_ID_CONFLICT", "revisionId");
+  }
+  const revisions = await readExpenseRevisions(connection, activityId);
+  const saved = revisions.find(({ id }) => id === revisionId);
+  if (!saved || saved.version - 1 !== expectedVersion || saved.occurredAt !== occurredAt) {
+    return failure("REVISION_ID_CONFLICT", "revisionId");
+  }
+  if (sameExpense(saved.expense, proposed)) return { ok: true, value: saved };
+
+  // Earlier repository callers could omit the bill name or date and inherit them.
+  const activity = await readActivity(connection, activityId);
+  if (!activity) return failure("ACTIVITY_NOT_FOUND", "activityId");
+  const previous = expectedVersion === 1
+    ? (await readEvents(connection, activity)).find((event): event is StoredExpense =>
+      event.kind === "expense" && event.expense.id === expenseId)?.expense
+    : revisions.find(({ expense, version }) => expense.id === expenseId && version === expectedVersion)?.expense;
+  return previous && sameExpense(saved.expense, correctionReplacement(previous, proposed))
+    ? { ok: true, value: saved } : failure("REVISION_ID_CONFLICT", "revisionId");
 }
 
 async function recordInTransaction(
@@ -405,10 +518,6 @@ async function recordInTransaction(
     return event.kind === "expense" ? failure("INVALID_EXPENSE_ID", "expenseId") : failure("INVALID_EVENT_ID", "eventId");
   }
   if (!Number.isSafeInteger(occurredAt) || occurredAt < 0) return failure("INVALID_EVENT_TIME", "occurredAt");
-  if (event.kind === "expense" && event.expense.name !== undefined
-    && (typeof event.expense.name !== "string" || event.expense.name.trim() === "")) {
-    return failure("INVALID_EXPENSE_NAME", "expenseName");
-  }
 
   const existing = await transaction.getFirstAsync<{ activityId: string }>(
     "SELECT activity_id AS activityId FROM financial_events WHERE id = ?", id,
@@ -528,32 +637,42 @@ export function createFinanceRepository(database: LocalDatabase) {
 
   function previewCorrection(
     activity: ActivityContext, events: StoredFinanceEvent[], revisions: StoredExpenseRevision[],
-    voids: StoredFinancialVoid[], expenseId: string, proposed: FinanceExpense,
+    voids: StoredFinancialVoid[], expenseId: string, proposed: FinanceExpense, expectedVersion?: number,
   ): Result<FinanceCorrectionPreview> {
     if (activity.status === "completed") return failure("ACTIVITY_COMPLETED", "activityId");
     const original = events.find((event) => event.kind === "expense" && event.expense.id === expenseId);
     if (original?.kind !== "expense") return failure("EXPENSE_NOT_FOUND", "expenseId");
-    const invalid = validateSplitSnapshot(proposed);
-    if (invalid) return invalid;
-
     const latest = latestRevision(revisions, expenseId);
     const current = currentExpense(original, latest);
-    const { name: _requestedName, ...financialSnapshot } = proposed;
-    const name = original.expense.name;
-    const replacement = { ...financialSnapshot, ...(name === undefined ? {} : { name }) };
+    if (expectedVersion !== undefined && current.currentVersion !== expectedVersion) {
+      return failure("EXPENSE_VERSION_CONFLICT", "expectedVersion");
+    }
+    const mode = current.expense.splitMode === "custom" ? "custom" : proposed.splitMode;
+    const blocker = expenseEditBlocker(activity.status, activity.activeCount, expectedVersion === undefined ? "equal" : mode);
+    if (blocker) return failure(blocker, "activityId");
+    const replacement = correctionReplacement(current.expense, proposed);
+    const invalid = validateSplitSnapshot(replacement);
+    if (invalid) return invalid;
+
+    const timeline = orderedTimeline(events, revisions, voids);
     const preview = previewExpenseCorrection({
       currency: activity.currency, memberIds: activity.memberIds, expenses: [],
-      events: orderedTimeline(events, revisions, voids), original: current.expense, proposed: replacement,
+      events: timeline, original: current.expense, proposed: replacement,
     });
     if (!preview.ok) return preview;
+    const beforeSuggestions = suggestTransfers(preview.value.before);
+    if (!beforeSuggestions.ok) return beforeSuggestions;
     return { ok: true, value: {
       ...preview.value, currentVersion: current.currentVersion,
+      ledgerToken: correctionLedgerToken(activity, timeline, replacement), beforeSuggestions: beforeSuggestions.value,
+      beforeDate: current.expense.expenseDate ?? original.occurredAt,
+      afterDate: replacement.expenseDate ?? original.occurredAt,
       expense: { ...preview.value.expense, before: current.expense, after: replacement },
     } };
   }
 
   function commitExpenseCorrection(activityId: string, request: ExpenseCorrectionRequest): Promise<Result<StoredExpenseRevision>> {
-    const { expenseId, revisionId, expectedVersion, occurredAt } = request;
+    const { expenseId, revisionId, expectedVersion, occurredAt, expectedLedger } = request;
     if (typeof revisionId !== "string" || revisionId.trim() === "") {
       return Promise.resolve(failure("INVALID_REVISION_ID", "revisionId"));
     }
@@ -562,53 +681,57 @@ export function createFinanceRepository(database: LocalDatabase) {
     }
     const proposed = copyExpense(request.proposed);
     const reviewedRefundIds = new Set(request.reviewedRefundIds);
-    const refundReview = JSON.stringify([...reviewedRefundIds].sort());
+    const refundReview = refundReviewKey(reviewedRefundIds);
+    const identity = { ...request, proposed, reviewedRefundIds: [...reviewedRefundIds] };
+    let stage = "begin-write";
 
     return withStorage(() => database.write(async (transaction) => {
-      const existing = await transaction.getFirstAsync<{ activityId: string; refundReview: string }>(
-        "SELECT activity_id AS activityId, reviewed_refund_ids AS refundReview FROM expense_revisions WHERE id = ?", revisionId,
-      );
-      if (revisionId === expenseId || (existing && existing.activityId !== activityId)) {
-        return failure("REVISION_ID_CONFLICT", "revisionId");
+      stage = "lookup-existing";
+      const existing = await readCorrectionReceipt(transaction, activityId, identity);
+      if (!existing.ok) return existing;
+      if (existing.value) {
+        stage = "commit";
+        return { ok: true, value: existing.value };
       }
+      stage = "validate-ledger";
       const revisions = await readExpenseRevisions(transaction, activityId);
-      if (existing) {
-        const saved = revisions.find(({ id }) => id === revisionId);
-        if (!saved || saved.expense.id !== expenseId || saved.version - 1 !== expectedVersion
-          || saved.occurredAt !== occurredAt || existing.refundReview !== refundReview || !sameExpense(saved.expense, proposed)) {
-          return failure("REVISION_ID_CONFLICT", "revisionId");
-        }
-        return { ok: true, value: saved };
-      }
-
       const activity = await readActivity(transaction, activityId);
       if (!activity) return failure("ACTIVITY_NOT_FOUND", "activityId");
       const events = await readEvents(transaction, activity);
-      const voids = await readFinancialVoids(transaction, activityId);
       const original = events.find((event) => event.kind === "expense" && event.expense.id === expenseId);
+
+      const voids = await readFinancialVoids(transaction, activityId);
       if (original?.kind !== "expense") return failure("EXPENSE_NOT_FOUND", "expenseId");
       const latest = latestRevision(revisions, expenseId);
       const currentVersion = latest?.version ?? 1;
       if (currentVersion !== expectedVersion) return failure("EXPENSE_VERSION_CONFLICT", "expectedVersion");
       if (currentVersion === Number.MAX_SAFE_INTEGER) return failure("AMOUNT_OVERFLOW", "expectedVersion");
 
-      // A correction is applied to the current ledger, after the facts reviewed in the preview.
-      if (orderedTimeline(events, revisions, voids).some((event) => event.occurredAt > occurredAt)) {
+      const timeline = orderedTimeline(events, revisions, voids);
+      const replacement = correctionReplacement(latest?.expense ?? original.expense, proposed);
+      if (expectedLedger !== undefined && correctionLedgerToken(activity, timeline, replacement) !== expectedLedger) {
+        return failure("CORRECTION_LEDGER_CHANGED", "events");
+      }
+      // The audit event follows the facts reviewed in the preview, regardless of the bill date.
+      if (timeline.some((event) => event.occurredAt > occurredAt)) {
         return failure("REVISION_OUT_OF_ORDER", "occurredAt");
       }
-      const preview = previewCorrection(activity, events, revisions, voids, expenseId, proposed);
+      const preview = previewCorrection(activity, events, revisions, voids, expenseId, proposed,
+        expectedLedger === undefined ? undefined : expectedVersion);
       if (!preview.ok) return preview;
       const { before, after, refunds } = preview.value.expense;
-      if (refunds.length > 0 && !sameAllocations(before.split.allocations, after.split.allocations)
+      if (refunds.length > 0 && (expectedLedger !== undefined || !sameAllocations(before.split.allocations, after.split.allocations))
         && (reviewedRefundIds.size !== refunds.length || refunds.some(({ id }) => !reviewedRefundIds.has(id)))) {
         return failure("REFUND_REVIEW_REQUIRED", "reviewedRefundIds");
       }
 
+      stage = "insert-revision";
       const saved = await insertExpenseRevision(transaction, activityId, activity.memberIds, {
         id: revisionId, version: currentVersion + 1, occurredAt, expense: after, refundReview,
       });
+      stage = "commit";
       return { ok: true, value: saved };
-    }));
+    }), (error) => logCorrectionStorageError(revisionId, stage, error));
   }
 
   return {
@@ -654,12 +777,19 @@ export function createFinanceRepository(database: LocalDatabase) {
       const latest = latestRevision(revisions, expenseId);
       return { ok: true, value: { ...currentExpense(expense, latest), refunds, refundVoids } };
     }),
-    previewExpenseCorrection: (activityId: string, expenseId: string, proposed: FinanceExpense) => {
+    previewExpenseCorrection: (activityId: string, expenseId: string, proposed: FinanceExpense, expectedVersion?: number) => {
       const candidate = copyExpense(proposed);
       return readLedger(activityId, (activity, events, revisions, voids) =>
-        previewCorrection(activity, events, revisions, voids, expenseId, candidate));
+        previewCorrection(activity, events, revisions, voids, expenseId, candidate, expectedVersion));
     },
     commitExpenseCorrection,
+    async commitReviewedExpenseCorrection(activityId: string, request: ReviewedExpenseCorrectionRequest) {
+      if (!request.expectedLedger) return failure("CORRECTION_LEDGER_CHANGED", "events");
+      return commitExpenseCorrection(activityId, request);
+    },
+    lookupReviewedExpenseCorrection: (activityId: string, request: ReviewedExpenseCorrectionRequest) =>
+      withStorage(() => database.read((connection) => readCorrectionReceipt(connection, activityId, request)),
+        (error) => logCorrectionStorageError(request.revisionId, "read-receipt", error)),
     listExpenseRevisions: (activityId: string, expenseId: string) => readLedger<readonly ExpenseVersion[]>(
       activityId, (_activity, events, revisions) => {
         const original = events.find((event) => event.kind === "expense" && event.expense.id === expenseId);

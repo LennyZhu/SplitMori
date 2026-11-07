@@ -51,7 +51,7 @@ export function loadActivityDetail(activityId: string, database?: LocalDatabase)
       const effectiveMinor = effectiveByExpense.get(expense.id);
       if (effectiveMinor === undefined) throw new Error("Missing effective expense in the activity ledger");
       return {
-        id: expense.id, name: expense.name ?? `費用 ${index + 1}`, occurredAt, splitMode: expense.splitMode,
+        id: expense.id, name: expense.name ?? `費用 ${index + 1}`, occurredAt: expense.expenseDate ?? occurredAt, splitMode: expense.splitMode,
         payerName: memberName(expense.merchantPayment.memberId), grossMinor, effectiveMinor,
         refundMinor: grossMinor - effectiveMinor,
       };

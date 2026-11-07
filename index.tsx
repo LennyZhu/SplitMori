@@ -15,6 +15,7 @@ import { ActivitySettlementScreen } from "./src/ui/ActivitySettlementScreen.tsx"
 import { ActivityQuotaSheet } from "./src/ui/ActivityQuotaSheet.tsx";
 import { CreateActivityScreen } from "./src/ui/CreateActivityScreen.tsx";
 import { CreateExpenseScreen } from "./src/ui/CreateExpenseScreen.tsx";
+import { ExpenseCorrectionScreen } from "./src/ui/ExpenseCorrectionScreen.tsx";
 import { HomeScreen } from "./src/ui/HomeScreen.tsx";
 import { QuickHistoryListScreen, QuickHistoryScreen } from "./src/ui/QuickHistoryScreen.tsx";
 import { QuickSplitConversionScreen } from "./src/ui/QuickSplitConversionScreen.tsx";
@@ -58,6 +59,7 @@ type Route =
   | { name: Tab | "settings" }
   | { name: "createActivity"; origin: ActivityOrigin }
   | { name: "createExpense"; previous: ActivityDetailRoute }
+  | { name: "expenseDetails"; expenseId: string; previous: ActivityDetailRoute }
   | { name: "activityMembers"; previous: ActivityDetailRoute }
   | ActivitySettlementRoute
   | { name: "activityRepayment"; previous: ActivitySettlementRoute; suggestion: TransferSuggestion }
@@ -72,7 +74,7 @@ function backRoute(route: Route): Route {
   if (route.name === "quickResult") return { name: "quickSplit" };
   if (route.name === "quickHistory") return { name: route.origin ?? "home" };
   if (route.name === "quickConversion") return route.previous;
-  if (route.name === "createExpense" || route.name === "activityMembers" || route.name === "activitySettlement"
+  if (route.name === "createExpense" || route.name === "expenseDetails" || route.name === "activityMembers" || route.name === "activitySettlement"
     || route.name === "activityRepayment" || route.name === "activityRepaymentHistory") return route.previous;
   if (route.name === "activityDetails" && route.previous) return route.previous;
   if (route.name === "activityDetails" && route.resumeCreation) {
@@ -135,7 +137,8 @@ function App() {
   const isQuickResult = quickRoute.name === "quickResult";
   const activeTab = tabs.find((tab) => tab.name === route.name)?.name;
   const activityRoute = route.name === "activityRepayment" || route.name === "activityRepaymentHistory" ? route.previous.previous
-    : route.name === "createExpense" || route.name === "activityMembers" || route.name === "activitySettlement" ? route.previous : route;
+    : route.name === "createExpense" || route.name === "expenseDetails" || route.name === "activityMembers"
+      || route.name === "activitySettlement" ? route.previous : route;
   const createOrigin = activityRoute.name === "createActivity" || (activityRoute.name === "activityDetails" && activityRoute.resumeCreation)
     ? activityRoute.origin ?? "home" : undefined;
   const activityDetails = route.name === "activityDetails" ? (
@@ -145,12 +148,17 @@ function App() {
         name: "activityDetails", id, origin: route.origin, resumeCreation: route.resumeCreation, previous: route,
       })}
       onAddExpense={() => setRoute({ name: "createExpense", previous: route })}
+      onViewExpense={(expenseId) => setRoute({ name: "expenseDetails", expenseId, previous: route })}
       onManageMembers={() => setRoute({ name: "activityMembers", previous: route })}
       onViewSettlement={(initialTab) => setRoute({ name: "activitySettlement", previous: route, initialTab })}
     />
   ) : route.name === "createExpense" ? (
     <CreateExpenseScreen key={route.previous.id} activityId={route.previous.id}
       onBack={() => setRoute(route.previous)} onSaved={() => setRoute(route.previous)} />
+  ) : route.name === "expenseDetails" ? (
+    <ExpenseCorrectionScreen key={route.expenseId} activityId={route.previous.id} expenseId={route.expenseId}
+      onBack={() => setRoute(route.previous)}
+      onViewSettlement={() => setRoute({ name: "activitySettlement", previous: route.previous })} />
   ) : route.name === "activityMembers" ? (
     <ActivityMembersScreen key={route.previous.id} activityId={route.previous.id} onBack={() => setRoute(route.previous)} />
   ) : route.name === "activitySettlement" ? (

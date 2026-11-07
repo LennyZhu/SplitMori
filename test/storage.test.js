@@ -22,7 +22,8 @@ import { loadActivityList } from "../src/services/activityList.ts";
 import { loadActivityDetail } from "../src/services/activityDetail.ts";
 import { loadActivityMembers } from "../src/services/activityMembers.ts";
 import { loadActivitySettlement } from "../src/services/activitySettlement.ts";
-import { createExpenseEditor, expenseDateInput, expenseDateTimestamp, prepareNewExpense } from "../src/services/expenseEditor.ts";
+import { loadExpenseCorrectionPreview, loadExpenseDetail, saveReviewedExpenseCorrection, summarizeCorrectionBalances } from "../src/services/expenseDetail.ts";
+import { createExpenseEditor, expenseDateInput, expenseDateTimestamp, hydrateExpenseEditor, prepareExpenseEdit, prepareNewExpense } from "../src/services/expenseEditor.ts";
 import { inspectRepaymentDraft } from "../src/services/memberRepayment.ts";
 import { createQuickHistorySave } from "../src/services/quickHistorySave.ts";
 import { canSelectConversionTarget, createQuickSplitConversionService } from "../src/services/quickSplitConversion.ts";
@@ -1912,7 +1913,7 @@ test("v8 preserves v7 repayments and persists notes across reopening", withTestF
     database = await initializeDatabase(connection);
     const settlement = await loadActivitySettlement("trip", database);
     assert.deepEqual(settlement.repayments, [transfer, legacy]);
-    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 8);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, migrations.length);
   } finally {
     connection.close();
   }
@@ -2025,3 +2026,237 @@ test("a failed repayment void rolls back the audit insert and allows retrying th
     assert.equal(after.outstandingMinor, 5000n);
   },
 ));
+
+test("3B7A previews a two-to-four-person split, persists bill metadata and preserves the original expense", withFinance(
+  async (finance, activities, database, _connection, reopen) => {
+    const activity = await activities.getActivity("trip");
+    const editor = { ...createExpenseEditor(activity), merchantPayerId: "z", finalTotal: "560.00",
+      chargeMode: "details", subtotal: "500.00", serviceFeeMode: "manual", serviceFee: "60.00" };
+    const original = valueOf(await finance.createExpense("trip", 100, valueOf(prepareNewExpense("dinner", "晚餐", editor))));
+    valueOf(await finance.createExpense("trip", 200, { ...expense("lunch", 56_000), name: "午餐" }));
+    await activities.addMembers("trip", [{ id: "chris", displayName: "Chris" }, { id: "d", displayName: "d" }]);
+
+    const detail = await loadExpenseDetail("trip", "dinner", database);
+    const initial = hydrateExpenseEditor(detail.activity, detail.expense);
+    assert.deepEqual([initial.chargeMode, initial.subtotal, initial.serviceFee], ["details", "500.00", "60.00"]);
+    assert.deepEqual(initial.members.map(({ included }) => included), [true, true, false, false]);
+    const draft = { ...initial, members: initial.members.map((member) => ({ ...member, included: true })) };
+    const proposed = valueOf(prepareExpenseEdit(detail.expense, initial, draft, "旅程晚餐", 50));
+    const preview = valueOf(await loadExpenseCorrectionPreview("trip", proposed, detail.currentVersion, database));
+    assert.deepEqual(preview.expense.after.split.allocations.map(({ amountMinor }) => amountMinor), [14_000, 14_000, 14_000, 14_000]);
+    assert.deepEqual(preview.memberChanges.map(({ beforeNetBalanceMinor, afterNetBalanceMinor }) =>
+      [beforeNetBalanceMinor, afterNetBalanceMinor]), [[56_000, 70_000], [-56_000, -42_000], [0, -14_000], [0, -14_000]]);
+    assert.deepEqual([preview.beforeDate, preview.afterDate], [100, 50]);
+    assert.deepEqual([preview.before, preview.after].map((snapshot) => summarizeCorrectionBalances(snapshot).effectiveMinor),
+      [112_000n, 112_000n]);
+    assert.equal(valueOf(await finance.listExpenseRevisions("trip", "dinner")).length, 1);
+
+    const request = correction(56_000, { proposed: preview.expense.after, expectedLedger: preview.ledgerToken });
+    const saved = valueOf(await finance.commitReviewedExpenseCorrection("trip", request));
+    const current = await loadActivityDetail("trip", database);
+    assert.deepEqual(current.expenses.find(({ id }) => id === "dinner").occurredAt, 50);
+    assert.equal(current.expenses.find(({ id }) => id === "dinner").name, "旅程晚餐");
+    const reopened = await reopen();
+    const [v1, v2] = valueOf(await reopened.listExpenseRevisions("trip", "dinner"));
+    assert.deepEqual(v1.expense, original.expense);
+    assert.deepEqual(v2, saved);
+    assert.deepEqual(valueOf(await reopened.getExpense("trip", "dinner")).expense, saved.expense);
+  },
+));
+
+test("3B7A preserves historical repayments and previews a reverse transfer", withFinance(async (finance, activities, database) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  const paid = valueOf(await finance.recordMemberTransfer("trip", 200, { ...repayment, note: "FPS" }));
+  const detail = await loadExpenseDetail("trip", "dinner", database);
+  const legacy = hydrateExpenseEditor(await activities.getActivity("trip"), detail.expense);
+  const proposed = valueOf(prepareExpenseEdit(detail.expense, legacy, { ...legacy, finalTotal: "70.00" }, "晚餐", 100));
+  const preview = valueOf(await loadExpenseCorrectionPreview("trip", proposed, 1, database));
+  assert.deepEqual(preview.beforeSuggestions, []);
+  assert.deepEqual(preview.suggestions, [{ fromMemberId: "z", toMemberId: "a", currency: "HKD", amountMinor: 1500 }]);
+  assert.deepEqual([preview.before, preview.after].map((snapshot) => summarizeCorrectionBalances(snapshot).repaymentMinor),
+    [5000n, 5000n]);
+  valueOf(await finance.commitReviewedExpenseCorrection("trip", correction(7000, { proposed, expectedLedger: preview.ledgerToken })));
+  assert.deepEqual(valueOf(await finance.listEvents("trip")).filter(({ kind }) => kind === "memberTransfer"), [paid]);
+  assert.deepEqual((await loadActivitySettlement("trip", database)).suggestions, preview.suggestions);
+}));
+
+test("3B7A refuses incompatible merchant refunds and requires explicit review of retained refunds", withFinance(async (finance, _activities, database) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  const retained = valueOf(await finance.recordMerchantRefund("trip", 200, { ...refund, recipientId: "a" }));
+  assert.equal((await loadExpenseCorrectionPreview("trip", expense("dinner", 1000), 1, database)).error.code, "REFUND_EXCEEDS_EXPENSE");
+  const nonparticipant = { ...expense("dinner", 8000), split: valueOf(splitEqual({ currency: "HKD", amountMinor: 8000 }, ["z"])) };
+  assert.deepEqual((await loadExpenseCorrectionPreview("trip", nonparticipant, 1, database)).error,
+    { code: "MEMBER_NOT_PARTICIPATING", field: "refundReductions" });
+
+  const request = correction(8000);
+  const preview = valueOf(await loadExpenseCorrectionPreview("trip", request.proposed, 1, database));
+  assert.deepEqual(preview.expense.refunds, [retained]);
+  const reviewed = { ...request, expectedLedger: preview.ledgerToken };
+  assert.equal((await finance.commitReviewedExpenseCorrection("trip", reviewed)).error.code, "REFUND_REVIEW_REQUIRED");
+  assert.equal(valueOf(await finance.listExpenseRevisions("trip", "dinner")).length, 1);
+  valueOf(await finance.commitReviewedExpenseCorrection("trip", { ...reviewed, reviewedRefundIds: [retained.id] }));
+  assert.deepEqual((await loadExpenseDetail("trip", "dinner", database)).refunds, [retained]);
+}));
+
+test("3B7A rejects stale previews after backdated writes, voids and activity status transitions", withFinance(async (finance, activities, database) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  valueOf(await finance.createExpense("trip", 250, expense("lunch")));
+  const request = correction(8000, { occurredAt: 400 });
+  const read = async () => valueOf(await loadExpenseCorrectionPreview("trip", request.proposed, 1, database));
+  const submit = (preview) => finance.commitReviewedExpenseCorrection("trip", { ...request, expectedLedger: preview.ledgerToken });
+  const initial = await read();
+  assert.equal((await finance.commitReviewedExpenseCorrection("trip", {
+    ...request, expectedLedger: initial.ledgerToken, proposed: expense("dinner", 9000),
+  })).error.code, "CORRECTION_LEDGER_CHANGED");
+  const paid = valueOf(await finance.recordMemberTransfer("trip", 200, { ...repayment, amountMinor: 1000 }));
+  assert.equal((await submit(initial)).error.code, "CORRECTION_LEDGER_CHANGED");
+
+  const beforeVoid = await read();
+  valueOf(await finance.voidMemberTransfer("trip", { id: "void", targetEventId: paid.id, occurredAt: 300 }));
+  assert.equal((await submit(beforeVoid)).error.code, "CORRECTION_LEDGER_CHANGED");
+
+  const beforeCompletion = await read();
+  await activities.completeActivity("trip");
+  assert.equal((await submit(beforeCompletion)).error.code, "CORRECTION_LEDGER_CHANGED");
+  assert.equal((await loadExpenseDetail("trip", "dinner", database)).editBlocker, "ACTIVITY_COMPLETED");
+  assert.equal((await loadExpenseCorrectionPreview("trip", request.proposed, 1, database)).error.code, "ACTIVITY_COMPLETED");
+  await activities.reopenActivity("trip");
+  assert.equal((await submit(beforeCompletion)).error.code, "CORRECTION_LEDGER_CHANGED");
+  assert.equal(valueOf(await finance.listExpenseRevisions("trip", "dinner")).length, 1);
+}));
+
+test("3B7A rolls back partial revisions and retries with the same ID, including metadata-only legacy edits", withFinance(
+  async (finance, _activities, database) => {
+    const original = valueOf(await finance.createExpense("trip", 100, { ...expense(), splitMode: "individual" }));
+    const detail = await loadExpenseDetail("trip", "dinner", database);
+    const initial = hydrateExpenseEditor(detail.activity, detail.expense);
+    const proposed = valueOf(prepareExpenseEdit(detail.expense, initial, { ...initial, merchantPayerId: "a" }, "晚飯", 60));
+    assert.deepEqual(proposed.split, original.expense.split);
+    assert.equal(proposed.splitInput, undefined);
+    const preview = valueOf(await loadExpenseCorrectionPreview("trip", proposed, 1, database));
+    const request = correction(10_000, { proposed, expectedLedger: preview.ledgerToken });
+    await database.write((db) => db.execAsync(`
+      CREATE TRIGGER reject_revision AFTER INSERT ON expense_revision_allocations
+      BEGIN SELECT RAISE(FAIL, 'test revision failure'); END;
+    `));
+    assert.deepEqual(await saveReviewedExpenseCorrection("trip", request, { database }), { status: "notSaved" });
+    assert.equal(valueOf(await finance.listExpenseRevisions("trip", "dinner")).length, 1);
+    assert.deepEqual(valueOf(await finance.listEvents("trip")), [original]);
+
+    await database.write((db) => db.execAsync("DROP TRIGGER reject_revision"));
+    const saved = valueOf(await finance.commitReviewedExpenseCorrection("trip", request));
+    assert.deepEqual(valueOf(await finance.commitReviewedExpenseCorrection("trip", request)), saved);
+    assert.equal((await finance.commitReviewedExpenseCorrection("trip", { ...request, proposed: { ...proposed, name: "不同" } })).error.code,
+      "REVISION_ID_CONFLICT");
+    assert.equal(valueOf(await finance.listExpenseRevisions("trip", "dinner")).length, 2);
+  },
+));
+
+test("3B7A keeps historical custom fees and over-quota activities readable with guarded editing blocked", withFinance(
+  async (finance, _activities, database) => {
+    const custom = { ...expense("custom"), splitMode: "custom" };
+    valueOf(await finance.createExpense("trip", 100, custom));
+    valueOf(await finance.createExpense("trip", 200, expense()));
+    assert.equal((await loadExpenseDetail("trip", "custom", database)).editBlocker, "UNSUPPORTED_EXPENSE_EDIT");
+    assert.equal((await loadExpenseCorrectionPreview("trip", custom, 1, database)).error.code, "UNSUPPORTED_EXPENSE_EDIT");
+    const request = correction(8000);
+    const preview = valueOf(await loadExpenseCorrectionPreview("trip", request.proposed, 1, database));
+    await database.write((db) => db.execAsync(`
+      INSERT INTO activities (id, name, currency, status, created_at, updated_at)
+      VALUES ('restored', 'Restored', 'HKD', 'active', 100, 100);
+    `));
+    assert.equal((await loadExpenseDetail("trip", "dinner", database)).editBlocker, "EXPENSE_EDIT_LIMIT");
+    assert.equal((await loadExpenseCorrectionPreview("trip", request.proposed, 1, database)).error.code, "EXPENSE_EDIT_LIMIT");
+    assert.equal((await finance.commitReviewedExpenseCorrection("trip", { ...request, expectedLedger: preview.ledgerToken })).error.code,
+      "CORRECTION_LEDGER_CHANGED");
+    assert.equal(valueOf(await finance.listExpenseRevisions("trip", "dinner")).length, 1);
+  },
+));
+
+test("3B7A repairs the early v9 schema and saves a four-person correction without rewriting history", withTestFile(async (path) => {
+  const connection = openTestConnection(path);
+  try {
+    for (const [index, sql] of migrations.slice(0, 9).entries()) {
+      await connection.execAsync(index === 2 ? sql.replace("    reviewed_refund_ids TEXT NOT NULL,\n", "") : sql);
+    }
+    await connection.execAsync(`
+      INSERT INTO activities VALUES ('trip', '旅行', 'HKD', 'active', 1, 1);
+      INSERT INTO members VALUES ('z', 'a', 1), ('a', 'b', 1), ('chris', 'Chris', 1), ('d', 'd', 1);
+      INSERT INTO activity_members VALUES ('trip', 'z', 0), ('trip', 'a', 1), ('trip', 'chris', 2), ('trip', 'd', 3);
+      INSERT INTO financial_events VALUES (1, 'lunch', 'trip', 'expense', 100), (2, 'dinner', 'trip', 'expense', 200),
+        (3, 'repayment', 'trip', 'memberTransfer', 300);
+      INSERT INTO expenses (id, activity_id, currency, amount_minor, split_mode, allocation_version, name)
+        VALUES ('lunch', 'trip', 'HKD', 56000, 'equal', 1, '午餐'), ('dinner', 'trip', 'HKD', 56000, 'equal', 1, '晚餐');
+      INSERT INTO expense_allocations VALUES
+        ('trip', 'lunch', 'z', 28000, 0), ('trip', 'lunch', 'a', 28000, 1),
+        ('trip', 'dinner', 'z', 28000, 0), ('trip', 'dinner', 'a', 28000, 1);
+      INSERT INTO merchant_payments VALUES ('trip', 'lunch', 'z', 56000), ('trip', 'dinner', 'z', 56000);
+      INSERT INTO member_transfers (id, activity_id, from_member_id, to_member_id, amount_minor, note)
+        VALUES ('repayment', 'trip', 'a', 'z', 20000, 'FPS');
+      INSERT INTO financial_voids (sequence, id, activity_id, target_event_id, target_kind, occurred_at)
+        VALUES (4, 'void-payment', 'trip', 'repayment', 'memberTransfer', 400);
+      PRAGMA user_version = 9;
+    `);
+    await assert.rejects(connection.getFirstAsync("SELECT reviewed_refund_ids FROM expense_revisions"),
+      /no such column: reviewed_refund_ids/);
+    assert.ok((await inspectBackupDatabase(backupPlatform(path), connection, 9)).ok);
+
+    const database = await initializeDatabase(connection);
+    const finance = createFinanceRepository(database);
+    const detail = await loadExpenseDetail("trip", "dinner", database);
+    const originalEvents = valueOf(await finance.listEvents("trip"));
+    const initial = hydrateExpenseEditor(detail.activity, detail.expense);
+    const draft = { ...initial, members: initial.members.map((member) => ({ ...member, included: true })) };
+    const proposed = valueOf(prepareExpenseEdit(detail.expense, initial, draft, "晚餐", detail.expenseDate));
+    const preview = valueOf(await loadExpenseCorrectionPreview("trip", proposed, detail.currentVersion, database));
+    const request = correction(56_000, { occurredAt: 500, proposed: preview.expense.after, expectedLedger: preview.ledgerToken });
+    assert.deepEqual(await saveReviewedExpenseCorrection("trip", request, { database }), { status: "saved" });
+    const first = valueOf(await finance.lookupReviewedExpenseCorrection("trip", request));
+    assert.equal(first.version, 2);
+    assert.deepEqual(valueOf(await finance.commitReviewedExpenseCorrection("trip", request)), first);
+    assert.deepEqual(valueOf(await finance.listExpenseRevisions("trip", "dinner")).map(({ version }) => version), [1, 2]);
+    assert.deepEqual((await loadExpenseDetail("trip", "dinner", database)).expense.split.allocations.map(({ amountMinor }) => amountMinor),
+      [14_000, 14_000, 14_000, 14_000]);
+    const settlement = await loadActivitySettlement("trip", database);
+    assert.equal(settlement.effectiveMinor, 112_000n);
+    assert.equal(settlement.outstandingMinor, 70_000n);
+    assert.deepEqual(settlement.members.map(({ netBalanceMinor }) => netBalanceMinor), [70_000, -42_000, -14_000, -14_000]);
+    assert.deepEqual(valueOf(await finance.listEvents("trip")), originalEvents);
+    assert.ok((await inspectBackupDatabase(backupPlatform(path), connection, 10)).ok);
+    await initializeDatabase(connection);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 10);
+  } finally {
+    connection.close();
+  }
+}));
+
+test("3B7A verifies an ambiguous committed result by revision ID without a second write", withFinance(async (finance, _activities, database) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  const base = correction(8000);
+  const preview = valueOf(await loadExpenseCorrectionPreview("trip", base.proposed, 1, database));
+  const request = { ...base, expectedLedger: preview.ledgerToken };
+  let writes = 0;
+  let canRead = false;
+  const intercepted = {
+    ...database,
+    async write(task) {
+      writes++;
+      await database.write(task);
+      throw new Error("The commit response was lost");
+    },
+    read(task) {
+      if (!canRead) return Promise.reject(new Error("Receipt lookup is temporarily unavailable"));
+      return database.read(task);
+    },
+  };
+
+  assert.deepEqual(await saveReviewedExpenseCorrection("trip", request, { database: intercepted }), { status: "unknown" });
+  assert.deepEqual(await saveReviewedExpenseCorrection("trip", request, { database: intercepted, verifyOnly: true }), { status: "unknown" });
+  canRead = true;
+  assert.deepEqual(await saveReviewedExpenseCorrection("trip", request, { database: intercepted, verifyOnly: true }), { status: "saved" });
+  assert.equal(writes, 1);
+  assert.equal((await loadExpenseDetail("trip", "dinner", database)).currentVersion, 2);
+  assert.deepEqual((await saveReviewedExpenseCorrection("trip", { ...request, proposed: expense("dinner", 9000) },
+    { database: intercepted, verifyOnly: true })), { status: "rejected", error: { code: "REVISION_ID_CONFLICT", field: "revisionId" } });
+  assert.equal(valueOf(await finance.listExpenseRevisions("trip", "dinner")).length, 2);
+}));

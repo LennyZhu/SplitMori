@@ -163,7 +163,7 @@ export function createActivityRepository(database: LocalDatabase) {
       if (current.status === status) return current;
       if (status === "active") await requireActiveActivitySlot(transaction);
       const activity = await transaction.getFirstAsync<Activity>(`
-        UPDATE activities SET status = ?, updated_at = MAX(updated_at, ?) WHERE id = ?
+        UPDATE activities SET status = ?, updated_at = MAX(updated_at + 1, ?) WHERE id = ?
         RETURNING ${activityColumns}
       `, status, Date.now(), id);
       return requireActivity(activity, id);

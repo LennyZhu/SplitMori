@@ -1,3 +1,5 @@
+import type { SQLiteConnection } from "./database.ts";
+
 export const migrations = [
   `
   CREATE TABLE activities (
@@ -221,4 +223,24 @@ export const migrations = [
   `
   ALTER TABLE member_transfers ADD COLUMN note TEXT;
   `,
+  `
+  ALTER TABLE expenses ADD COLUMN expense_date INTEGER CHECK (expense_date BETWEEN 0 AND 9007199254740991);
+  ALTER TABLE expenses ADD COLUMN split_input TEXT;
+  ALTER TABLE expense_revisions ADD COLUMN name TEXT CHECK (name IS NULL OR length(trim(name)) > 0);
+  ALTER TABLE expense_revisions ADD COLUMN expense_date INTEGER CHECK (expense_date BETWEEN 0 AND 9007199254740991);
+  ALTER TABLE expense_revisions ADD COLUMN split_input TEXT;
+  `,
+  `
+  ALTER TABLE expense_revisions ADD COLUMN reviewed_refund_ids TEXT NOT NULL DEFAULT '[]';
+  `,
 ] as const;
+
+export async function applyMigration(
+  connection: Pick<SQLiteConnection, "execAsync" | "getFirstAsync">, index: number,
+) {
+  // Early installations already ran v3 without the refund-review column.
+  if (index === 9 && await connection.getFirstAsync(
+    "SELECT name FROM pragma_table_info('expense_revisions') WHERE name = 'reviewed_refund_ids'",
+  )) return;
+  await connection.execAsync(migrations[index]);
+}

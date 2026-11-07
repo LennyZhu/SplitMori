@@ -1,6 +1,6 @@
 import { backupSnapshotName, getLocalDatabase, type LocalDatabase, type SQLiteConnection } from "../data/database.ts";
 import { validateStoredLedgers } from "../data/finance.ts";
-import { migrations } from "../data/migrations.ts";
+import { applyMigration, migrations } from "../data/migrations.ts";
 import { failure, type Result } from "../domain/result.ts";
 
 const magic = "SplitMori Backup";
@@ -158,19 +158,33 @@ function readSchema(db: BackupDatabase) {
   `);
 }
 
-async function schemaMatches(platform: BackupPlatform, db: BackupDatabase, version: number) {
+async function referenceSchema(platform: BackupPlatform, version: number, earlyRevisionTable = false) {
   const expected = await platform.openDatabase(":memory:");
   try {
-    for (const sql of migrations.slice(0, version)) await expected.execAsync(sql);
-    const actual = await readSchema(db);
-    const reference = await readSchema(expected);
+    for (let index = 0; index < version; index++) {
+      if (index === 2 && earlyRevisionTable) {
+        await expected.execAsync(migrations[2].replace("    reviewed_refund_ids TEXT NOT NULL,\n", ""));
+      } else {
+        await applyMigration(expected, index);
+      }
+    }
+    return await readSchema(expected);
+  } finally {
+    await expected.closeAsync();
+  }
+}
+
+async function schemaMatches(platform: BackupPlatform, db: BackupDatabase, version: number) {
+  const actual = await readSchema(db);
+  function matches(reference: Awaited<ReturnType<typeof readSchema>>) {
     return actual.length === reference.length && actual.every((row, index) => {
       const other = reference[index];
       return row.type === other.type && row.name === other.name && row.tbl_name === other.tbl_name && row.sql === other.sql;
     });
-  } finally {
-    await expected.closeAsync();
   }
+  if (matches(await referenceSchema(platform, version))) return true;
+  // Match the complete known early schema, including the appended v10 column after repair.
+  return version >= 3 && matches(await referenceSchema(platform, version, true));
 }
 
 export async function readBackupCounts(

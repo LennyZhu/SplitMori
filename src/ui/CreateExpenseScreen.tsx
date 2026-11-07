@@ -7,10 +7,11 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { createActivityRepository, type ActivityDetail } from "../data/activities.ts";
 import { getLocalDatabase } from "../data/database.ts";
-import { createFinanceRepository } from "../data/finance.ts";
+import { createFinanceRepository, type FinanceExpense } from "../data/finance.ts";
 import type { DomainErrorCode } from "../domain/result.ts";
 import {
-  calculateExpenseSplit, createExpenseEditor, expenseDateInput, expenseDateTimestamp, prepareNewExpense,
+  calculateExpenseSplit, createExpenseEditor, expenseDateInput, expenseDateTimestamp, expenseSplitUnchanged,
+  hydrateExpenseEditor, prepareExpenseEdit, prepareNewExpense,
 } from "../services/expenseEditor.ts";
 import type { EditorField, EditorMember, QuickSplitEditorState } from "../services/quickSplitEditor.ts";
 import { formatResultMoney } from "../services/quickSplitResult.ts";
@@ -19,7 +20,7 @@ import { validationMessage } from "./splitEditorMessages.ts";
 import { colors, Icon } from "./visuals.tsx";
 
 const dateFormat = new Intl.DateTimeFormat("zh-HK", { year: "numeric", month: "long", day: "numeric" });
-type FormSection = "basic" | "total" | "members" | "payer" | "details";
+type FormSection = "basic" | "total" | "members" | "payer" | "details" | "date";
 const editorSections: Record<EditorField, FormSection> = {
   currency: "total", finalTotal: "total", members: "members", hostId: "members", coverAmount: "members",
   coverPercentage: "members", personalAmount: "members", sharedAmount: "members", sharedMembers: "members",
@@ -43,11 +44,11 @@ function ErrorText({ message }: { message?: string }) {
   return message ? <Text accessibilityRole="alert" style={styles.error}>{message}</Text> : null;
 }
 
-function Card({ title, children, onLayout }: {
-  title?: string; children: ReactNode; onLayout?: (y: number) => void;
+function Card({ title, children, onLayout, plain = false }: {
+  title?: string; children: ReactNode; onLayout?: (y: number) => void; plain?: boolean;
 }) {
   return (
-    <View style={styles.card} onLayout={onLayout && (({ nativeEvent }) => onLayout(nativeEvent.layout.y))}>
+    <View style={plain ? styles.field : styles.card} onLayout={onLayout && (({ nativeEvent }) => onLayout(nativeEvent.layout.y))}>
       {title && <Text accessibilityRole="header" style={styles.heading}>{title}</Text>}
       {children}
     </View>
@@ -79,23 +80,33 @@ function Option({ label, selected, onPress, multiple = false }: {
   );
 }
 
-export function CreateExpenseScreen({ activityId, onBack, onSaved }: {
-  activityId: string; onBack: () => void; onSaved: () => void;
-}) {
-  const [activity, setActivity] = useState<ActivityDetail | null>();
-  const [editor, setEditor] = useState<QuickSplitEditorState>();
+type EditExpenseForm = {
+  readonly activity: ActivityDetail;
+  readonly original: FinanceExpense;
+  readonly originalDate: number;
+  readonly name: string;
+  readonly hidden: boolean;
+  readonly onPreview: (proposed: FinanceExpense) => Promise<string | undefined>;
+};
+
+export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
+  activityId: string; onBack: () => void;
+} & ({ onSaved: () => void; edit?: never } | { onSaved?: never; edit: EditExpenseForm })) {
+  const [activity, setActivity] = useState<ActivityDetail | null | undefined>(edit?.activity);
+  const [initial] = useState(() => edit && hydrateExpenseEditor(edit.activity, edit.original));
+  const [editor, setEditor] = useState<QuickSplitEditorState | undefined>(initial);
   const [loadError, setLoadError] = useState(false);
-  const [name, setName] = useState("");
-  const [openedAt] = useState(() => new Date());
+  const [name, setName] = useState(edit?.name ?? "");
+  const [openedAt] = useState(() => edit ? new Date(edit.originalDate) : new Date());
   const [date, setDate] = useState(() => expenseDateInput(openedAt));
   const [dateEditing, setDateEditing] = useState(false);
   const [showPayers, setShowPayers] = useState(false);
-  const [showDetails, setShowDetails] = useState(false);
+  const [showDetails, setShowDetails] = useState(initial?.chargeMode === "details");
   const [attempted, setAttempted] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string>();
   const [dirty, setDirty] = useState(false);
-  const [id] = useState(() => uuid.v4());
+  const [id] = useState(() => edit?.original.id ?? uuid.v4());
   const mounted = useRef(false);
   const pending = useRef(false);
   const offsets = useRef<Partial<Record<FormSection, number>>>({});
@@ -119,20 +130,23 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved }: {
     return () => { mounted.current = false; };
   }, []);
 
-  useEffect(() => { void load(); }, [load]);
+  const isEditing = edit !== undefined;
+  const hidden = edit?.hidden ?? false;
+  useEffect(() => { if (!isEditing) void load(); }, [load, isEditing]);
 
   const close = useCallback(() => {
     if (pending.current) return;
     if (!dirty) { onBack(); return; }
-    Alert.alert("放棄這筆費用？", "尚未儲存的輸入將會清除。", [
+    Alert.alert(isEditing ? "放棄更正？" : "放棄這筆費用？", "尚未儲存的輸入將會清除。", [
       { text: "繼續編輯", style: "cancel" }, { text: "放棄", style: "destructive", onPress: onBack },
     ]);
-  }, [dirty, onBack]);
+  }, [dirty, isEditing, onBack]);
 
   useEffect(() => {
+    if (hidden) return;
     const sub = BackHandler.addEventListener("hardwareBackPress", () => { close(); return true; });
     return () => sub.remove();
-  }, [close]);
+  }, [close, hidden]);
 
   function revealInput() {
     const input = TextInput.State.currentlyFocusedInput();
@@ -140,10 +154,10 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved }: {
   }
 
   useEffect(() => {
-    if (Platform.OS !== "ios") return;
+    if (Platform.OS !== "ios" || hidden) return;
     const sub = Keyboard.addListener("keyboardDidShow", revealInput);
     return () => sub.remove();
-  }, []);
+  }, [hidden]);
 
   function onInputFocus() {
     if (Platform.OS === "ios" && Keyboard.isVisible()) requestAnimationFrame(revealInput);
@@ -164,8 +178,9 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved }: {
   }
 
   const occurredAt = expenseDateTimestamp(date, openedAt);
-  const preview = editor && calculateExpenseSplit(editor);
-  const split = preview?.ok ? preview.value.snapshot.split : undefined;
+  const preservedSplit = edit && initial && editor && expenseSplitUnchanged(initial, editor) ? edit.original.split : undefined;
+  const preview = editor && !preservedSplit ? calculateExpenseSplit(editor) : undefined;
+  const split = preservedSplit ?? (preview?.ok ? preview.value.snapshot.split : undefined);
   const payer = editor?.members.find((member) => member.id === editor.merchantPayerId);
   const error = preview?.ok === false ? preview.error : undefined;
   const participants = editor?.members.filter(({ included }) => included) ?? [];
@@ -188,9 +203,15 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved }: {
     Keyboard.dismiss();
     setAttempted(true);
     setSaveError(undefined);
-    if (!name.trim() || occurredAt === undefined) { focusSection("basic"); return; }
+    if (!name.trim() || occurredAt === undefined) {
+      if (edit && name.trim()) {
+        focusSection("date");
+      } else focusSection("basic");
+      return;
+    }
 
-    const expense = prepareNewExpense(id, name, editor);
+    const expense = edit && initial ? prepareExpenseEdit(edit.original, initial, editor, name, occurredAt)
+      : prepareNewExpense(id, name, editor);
     if (!expense.ok) {
       focusSection(error ? editorSections[error.field] : "payer");
       return;
@@ -199,13 +220,18 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved }: {
     pending.current = true;
     setSaving(true);
     try {
+      if (edit) {
+        const message = await edit.onPreview(expense.value);
+        if (mounted.current) setSaveError(message);
+        return;
+      }
       const repository = createFinanceRepository(await getLocalDatabase());
       const result = await repository.createExpense(activityId, occurredAt, expense.value);
       if (!mounted.current) return;
-      if (result.ok) onSaved();
+      if (result.ok) onSaved?.();
       else setSaveError(storageMessage(result.error.code));
     } catch {
-      if (mounted.current) setSaveError(storageMessage("FINANCE_STORAGE_ERROR"));
+      if (mounted.current) setSaveError(edit ? "未能讀取更正預覽，請重試。" : storageMessage("FINANCE_STORAGE_ERROR"));
     } finally {
       pending.current = false;
       if (mounted.current) setSaving(false);
@@ -226,16 +252,39 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved }: {
       placeholder={field === "coverPercentage" ? "0–100" : placeholder} error={fieldError(field)} onFocus={onInputFocus} />;
   }
 
+  const dateField = (
+    <View style={styles.field}>
+      <Text style={styles.label}>費用日期</Text>
+      {dateEditing ? (
+        <>
+          <TextInput accessibilityLabel="費用日期，年、月、日" value={date} autoFocus selectTextOnFocus
+            onChangeText={(value) => { setDate(value); markDirty(); }} onFocus={onInputFocus}
+            onBlur={() => { if (occurredAt !== undefined) setDateEditing(false); }}
+            keyboardType={Platform.OS === "ios" ? "numbers-and-punctuation" : "default"}
+            returnKeyType="done" maxLength={10} placeholder="YYYY-MM-DD" style={styles.input} />
+          <Text style={styles.caption}>格式為 YYYY-MM-DD。</Text>
+        </>
+      ) : (
+        <Pressable accessibilityRole="button" accessibilityLabel="更改費用日期" style={styles.picker} onPress={() => setDateEditing(true)}>
+          <Text style={[styles.inputText, styles.fill]}>{occurredAt === undefined ? date : dateFormat.format(occurredAt)}</Text>
+          <Icon name="down" size={17} />
+        </Pressable>
+      )}
+      <ErrorText message={attempted && occurredAt === undefined ? "請輸入有效的費用日期。" : undefined} />
+    </View>
+  );
+
   return (
-    <KeyboardAvoidingView style={styles.screen} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={top}>
+    <KeyboardAvoidingView style={hidden ? styles.hidden : styles.screen} behavior={Platform.OS === "ios" ? "padding" : undefined}
+      keyboardVerticalOffset={top}>
       <View style={styles.header}>
         <Pressable accessibilityRole="button" accessibilityLabel="返回活動詳情" disabled={saving} onPress={close} style={styles.headerSide}>
           <Icon name="back" size={23} />
         </Pressable>
-        <Text accessibilityRole="header" style={styles.title}>新增費用</Text>
-        <Pressable accessibilityRole="button" disabled={saving} onPress={close} style={[styles.headerSide, styles.headerRight]}>
+        <Text accessibilityRole="header" style={styles.title}>{edit ? "編輯費用" : "新增費用"}</Text>
+        {edit ? <View style={styles.headerSide} /> : <Pressable accessibilityRole="button" disabled={saving} onPress={close} style={[styles.headerSide, styles.headerRight]}>
           <Text style={styles.cancel}>取消</Text>
-        </Pressable>
+        </Pressable>}
       </View>
       <ScrollView ref={scroll} style={styles.scroll} contentContainerStyle={styles.content}
         keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" pointerEvents={saving ? "none" : "auto"}>
@@ -251,56 +300,44 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved }: {
 
         {activity && editor && (
           <>
-            <View style={styles.context}>
+            {edit ? <View style={styles.notice}>
+              <Text style={styles.caption}>更正會另存新版本。提交前請核對這筆費用及整個活動的結算變化。</Text>
+              {!edit.original.splitInput && <Text style={styles.caption}>
+                舊記錄僅保留分攤結果。若要更改分帳，請按實際帳單核對及補填相關明細。
+              </Text>}
+            </View> : <View style={styles.context}>
               <Text style={[styles.caption, styles.fill]}>活動　<Text style={styles.label}>{activity.name}</Text></Text>
               <Text style={[styles.caption, styles.badge]}>進行中 · {activity.currency}</Text>
-            </View>
+            </View>}
 
-            <Card onLayout={offset("basic")}>
+            <Card onLayout={offset("basic")} plain={isEditing}>
               <View style={styles.field}>
                 <Text style={styles.label}>費用名稱 *</Text>
                 <TextInput accessibilityLabel="費用名稱" value={name} onChangeText={(value) => { setName(value); markDirty(); }}
                   placeholder="輸入費用名稱" placeholderTextColor={colors.muted} onFocus={onInputFocus} style={styles.input} />
                 <ErrorText message={attempted && !name.trim() ? "請輸入費用名稱。" : undefined} />
               </View>
-              <View style={styles.field}>
-                <Text style={styles.label}>費用日期</Text>
-                {dateEditing ? (
-                  <>
-                    <TextInput accessibilityLabel="費用日期，年、月、日" value={date} autoFocus selectTextOnFocus
-                      onChangeText={(value) => { setDate(value); markDirty(); }} onFocus={onInputFocus}
-                      onBlur={() => { if (occurredAt !== undefined) setDateEditing(false); }}
-                      keyboardType={Platform.OS === "ios" ? "numbers-and-punctuation" : "default"}
-                      returnKeyType="done" maxLength={10} placeholder="YYYY-MM-DD" style={styles.input} />
-                    <Text style={styles.caption}>格式為 YYYY-MM-DD。</Text>
-                  </>
-                ) : (
-                  <Pressable accessibilityRole="button" accessibilityLabel="更改費用日期" style={styles.picker} onPress={() => setDateEditing(true)}>
-                    <Text style={[styles.inputText, styles.fill]}>{occurredAt === undefined ? date : dateFormat.format(occurredAt)}</Text>
-                    <Icon name="down" size={17} />
-                  </Pressable>
-                )}
-                <ErrorText message={attempted && occurredAt === undefined ? "請輸入有效的費用日期。" : undefined} />
-              </View>
+              {!edit && dateField}
             </Card>
 
-            <Card title="實際帳單總額 *" onLayout={offset("total")}>
-              <View style={[styles.picker, styles.bill]}>
-                <View><Text style={styles.heading}>{activity.currency}</Text><Text style={styles.caption}>活動幣種</Text></View>
+            <Card title="實際帳單總額 *" onLayout={offset("total")} plain={isEditing}>
+              <View style={[styles.picker, styles.bill, edit && styles.editBill]}>
+                <View><Text style={styles.heading}>{activity.currency}</Text>{!edit && <Text style={styles.caption}>活動幣種</Text>}</View>
                 <TextInput accessibilityLabel="實際帳單總額" value={editor.finalTotal} onChangeText={(value) => setField("finalTotal", value)}
                   onFocus={onInputFocus} keyboardType="decimal-pad" placeholder={placeholder} placeholderTextColor={colors.muted}
-                  style={styles.billInput} />
+                  style={[styles.billInput, edit && styles.editBillInput]} />
               </View>
               <Text style={styles.caption}>{details ? "用作核對按明細計算的金額。" : "填寫已包含服務費及折扣的實付金額。"}</Text>
               <ErrorText message={fieldError("finalTotal") ?? fieldError("currency")} />
             </Card>
 
-            <Card title="分帳方式">
+            <Card title="分帳方式" plain={isEditing}>
               <SplitModeSelector mode={editor.mode} onSelect={(mode) => setField("mode", mode)} />
               <Text style={styles.caption}>單筆費用僅使用一種分帳方式。</Text>
             </Card>
 
-            <Card title="參與成員" onLayout={offset("members")}>
+            {edit && <Text accessibilityRole="header" style={styles.heading}>參與分攤 · {participants.length} 人</Text>}
+            <Card title={edit ? undefined : "參與成員"} onLayout={offset("members")}>
               {editor.members.map((member, index) => (
                 <View key={member.id} style={index > 0 && styles.divider}>
                   <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: member.included }}
@@ -310,7 +347,8 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved }: {
                       {member.included && <Icon name="check" size={14} color={colors.onPrimary} />}
                     </View>
                     <Text style={[styles.label, styles.fill]}>{member.displayName}</Text>
-                    <Text style={styles.caption}>{member.included ? "參與分攤" : "不參與"}</Text>
+                    <Text style={styles.caption}>{edit && member.included && split
+                      ? money(shares.get(member.id) ?? 0) : member.included ? "參與分攤" : "不參與"}</Text>
                   </Pressable>
                   {editor.mode === "individual" && member.included && (
                     <AmountField label={`${member.displayName}的個人消費`} value={member.personalAmount}
@@ -373,6 +411,8 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved }: {
               <ErrorText message={attempted && !payer ? "請選擇實際向商家付款的成員。" : undefined} />
             </Card>
 
+            {edit && <Card onLayout={offset("date")}>{dateField}</Card>}
+
             <Card onLayout={offset("details")}>
               <Pressable accessibilityRole="button" accessibilityState={{ expanded: showDetails }}
                 onPress={() => setShowDetails(!showDetails)} style={styles.memberRow}>
@@ -432,10 +472,10 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved }: {
                 </>
               ) : <Text style={styles.caption}>填妥金額及分攤資料後，即可查看每位成員的承擔額。</Text>}
             </Card>
-            <Card>
+            {!edit && <Card>
               <Text style={styles.label}>儲存至活動「{activity.name}」</Text>
               <Text style={styles.caption}>儲存後會更新活動帳本及結算建議。</Text>
-            </Card>
+            </Card>}
           </>
         )}
       </ScrollView>
@@ -445,7 +485,7 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved }: {
           <Pressable accessibilityRole="button" accessibilityState={{ disabled: !formReady || saving, busy: saving }}
             disabled={!formReady || saving} onPress={() => { void save(); }}
             style={({ pressed }) => [styles.saveButton, (pressed || !formReady || saving) && styles.dimmed]}>
-            <Text style={styles.saveText}>{saving ? "正在儲存…" : "儲存費用"}</Text>
+            <Text style={styles.saveText}>{edit ? (saving ? "正在計算…" : "預覽更正影響") : (saving ? "正在儲存…" : "儲存費用")}</Text>
           </Pressable>
         </View>
       </View>
@@ -455,6 +495,8 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved }: {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.page },
+  hidden: { display: "none" },
+  notice: { backgroundColor: colors.quiet, borderRadius: 12, padding: 12, gap: 5 },
   header: {
     width: "100%", maxWidth: 620, alignSelf: "center", minHeight: 52, paddingHorizontal: 18,
     flexDirection: "row", alignItems: "center", gap: 8,
@@ -482,7 +524,9 @@ const styles = StyleSheet.create({
     gap: 8, borderWidth: 1, borderColor: colors.line, borderRadius: 11,
   },
   bill: { minHeight: 62 },
+  editBill: { minHeight: 48, backgroundColor: colors.surface },
   billInput: { flex: 1, minHeight: 44, color: colors.ink, fontSize: 28, fontWeight: "700", fontVariant: ["tabular-nums"], textAlign: "right" },
+  editBillInput: { minHeight: 30, fontSize: 19 },
   fill: { flex: 1 },
   divider: { borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.line },
   memberRow: { flexDirection: "row", alignItems: "center", minHeight: 44, gap: 9 },

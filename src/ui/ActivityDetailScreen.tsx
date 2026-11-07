@@ -52,9 +52,10 @@ function Section({ title, children, action }: { title: string; children: ReactNo
   );
 }
 
-export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAddExpense, onManageMembers, onViewSettlement }: {
+export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAddExpense, onViewExpense, onManageMembers, onViewSettlement }: {
   activityId: string; onBack: () => void; onViewExisting: (blocker: ActivityCreationBlocker) => void;
   onAddExpense: () => void;
+  onViewExpense: (expenseId: string) => void;
   onManageMembers: () => void;
   onViewSettlement: (tab?: "transfers") => void;
 }) {
@@ -224,7 +225,9 @@ export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAdd
                 <>
                   <View style={styles.card}>
                     {data.expenses.map((expense, index) => (
-                      <View key={expense.id} style={[styles.row, index > 0 && styles.divider]}>
+                      <Pressable key={expense.id} accessibilityRole="button" accessibilityHint="開啟費用詳情"
+                        onPress={() => onViewExpense(expense.id)}
+                        style={({ pressed }) => [styles.row, index > 0 && styles.divider, pressed && styles.pressed]}>
                         <View style={styles.tile}><Icon name="receipt" size={17} /></View>
                         <View style={styles.fill}>
                           <View style={styles.expenseTitle}>
@@ -238,7 +241,8 @@ export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAdd
                           <Text style={[styles.strong, styles.number]}>{money(expense.effectiveMinor)}</Text>
                           <Text style={styles.caption}>有效金額</Text>
                         </View>
-                      </View>
+                        <Icon name="next" size={16} color={colors.muted} />
+                      </Pressable>
                     ))}
                   </View>
                 </>

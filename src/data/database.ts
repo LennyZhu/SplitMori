@@ -1,5 +1,5 @@
 import type { SQLiteDatabase } from "expo-sqlite";
-import { migrations } from "./migrations.ts";
+import { applyMigration, migrations } from "./migrations.ts";
 
 export type SQLiteReader = Pick<SQLiteDatabase, "getFirstAsync" | "getAllAsync">;
 export type SQLiteConnection = SQLiteReader & Pick<SQLiteDatabase, "execAsync" | "runAsync">;
@@ -94,7 +94,7 @@ export async function initializeDatabase(connection: SQLiteConnection, snapshotW
         throw new Error(`Unsupported schema version ${String(version)} (latest ${migrations.length})`);
       }
       for (let next = version; next < migrations.length; next += 1) {
-        await transaction.execAsync(migrations[next]);
+        await applyMigration(transaction, next);
         await transaction.execAsync(`PRAGMA user_version = ${next + 1}`);
       }
     });

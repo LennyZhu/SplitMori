@@ -1,7 +1,9 @@
 import type { Currency } from "../domain/money.ts";
+import type { QuickSplitInput } from "../domain/quickSplit.ts";
 import type { Allocation } from "../domain/split.ts";
 import type { SQLiteConnection, SQLiteReader } from "./database.ts";
 import type { FinanceExpense } from "./finance.ts";
+import { migrations } from "./migrations.ts";
 
 export type ExpenseVersion = {
   readonly kind: "expense" | "expenseRevision";
@@ -28,6 +30,8 @@ type RevisionRow = {
   sequence: number;
   expenseId: string;
   expenseName: string | null;
+  expenseDate: number | null;
+  splitInput: string | null;
   currency: Currency;
   amountMinor: number;
   splitMode: FinanceExpense["splitMode"];
@@ -39,11 +43,13 @@ type RevisionRow = {
 };
 
 export async function readExpenseRevisions(
-  connection: SQLiteReader, activityId: string, hasExpenseName = true,
+  connection: SQLiteReader, activityId: string, schemaVersion: number = migrations.length,
 ): Promise<StoredExpenseRevision[]> {
   const rows = await connection.getAllAsync<RevisionRow>(`
     SELECT r.id, r.version, r.occurred_at AS occurredAt, r.sequence, r.expense_id AS expenseId,
-           ${hasExpenseName ? "e.name" : "NULL"} AS expenseName,
+           ${schemaVersion >= 9 ? "COALESCE(r.name, e.name)" : schemaVersion >= 7 ? "e.name" : "NULL"} AS expenseName,
+           ${schemaVersion >= 9 ? "r.expense_date" : "NULL"} AS expenseDate,
+           ${schemaVersion >= 9 ? "r.split_input" : "NULL"} AS splitInput,
            r.currency, r.amount_minor AS amountMinor, r.split_mode AS splitMode,
            r.allocation_version AS allocationVersion, r.payer_id AS payerId, r.paid_minor AS paidMinor,
            a.member_id AS memberId, a.amount_minor AS shareMinor
@@ -56,13 +62,15 @@ export async function readExpenseRevisions(
   let previousId: string | undefined;
   let allocations: Allocation[] = [];
   for (const row of rows) {
-    const { id, version, occurredAt, sequence, expenseId, expenseName, currency, amountMinor, splitMode, allocationVersion,
+    const { id, version, occurredAt, sequence, expenseId, expenseName, expenseDate, splitInput, currency, amountMinor, splitMode, allocationVersion,
       payerId, paidMinor, memberId, shareMinor } = row;
     if (memberId === null || shareMinor === null) throw new Error(`Missing allocations for expense revision ${id}`);
     if (id !== previousId) {
       allocations = [];
       revisions.push({ kind: "expenseRevision", id, version, occurredAt, sequence, expense: {
         id: expenseId, splitMode, allocationVersion, ...(expenseName === null ? {} : { name: expenseName }),
+        ...(expenseDate === null ? {} : { expenseDate }),
+        ...(splitInput === null ? {} : { splitInput: JSON.parse(splitInput) as QuickSplitInput }),
         split: { total: { currency, amountMinor }, allocations },
         merchantPayment: { memberId: payerId, currency, amountMinor: paidMinor },
       } });
@@ -79,14 +87,15 @@ export async function insertExpenseRevision(
     readonly refundReview: string;
   },
 ): Promise<StoredExpenseRevision> {
-  const { split, merchantPayment, splitMode, allocationVersion, name } = expense;
+  const { split, merchantPayment, splitMode, allocationVersion, name, expenseDate, splitInput } = expense;
   const { currency, amountMinor } = split.total;
   const row = await transaction.getFirstAsync<{ sequence: number }>(`
     INSERT INTO expense_revisions (sequence, id, activity_id, expense_id, version, occurred_at,
-      currency, amount_minor, split_mode, allocation_version, payer_id, paid_minor, reviewed_refund_ids)
-    VALUES (${nextFinanceSequence}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING sequence
+      currency, amount_minor, split_mode, allocation_version, payer_id, paid_minor, reviewed_refund_ids, name, expense_date, split_input)
+    VALUES (${nextFinanceSequence}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING sequence
   `, id, activityId, expense.id, version, occurredAt, currency, amountMinor, splitMode,
-  allocationVersion, merchantPayment.memberId, merchantPayment.amountMinor, refundReview);
+  allocationVersion, merchantPayment.memberId, merchantPayment.amountMinor, refundReview, name ?? null, expenseDate ?? null,
+  splitInput === undefined ? null : JSON.stringify(splitInput));
   if (!row) throw new Error("Expense revision was not inserted");
 
   const shares = new Map(split.allocations.map(({ memberId, amountMinor }) => [memberId, amountMinor]));
@@ -102,8 +111,6 @@ export async function insertExpenseRevision(
   }
   return {
     kind: "expenseRevision", id, version, occurredAt, sequence: row.sequence,
-    expense: { id: expense.id, splitMode, allocationVersion, ...(name === undefined ? {} : { name }),
-      split: { total: { currency, amountMinor }, allocations },
-      merchantPayment: { memberId: merchantPayment.memberId, currency, amountMinor: merchantPayment.amountMinor } },
+    expense: { ...expense, split: { total: { currency, amountMinor }, allocations } },
   };
 }
