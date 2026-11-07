@@ -13,6 +13,7 @@ const tabs = [
   { id: "transfers", label: "轉帳建議" },
 ] as const;
 type Tab = typeof tabs[number]["id"];
+type HistoryOrigin = Exclude<Tab, "members">;
 type Member = ActivitySettlementData["members"][number];
 type SettlementRow =
   | { kind: "member"; id: string; member: Member }
@@ -129,8 +130,32 @@ function TransferOverview({ data, money }: { data: ActivitySettlementData; money
   if (data.status === "settled") {
     return (
       <View style={styles.contentStack}>
-        <SettledMessage />
-        <Text style={[styles.caption, styles.center]}>目前沒有轉帳建議。</Text>
+        <View style={[styles.card, styles.transferTotal]}>
+          <Text style={styles.caption}>目前款項狀態</Text>
+          <Text accessibilityRole="header" style={styles.transferStatus}>款項已全部結清</Text>
+          <AmountLine label="活動有效費用" value={money(data.effectiveMinor)} />
+          <AmountLine label="有效已登記還款" value={money(data.repaymentMinor)} />
+        </View>
+        <View style={styles.group}>
+          <Text accessibilityRole="header" style={styles.heading}>轉帳建議</Text>
+          <View style={[styles.card, styles.group]}>
+            <View style={styles.amountRow}>
+              <Icon name="check" size={26} />
+              <Text style={styles.caption}>目前無需再轉帳</Text>
+            </View>
+            <Text style={styles.caption}>完成活動與款項結清是兩個獨立狀態。</Text>
+          </View>
+        </View>
+      </View>
+    );
+  }
+  if (data.voidedRepaymentMinor > 0n) {
+    return (
+      <View style={styles.card}>
+        <Text style={styles.caption}>目前尚待結算</Text>
+        <Text style={styles.heroAmount}>{money(data.outstandingMinor)}</Text>
+        <AmountLine label="活動有效費用" value={money(data.effectiveMinor)} />
+        <AmountLine label="有效已登記還款" value={money(data.repaymentMinor)} />
       </View>
     );
   }
@@ -142,6 +167,25 @@ function TransferOverview({ data, money }: { data: ActivitySettlementData; money
         <Text style={styles.heroAmount}>{money(data.outstandingMinor)}</Text>
         <Text style={styles.caption}>共 {data.suggestions.length} 筆建議 · 尚未記錄這些轉帳</Text>
       </View>
+    </View>
+  );
+}
+
+function RepaymentHistoryLink({ data, money, onPress }: {
+  data: ActivitySettlementData; money: FormatMoney; onPress: () => void;
+}) {
+  return (
+    <View style={styles.historyGroup}>
+      <Text accessibilityRole="header" style={styles.heading}>歷史記錄</Text>
+      <Pressable accessibilityRole="button" onPress={onPress}
+        style={({ pressed }) => [styles.card, styles.historyLink, pressed && styles.pressed]}>
+        <View style={styles.memberCopy}>
+          <Text style={styles.memberName}>查看還款記錄</Text>
+          <Text style={styles.caption}>{data.repaymentHistory.length} 筆歷史 · 有效 {money(data.repaymentMinor)}</Text>
+          {data.voidedRepaymentMinor > 0n && <Text style={styles.caption}>已作廢 {money(data.voidedRepaymentMinor)}</Text>}
+        </View>
+        <Icon name="next" size={17} color={colors.muted} />
+      </Pressable>
     </View>
   );
 }
@@ -221,9 +265,10 @@ function TransferRow({ from, to, amount, note, onSelect, selected }: {
   </Pressable>;
 }
 
-function SettlementContent({ data, tab, setTab, onBack, refreshing, onRefresh, onRecordRepayment }: {
+function SettlementContent({ data, tab, setTab, onBack, refreshing, onRefresh, onRecordRepayment, onViewRepaymentHistory }: {
   data: ActivitySettlementData; tab: Tab; setTab: (tab: Tab) => void; onBack: () => void; refreshing: boolean; onRefresh: () => void;
   onRecordRepayment: (suggestion: TransferSuggestion) => void;
+  onViewRepaymentHistory: (tab: HistoryOrigin) => void;
 }) {
   const [expandedId, setExpandedId] = useState<string | null | undefined>();
   const [selectedPair, setSelectedPair] = useState<string>();
@@ -269,6 +314,7 @@ function SettlementContent({ data, tab, setTab, onBack, refreshing, onRefresh, o
         ))}
       </View>
       {tab === "overview" && <Overview data={data} money={money} />}
+      {tab === "overview" && <RepaymentHistoryLink data={data} money={money} onPress={() => onViewRepaymentHistory(tab)} />}
       {tab === "members" && data.status === "empty" && <NoFinancialRecords />}
       {tab === "transfers" && <TransferOverview data={data} money={money} />}
     </View>
@@ -305,16 +351,19 @@ function SettlementContent({ data, tab, setTab, onBack, refreshing, onRefresh, o
             separate={first && index > 0} expanded={expanded}
             onToggle={tab === "members" ? () => setExpandedId(expanded ? null : item.id) : undefined} />;
         }}
-        ListFooterComponent={tab === "transfers" && data.suggestions.length > 0 ? (
+        ListFooterComponent={tab === "transfers" ? (
           <View style={[styles.contentStack, styles.listNotes]}>
-            <View style={styles.notice}>
-              <Text style={styles.noteTitle}>重要說明</Text>
-              <Text style={styles.caption}>轉帳建議依目前淨額產生。實際轉帳後，須另行記錄還款，帳本才會更新。</Text>
-            </View>
-            <View style={styles.updateNote}>
-              <Text style={styles.noteTitle}>資料如何更新？</Text>
-              <Text style={styles.caption}>新增費用、商家退款、費用更正或登記還款後，建議會依最新帳務更新。</Text>
-            </View>
+            <RepaymentHistoryLink data={data} money={money} onPress={() => onViewRepaymentHistory(tab)} />
+            {data.suggestions.length > 0 && <>
+              <View style={styles.notice}>
+                <Text style={styles.noteTitle}>重要說明</Text>
+                <Text style={styles.caption}>轉帳建議依目前淨額產生。實際轉帳後，須另行記錄還款，帳本才會更新。</Text>
+              </View>
+              <View style={styles.updateNote}>
+                <Text style={styles.noteTitle}>資料如何更新？</Text>
+                <Text style={styles.caption}>新增費用、商家退款、費用更正或登記還款後，建議會依最新帳務更新。</Text>
+              </View>
+            </>}
           </View>
         ) : undefined}
       />
@@ -326,8 +375,9 @@ function SettlementContent({ data, tab, setTab, onBack, refreshing, onRefresh, o
   );
 }
 
-export function ActivitySettlementScreen({ activityId, onBack, initialTab = "overview", onRecordRepayment }: {
+export function ActivitySettlementScreen({ activityId, onBack, initialTab = "overview", onRecordRepayment, onViewRepaymentHistory }: {
   activityId: string; onBack: () => void; initialTab?: Tab; onRecordRepayment: (suggestion: TransferSuggestion) => void;
+  onViewRepaymentHistory: (tab: HistoryOrigin) => void;
 }) {
   const [tab, setTab] = useState<Tab>(initialTab);
   const [data, setData] = useState<ActivitySettlementData | null>();
@@ -372,7 +422,7 @@ export function ActivitySettlementScreen({ activityId, onBack, initialTab = "ove
         <View style={styles.headerSide} />
       </View>
       {data ? <SettlementContent data={data} tab={tab} setTab={setTab} onBack={onBack} refreshing={loading} onRefresh={reload}
-        onRecordRepayment={onRecordRepayment} />
+        onRecordRepayment={onRecordRepayment} onViewRepaymentHistory={onViewRepaymentHistory} />
         : <View style={[styles.content, styles.group]}>
           {loading && <ActivityIndicator accessibilityLabel="正在讀取結算資料" color={colors.ink} />}
           {readError && <View style={[styles.card, styles.group]}>
@@ -411,6 +461,8 @@ const styles = StyleSheet.create({
   segmentTextSelected: { color: colors.onPrimary },
   card: { backgroundColor: colors.surface, borderColor: colors.line, borderWidth: 1, borderRadius: 17, padding: 15 },
   group: { gap: 9 },
+  historyGroup: { gap: 9, paddingTop: 8 },
+  historyLink: { flexDirection: "row", alignItems: "center", gap: 10, minHeight: 62 },
   heading: { color: colors.ink, fontSize: 17, fontWeight: "700", flexShrink: 1 },
   heroAmount: { color: colors.ink, fontSize: 29, fontWeight: "700", fontVariant: ["tabular-nums"], marginTop: 8, marginBottom: 6 },
   amountRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", columnGap: 10, rowGap: 4 },
@@ -438,6 +490,7 @@ const styles = StyleSheet.create({
   memberDetails: { paddingTop: 2, paddingBottom: 11 },
   netLine: { marginTop: 6, borderRadius: 13, paddingVertical: 12, paddingHorizontal: 12, backgroundColor: colors.quiet },
   transferTotal: { gap: 2 },
+  transferStatus: { color: colors.ink, fontSize: 19, fontWeight: "700", marginVertical: 7 },
   transferRow: { marginBottom: 9 },
   selectedTransfer: { borderColor: colors.ink },
   transferAmountRow: { paddingVertical: 5 },

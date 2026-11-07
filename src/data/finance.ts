@@ -85,6 +85,41 @@ function orderedTimeline(
   return [...events, ...revisions, ...voids].sort(compareLedgerOrder);
 }
 
+function ledgerSequence(timeline: readonly LedgerEntry[]): number {
+  // A backdated write can sort earlier while still changing the reviewed ledger.
+  return timeline.reduce((latest, entry) => Math.max(latest, entry.sequence), 0);
+}
+
+function prepareFinancialVoid(
+  activityId: string, targetKind: StoredFinancialVoid["targetKind"], request: FinancialVoidRequest,
+): Result<Omit<StoredFinancialVoid, "sequence">> {
+  const { id, targetEventId, occurredAt } = request;
+  const reason = request.reason ?? null;
+  if (typeof id !== "string" || id.trim() === "") return failure("INVALID_EVENT_ID", "eventId");
+  if (typeof targetEventId !== "string" || targetEventId.trim() === "" || targetEventId === id) {
+    return failure("INVALID_VOID_TARGET", "targetEventId");
+  }
+  if (!Number.isSafeInteger(occurredAt) || occurredAt < 0) return failure("INVALID_EVENT_TIME", "occurredAt");
+  if (reason !== null && typeof reason !== "string") return failure("INVALID_VOID_REASON", "voidReason");
+  return { ok: true, value: { kind: "financialVoid", id, activityId, targetEventId, targetKind, occurredAt, reason } };
+}
+
+function projectFinancialVoid(
+  activity: ActivityContext, timeline: readonly LedgerEntry[], event: Omit<StoredFinancialVoid, "sequence">,
+  expectedSequence?: number,
+): Result<ActivityEventBalances> {
+  if (!timeline.some((entry) => entry.kind === event.targetKind && entry.id === event.targetEventId)) {
+    return failure("INVALID_VOID_TARGET", "targetEventId");
+  }
+  if (timeline.some((entry) => entry.kind === "financialVoid" && entry.targetEventId === event.targetEventId)) {
+    return failure("EVENT_ALREADY_VOIDED", "targetEventId");
+  }
+  if (event.targetKind === "merchantRefund" && activity.status === "completed") return failure("ACTIVITY_COMPLETED", "activityId");
+  if (expectedSequence !== undefined && ledgerSequence(timeline) !== expectedSequence) return failure("VOID_LEDGER_CHANGED", "events");
+  if (timeline.some((entry) => entry.occurredAt > event.occurredAt)) return failure("VOID_OUT_OF_ORDER", "occurredAt");
+  return calculateBalances(activity.currency, activity.memberIds, [], [...timeline, event]);
+}
+
 function currentExpense(
   original: StoredFinanceEvent<ExpenseEvent>, latest: StoredExpenseRevision | undefined,
 ): CurrentExpense {
@@ -458,15 +493,12 @@ export function createFinanceRepository(database: LocalDatabase) {
 
   async function voidFinancialEvent(
     activityId: string, targetKind: StoredFinancialVoid["targetKind"], request: FinancialVoidRequest,
+    expectedSequence?: number,
   ): Promise<Result<StoredFinancialVoid>> {
-    const { id, targetEventId, occurredAt } = request;
-    const reason = request.reason ?? null;
-    if (typeof id !== "string" || id.trim() === "") return failure("INVALID_EVENT_ID", "eventId");
-    if (typeof targetEventId !== "string" || targetEventId.trim() === "" || targetEventId === id) {
-      return failure("INVALID_VOID_TARGET", "targetEventId");
-    }
-    if (!Number.isSafeInteger(occurredAt) || occurredAt < 0) return failure("INVALID_EVENT_TIME", "occurredAt");
-    if (reason !== null && typeof reason !== "string") return failure("INVALID_VOID_REASON", "voidReason");
+    const prepared = prepareFinancialVoid(activityId, targetKind, request);
+    if (!prepared.ok) return prepared;
+    const event = prepared.value;
+    const { id, targetEventId, occurredAt, reason } = event;
 
     return withStorage(() => database.write(async (transaction) => {
       const existing = await findFinancialVoid(transaction, id);
@@ -482,23 +514,11 @@ export function createFinanceRepository(database: LocalDatabase) {
       }
       const activity = await readActivity(transaction, activityId);
       if (!activity) return failure("ACTIVITY_NOT_FOUND", "activityId");
-      const target = await transaction.getFirstAsync<{ kind: string }>(
-        "SELECT kind FROM financial_events WHERE activity_id = ? AND id = ?", activityId, targetEventId,
-      );
-      if (target?.kind !== targetKind) return failure("INVALID_VOID_TARGET", "targetEventId");
-
-      const voids = await readFinancialVoids(transaction, activityId);
-      if (voids.some((event) => event.targetEventId === targetEventId)) return failure("EVENT_ALREADY_VOIDED", "targetEventId");
-      if (targetKind === "merchantRefund" && activity.status === "completed") {
-        return failure("ACTIVITY_COMPLETED", "activityId");
-      }
-
       const timeline = orderedTimeline(
-        await readEvents(transaction, activity), await readExpenseRevisions(transaction, activityId), voids,
+        await readEvents(transaction, activity), await readExpenseRevisions(transaction, activityId),
+        await readFinancialVoids(transaction, activityId),
       );
-      if (timeline.some((event) => event.occurredAt > occurredAt)) return failure("VOID_OUT_OF_ORDER", "occurredAt");
-      const event = { kind: "financialVoid" as const, id, activityId, targetEventId, targetKind, occurredAt, reason };
-      const balances = calculateBalances(activity.currency, activity.memberIds, [], [...timeline, event]);
+      const balances = projectFinancialVoid(activity, timeline, event, expectedSequence);
       if (!balances.ok) return balances;
 
       const saved = await insertFinancialVoid(transaction, event);
@@ -608,7 +628,19 @@ export function createFinanceRepository(database: LocalDatabase) {
         expectedBalances && { ...expectedBalances });
     },
     voidMerchantRefund: (activityId: string, request: FinancialVoidRequest) => voidFinancialEvent(activityId, "merchantRefund", request),
-    voidMemberTransfer: (activityId: string, request: FinancialVoidRequest) => voidFinancialEvent(activityId, "memberTransfer", request),
+    async previewMemberTransferVoid(activityId: string, request: FinancialVoidRequest) {
+      const prepared = prepareFinancialVoid(activityId, "memberTransfer", request);
+      if (!prepared.ok) return prepared;
+      return readLedger<{ readonly balanceSnapshot: ActivityEventBalances; readonly expectedSequence: number }>(
+        activityId, (activity, events, revisions, voids) => {
+          const timeline = orderedTimeline(events, revisions, voids);
+          const projected = projectFinancialVoid(activity, timeline, prepared.value);
+          return projected.ok ? { ok: true, value: { balanceSnapshot: projected.value, expectedSequence: ledgerSequence(timeline) } }
+            : projected;
+        });
+    },
+    voidMemberTransfer: (activityId: string, request: FinancialVoidRequest, expectedSequence?: number) =>
+      voidFinancialEvent(activityId, "memberTransfer", request, expectedSequence),
     listExpenses: (activityId: string) => readLedger(activityId, (_activity, events, revisions) => ({
       ok: true, value: projectCurrentExpenses(events, revisions),
     })),

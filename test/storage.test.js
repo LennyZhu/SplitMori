@@ -1940,3 +1940,88 @@ test("S10 form uses local dates and rejects zero, negative and fractional yen am
     assert.equal(inspectRepaymentDraft({ ...draft, amount }, data, now).errors.amount, code);
   }
 }));
+
+test("S09 retains both historical repayments and refreshes a completed activity after voiding the earlier one", withFinance(
+  async (finance, activities, database, _connection, reopen) => {
+    const expenses = [
+      valueOf(await finance.createExpense("trip", 100, expense("first", 56_000))),
+      valueOf(await finance.createExpense("trip", 200, expense("second", 56_000))),
+    ];
+    await activities.addMembers("trip", [{ id: "chris", displayName: "Chris" }, { id: "d", displayName: "d" }]);
+    await activities.completeActivity("trip");
+    const first = valueOf(await finance.recordMemberTransfer("trip", 300,
+      { ...repayment, amountMinor: 20_000, note: "第一次還款" }));
+    const second = valueOf(await finance.recordMemberTransfer("trip", 300,
+      { ...repayment, id: "remainder", amountMinor: 36_000, note: "第二次還款" }));
+    const before = await loadActivitySettlement("trip", database);
+    assert.equal(before.status, "settled");
+    assert.equal(before.repaymentMinor, 56_000n);
+    assert.deepEqual(before.repaymentHistory.map(({ transfer }) => transfer), [second, first]);
+    assert.deepEqual(before.suggestions, []);
+
+    const request = { id: "void-first", targetEventId: first.id, occurredAt: 400, reason: "誤記" };
+    const preview = valueOf(await finance.previewMemberTransferVoid("trip", request));
+    assert.deepEqual(preview.balanceSnapshot.balances.map(({ netBalanceMinor, transferSentMinor }) =>
+      [netBalanceMinor, transferSentMinor]), [[20_000, 0], [-20_000, 36_000], [0, 0], [0, 0]]);
+    assert.deepEqual(valueOf(await finance.listEvents("trip")), [...expenses, first, second]);
+
+    const saved = valueOf(await finance.voidMemberTransfer("trip", request, preview.expectedSequence));
+    const after = await loadActivitySettlement("trip", database);
+    assert.equal(after.activity.status, "completed");
+    assert.equal(after.status, "unsettled");
+    assert.deepEqual([after.expenseCount, after.effectiveMinor, after.repaymentMinor, after.voidedRepaymentMinor, after.outstandingMinor],
+      [2, 112_000n, 36_000n, 20_000n, 20_000n]);
+    assert.deepEqual(after.repaymentHistory, [{ transfer: second, voidEvent: undefined }, { transfer: first, voidEvent: saved }]);
+    assert.deepEqual(after.suggestions, [{ fromMemberId: "a", toMemberId: "z", currency: "HKD", amountMinor: 20_000 }]);
+    assert.deepEqual((await finance.voidMemberTransfer("trip", { ...request, id: "duplicate" }, preview.expectedSequence)).error,
+      { code: "EVENT_ALREADY_VOIDED", field: "targetEventId" });
+
+    const reopened = await reopen();
+    assert.deepEqual(valueOf(await reopened.listEvents("trip")), [...expenses, first, second, saved]);
+    assert.deepEqual(valueOf(await reopened.voidMemberTransfer("trip", request, preview.expectedSequence)), saved);
+  },
+));
+
+test("a backdated repayment invalidates an older void preview without changing the current ledger", withFinance(async (finance) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  const target = valueOf(await finance.recordMemberTransfer("trip", 300, { ...repayment, amountMinor: 1000 }));
+  const request = { id: "reviewed-void", targetEventId: target.id, occurredAt: 400 };
+  const firstPreview = valueOf(await finance.previewMemberTransferVoid("trip", request));
+
+  valueOf(await finance.recordMemberTransfer("trip", 200, { ...repayment, id: "backdated", amountMinor: 500 }));
+  const before = valueOf(await finance.getActivityLedger("trip"));
+  assert.deepEqual((await finance.voidMemberTransfer("trip", request, firstPreview.expectedSequence)).error,
+    { code: "VOID_LEDGER_CHANGED", field: "events" });
+  assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
+
+  const nextPreview = valueOf(await finance.previewMemberTransferVoid("trip", request));
+  const saved = valueOf(await finance.voidMemberTransfer("trip", request, nextPreview.expectedSequence));
+  assert.deepEqual(valueOf(await finance.getActivityLedger("trip")).balanceSnapshot, nextPreview.balanceSnapshot);
+  assert.deepEqual(valueOf(await finance.voidMemberTransfer("trip", request, firstPreview.expectedSequence)), saved);
+}));
+
+test("a failed repayment void rolls back the audit insert and allows retrying the same request", withFinance(
+  async (finance, _activities, database, connection) => {
+    valueOf(await finance.createExpense("trip", 100, expense()));
+    valueOf(await finance.recordMemberTransfer("trip", 200, { ...repayment, note: "現金" }));
+    const before = await loadActivitySettlement("trip", database);
+    const request = { id: "void-rollback", targetEventId: repayment.id, occurredAt: 300 };
+    const preview = valueOf(await finance.previewMemberTransferVoid("trip", request));
+    await database.write((transaction) => transaction.execAsync(`
+      CREATE TRIGGER reject_repayment_void AFTER INSERT ON financial_voids
+      BEGIN SELECT RAISE(FAIL, 'test repayment void failure'); END;
+    `));
+
+    assert.deepEqual((await finance.voidMemberTransfer("trip", request, preview.expectedSequence)).error,
+      { code: "FINANCE_STORAGE_ERROR", field: "storage" });
+    assert.equal((await connection.getFirstAsync("SELECT COUNT(*) AS count FROM financial_voids")).count, 0);
+    assert.deepEqual(await loadActivitySettlement("trip", database), before);
+
+    await database.write((transaction) => transaction.execAsync("DROP TRIGGER reject_repayment_void"));
+    const saved = valueOf(await finance.voidMemberTransfer("trip", request, preview.expectedSequence));
+    const after = await loadActivitySettlement("trip", database);
+    assert.deepEqual(after.repaymentHistory, [{ transfer: before.repayments[0], voidEvent: saved }]);
+    assert.equal(after.repaymentMinor, 0n);
+    assert.equal(after.outstandingMinor, 5000n);
+  },
+));
