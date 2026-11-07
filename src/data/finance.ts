@@ -4,6 +4,7 @@ import {
 import { previewExpenseCorrection, type ExpenseCorrectionPreview } from "../domain/correction.ts";
 import type { Currency } from "../domain/money.ts";
 import { calculateQuickSplit, type QuickSplitInput } from "../domain/quickSplit.ts";
+import { allocateProportionalRefund, remainingRefundShares } from "../domain/refundAllocation.ts";
 import { failure, type Result } from "../domain/result.ts";
 import { suggestTransfers, type TransferSuggestion } from "../domain/settlement.ts";
 import type { Allocation } from "../domain/split.ts";
@@ -29,8 +30,14 @@ export type FinanceExpense = Expense & {
 
 type ExpenseEvent = { readonly kind: "expense"; readonly expense: FinanceExpense };
 export type FinanceMemberTransfer = MemberTransfer & { readonly note?: string };
+export type FinanceMerchantRefund = MerchantRefund & {
+  readonly note?: string;
+  readonly distribution?: "proportional";
+  readonly recordedAt?: number;
+};
+export type MerchantRefundInput = Omit<FinanceMerchantRefund, "kind" | "reductions" | "distribution" | "recordedAt">;
 
-type FinanceEvent = ExpenseEvent | MerchantRefund | FinanceMemberTransfer;
+type FinanceEvent = ExpenseEvent | FinanceMerchantRefund | FinanceMemberTransfer;
 
 export type ExpectedTransferBalances = { readonly fromNetBalanceMinor: number; readonly toNetBalanceMinor: number };
 
@@ -45,7 +52,7 @@ export type StoredExpense = StoredFinanceEvent<ExpenseEvent>;
 type CurrentExpense = StoredFinanceEvent<ExpenseEvent> & { readonly currentVersion: number };
 
 export type ExpenseDetail = CurrentExpense & {
-  readonly refunds: readonly StoredFinanceEvent<MerchantRefund>[];
+  readonly refunds: readonly StoredFinanceEvent<FinanceMerchantRefund>[];
   readonly refundVoids: readonly StoredFinancialVoid[];
 };
 
@@ -86,6 +93,45 @@ export type FinanceCorrectionPreview = Omit<ExpenseCorrectionPreview, "expense">
 
 type LedgerEntry = AuditEvent | StoredExpenseRevision;
 
+type RefundImpact = {
+  readonly ledgerToken: string;
+  readonly before: ActivityEventBalances;
+  readonly after: ActivityEventBalances;
+  readonly beforeSuggestions: readonly TransferSuggestion[];
+  readonly afterSuggestions: readonly TransferSuggestion[];
+  readonly beforeShares: readonly Allocation[];
+  readonly afterShares: readonly Allocation[];
+  readonly expense: FinanceExpense;
+  readonly currentVersion: number;
+};
+export type MerchantRefundPreview = RefundImpact & { readonly refund: FinanceMerchantRefund; readonly occurredAt: number };
+export type MerchantRefundVoidPreview = RefundImpact & {
+  readonly refund: StoredFinanceEvent<FinanceMerchantRefund>;
+  readonly request: FinancialVoidRequest;
+};
+
+function refundLedgerToken(activity: ActivityContext, timeline: readonly LedgerEntry[], action: unknown) {
+  return JSON.stringify([activity, timeline, action]);
+}
+
+function refundVoidTokenAction(event: Omit<StoredFinancialVoid, "sequence">) {
+  // A void appends to the reviewed ledger. Its timestamp is set when the user confirms.
+  return ["voidRefund", event.id, event.targetEventId, event.reason];
+}
+
+function prepareMerchantRefund(input: MerchantRefundInput, reductions: readonly Allocation[], distribution?: "proportional"):
+  Result<FinanceMerchantRefund> {
+  const { id, expenseId, recipientId, currency, amountMinor, note } = input;
+  if (typeof id !== "string" || id.trim() === "") return failure("INVALID_EVENT_ID", "eventId");
+  if (note !== undefined && typeof note !== "string") return failure("INVALID_REFUND_DETAILS", "merchantRefund");
+  if (distribution !== undefined && distribution !== "proportional") return failure("INVALID_REFUND_DETAILS", "merchantRefund");
+  const trimmed = note?.trim();
+  return { ok: true, value: {
+    kind: "merchantRefund", id, expenseId, recipientId, currency, amountMinor, reductions: reductions.map((row) => ({ ...row })),
+    ...(trimmed ? { note: trimmed } : {}), ...(distribution ? { distribution } : {}),
+  } };
+}
+
 function compareLedgerOrder(left: LedgerEntry, right: LedgerEntry): number {
   return left.occurredAt - right.occurredAt || left.sequence - right.sequence;
 }
@@ -118,6 +164,11 @@ function prepareFinancialVoid(
   if (!Number.isSafeInteger(occurredAt) || occurredAt < 0) return failure("INVALID_EVENT_TIME", "occurredAt");
   if (reason !== null && typeof reason !== "string") return failure("INVALID_VOID_REASON", "voidReason");
   return { ok: true, value: { kind: "financialVoid", id, activityId, targetEventId, targetKind, occurredAt, reason } };
+}
+
+function sameVoid(saved: StoredFinancialVoid, event: Omit<StoredFinancialVoid, "sequence">): boolean {
+  return saved.activityId === event.activityId && saved.targetKind === event.targetKind && saved.targetEventId === event.targetEventId
+    && saved.occurredAt === event.occurredAt && saved.reason === event.reason;
 }
 
 function projectFinancialVoid(
@@ -156,6 +207,37 @@ function latestRevision(revisions: readonly StoredExpenseRevision[], expenseId: 
   }
 }
 
+function expenseRefundContext(timeline: readonly LedgerEntry[], expenseId: string) {
+  const current = timeline.findLast((entry) => (entry.kind === "expense" || entry.kind === "expenseRevision") && entry.expense.id === expenseId);
+  if (current?.kind !== "expense" && current?.kind !== "expenseRevision") return;
+  const voided = new Set(timeline.flatMap((entry) => entry.kind === "financialVoid" && entry.targetKind === "merchantRefund"
+    ? [entry.targetEventId] : []));
+  const activeRefunds = timeline.filter((entry): entry is StoredFinanceEvent<FinanceMerchantRefund> =>
+    entry.kind === "merchantRefund" && entry.expenseId === expenseId && !voided.has(entry.id));
+  return {
+    expense: current.expense, currentVersion: current.kind === "expense" ? 1 : current.version, activeRefunds,
+    beforeShares: remainingRefundShares(current.expense.split.allocations, activeRefunds),
+  };
+}
+
+function projectRefundImpact(
+  activity: ActivityContext, timeline: readonly LedgerEntry[], context: NonNullable<ReturnType<typeof expenseRefundContext>>,
+  after: ActivityEventBalances, nextRefunds: readonly MerchantRefund[], action: unknown,
+): Result<RefundImpact> {
+  const before = calculateBalances(activity.currency, activity.memberIds, [], timeline);
+  if (!before.ok) return before;
+  const oldSuggestions = suggestTransfers(before.value);
+  if (!oldSuggestions.ok) return oldSuggestions;
+  const newSuggestions = suggestTransfers(after);
+  if (!newSuggestions.ok) return newSuggestions;
+  return { ok: true, value: {
+    ledgerToken: refundLedgerToken(activity, timeline, action), before: before.value, after,
+    beforeSuggestions: oldSuggestions.value, afterSuggestions: newSuggestions.value,
+    expense: context.expense, currentVersion: context.currentVersion, beforeShares: context.beforeShares,
+    afterShares: remainingRefundShares(context.expense.split.allocations, nextRefunds),
+  } };
+}
+
 type ActivityContext = {
   id: string;
   currency: Currency;
@@ -182,6 +264,9 @@ type EventRow = {
   fromMemberId: string | null;
   toMemberId: string | null;
   transferNote: string | null;
+  refundNote: string | null;
+  refundDistribution: FinanceMerchantRefund["distribution"] | null;
+  refundRecordedAt: number | null;
 };
 
 async function readActivity(connection: SQLiteReader, id: string): Promise<ActivityContext | null> {
@@ -231,7 +316,10 @@ async function readEvents(connection: SQLiteReader, activity: ActivityContext, s
            e.split_mode AS splitMode, e.allocation_version AS allocationVersion,
            r.expense_id AS expenseId, r.recipient_id AS recipientId,
            t.from_member_id AS fromMemberId, t.to_member_id AS toMemberId,
-           ${schemaVersion >= 8 ? "t.note" : "NULL"} AS transferNote
+           ${schemaVersion >= 8 ? "t.note" : "NULL"} AS transferNote,
+           ${schemaVersion >= 11 ? "r.note" : "NULL"} AS refundNote,
+           ${schemaVersion >= 11 ? "r.distribution" : "NULL"} AS refundDistribution,
+           ${schemaVersion >= 11 ? "r.recorded_at" : "NULL"} AS refundRecordedAt
     FROM financial_events AS f
     LEFT JOIN expenses AS e ON e.id = f.id AND e.activity_id = f.activity_id AND f.kind = 'expense'
     LEFT JOIN merchant_refunds AS r ON r.id = f.id AND r.activity_id = f.activity_id AND f.kind = 'merchantRefund'
@@ -277,7 +365,10 @@ async function readEvents(connection: SQLiteReader, activity: ActivityContext, s
       const refundReductions = reductions.get(id);
       if (refundReductions) {
         return { ...order, kind, id, currency, amountMinor, expenseId: row.expenseId,
-          recipientId: row.recipientId, reductions: refundReductions };
+          recipientId: row.recipientId, reductions: refundReductions,
+          ...(row.refundNote == null ? {} : { note: row.refundNote }),
+          ...(row.refundDistribution == null ? {} : { distribution: row.refundDistribution }),
+          ...(row.refundRecordedAt == null ? {} : { recordedAt: row.refundRecordedAt }) };
       }
     }
     if (kind === "memberTransfer" && amountMinor !== null && row.fromMemberId && row.toMemberId) {
@@ -325,6 +416,7 @@ function sameEvent(saved: FinanceEvent, requested: FinanceEvent): boolean {
   if (saved.kind === "merchantRefund" && requested.kind === "merchantRefund") {
     return saved.expenseId === requested.expenseId && saved.recipientId === requested.recipientId
       && saved.currency === requested.currency && saved.amountMinor === requested.amountMinor
+      && saved.note === requested.note && saved.distribution === requested.distribution
       && sameAllocations(saved.reductions, requested.reductions ?? []);
   }
   if (saved.kind === "memberTransfer" && requested.kind === "memberTransfer") {
@@ -429,10 +521,11 @@ async function insertEvent(
   }
 
   if (event.kind === "merchantRefund") {
-    const { expenseId, recipientId, amountMinor, currency } = event;
+    const { expenseId, recipientId, amountMinor, note, distribution, recordedAt } = event;
     await transaction.runAsync(`
-      INSERT INTO merchant_refunds (id, activity_id, expense_id, recipient_id, amount_minor) VALUES (?, ?, ?, ?, ?)
-    `, id, activityId, expenseId, recipientId, amountMinor);
+      INSERT INTO merchant_refunds (id, activity_id, expense_id, recipient_id, amount_minor, note, distribution, recorded_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `, id, activityId, expenseId, recipientId, amountMinor, note ?? null, distribution ?? null, recordedAt ?? null);
     const amounts = new Map(event.reductions.map((reduction) => [reduction.memberId, reduction.amountMinor]));
     const reductions: Allocation[] = [];
     for (const memberId of activity.memberIds) {
@@ -444,7 +537,7 @@ async function insertEvent(
       `, activityId, expenseId, id, memberId, reduction);
       reductions.push({ memberId, amountMinor: reduction });
     }
-    return { ...order, kind: event.kind, id, expenseId, recipientId, amountMinor, currency, reductions };
+    return { ...order, ...event, reductions };
   }
 
   const { fromMemberId, toMemberId, amountMinor, currency, note } = event;
@@ -509,9 +602,27 @@ async function readCorrectionReceipt(
     ? { ok: true, value: saved } : failure("REVISION_ID_CONFLICT", "revisionId");
 }
 
+function projectRecordedEvent(
+  activity: ActivityContext, ordered: readonly LedgerEntry[], occurredAt: number, event: FinanceEvent, reviewedRefund = false,
+): Result<ActivityEventBalances> {
+  const next = ordered.findIndex((entry) => entry.occurredAt > occurredAt);
+  const index = next === -1 ? ordered.length : next;
+  const backdatedTransfer = event.kind === "memberTransfer" && next !== -1;
+  // A backdated repayment must be valid both against current balances and at its place in history.
+  if (backdatedTransfer) {
+    const current = calculateBalances(activity.currency, activity.memberIds, [], [...ordered, event]);
+    if (!current.ok) return current;
+  }
+  const balances = calculateBalances(activity.currency, activity.memberIds, [], [...ordered.slice(0, index), event, ...ordered.slice(index)]);
+  if (balances.ok || next === -1) return balances;
+  if (backdatedTransfer) return failure("TRANSFER_DATE_CONFLICT", "occurredAt");
+  if (reviewedRefund) return failure("REFUND_DATE_CONFLICT", "occurredAt");
+  return balances;
+}
+
 async function recordInTransaction(
   transaction: SQLiteConnection, activityId: string, occurredAt: number, event: FinanceEvent, allowRetry = true,
-  expectedBalances?: ExpectedTransferBalances,
+  expectedBalances?: ExpectedTransferBalances, expectedRefundLedger?: string,
 ): Promise<Result<StoredFinanceEvent>> {
   const id = eventId(event);
   if (typeof id !== "string" || id.trim() === "") {
@@ -547,17 +658,21 @@ async function recordInTransaction(
   const ordered = orderedTimeline(
     history, await readExpenseRevisions(transaction, activityId), await readFinancialVoids(transaction, activityId),
   );
-  const next = ordered.findIndex((entry) => entry.occurredAt > occurredAt);
-  const index = next === -1 ? ordered.length : next;
-  const backdatedTransfer = event.kind === "memberTransfer" && next !== -1;
-  // A backdated repayment must be valid both against current balances and at its place in history.
-  if (backdatedTransfer) {
-    const current = calculateBalances(activity.currency, activity.memberIds, [], [...ordered, event]);
-    if (!current.ok) return current;
+  if (event.kind === "merchantRefund" && expectedRefundLedger !== undefined) {
+    if (refundLedgerToken(activity, ordered, [occurredAt, event]) !== expectedRefundLedger) {
+      return failure("REFUND_LEDGER_CHANGED", "events");
+    }
+    if (!Number.isFinite(new Date(occurredAt).getTime()) || occurredAt > Date.now()) return failure("INVALID_EVENT_TIME", "occurredAt");
+    const context = expenseRefundContext(ordered, event.expenseId);
+    if (!context) return failure("EXPENSE_NOT_FOUND", "expenseId");
+    const reductions = allocateProportionalRefund(event.amountMinor, context.beforeShares);
+    if (!reductions.ok) return reductions;
+    if (event.distribution !== "proportional" || !sameAllocations(event.reductions, reductions.value)) {
+      return failure("INVALID_REFUND_DETAILS", "refundReductions");
+    }
   }
-  const timeline = [...ordered.slice(0, index), event, ...ordered.slice(index)];
-  const balances = calculateBalances(activity.currency, activity.memberIds, [], timeline);
-  if (!balances.ok) return backdatedTransfer ? failure("TRANSFER_DATE_CONFLICT", "occurredAt") : balances;
+  const balances = projectRecordedEvent(activity, ordered, occurredAt, event, expectedRefundLedger !== undefined);
+  if (!balances.ok) return balances;
   if (event.kind === "memberTransfer" && expectedBalances) {
     const current = calculateBalances(activity.currency, activity.memberIds, [], ordered);
     if (!current.ok) return current;
@@ -568,7 +683,9 @@ async function recordInTransaction(
     }
   }
 
-  const saved = await insertEvent(transaction, activity, occurredAt, event);
+  const persisted = event.kind === "merchantRefund" && expectedRefundLedger !== undefined
+    ? { ...event, recordedAt: Date.now() } : event;
+  const saved = await insertEvent(transaction, activity, occurredAt, persisted);
   return { ok: true, value: saved };
 }
 
@@ -602,21 +719,17 @@ export function createFinanceRepository(database: LocalDatabase) {
 
   async function voidFinancialEvent(
     activityId: string, targetKind: StoredFinancialVoid["targetKind"], request: FinancialVoidRequest,
-    expectedSequence?: number,
+    expectedSequence?: number, expectedRefundLedger?: string,
   ): Promise<Result<StoredFinancialVoid>> {
     const prepared = prepareFinancialVoid(activityId, targetKind, request);
     if (!prepared.ok) return prepared;
     const event = prepared.value;
-    const { id, targetEventId, occurredAt, reason } = event;
+    const { id } = event;
 
     return withStorage(() => database.write(async (transaction) => {
       const existing = await findFinancialVoid(transaction, id);
       if (existing) {
-        if (existing.activityId !== activityId || existing.targetKind !== targetKind || existing.targetEventId !== targetEventId
-          || existing.occurredAt !== occurredAt || existing.reason !== reason) {
-          return failure("EVENT_ID_CONFLICT", "eventId");
-        }
-        return { ok: true, value: existing };
+        return sameVoid(existing, event) ? { ok: true, value: existing } : failure("EVENT_ID_CONFLICT", "eventId");
       }
       if (await transaction.getFirstAsync("SELECT id FROM financial_events WHERE id = ?", id)) {
         return failure("EVENT_ID_CONFLICT", "eventId");
@@ -627,6 +740,12 @@ export function createFinanceRepository(database: LocalDatabase) {
         await readEvents(transaction, activity), await readExpenseRevisions(transaction, activityId),
         await readFinancialVoids(transaction, activityId),
       );
+      if (expectedRefundLedger !== undefined) {
+        if (refundLedgerToken(activity, timeline, refundVoidTokenAction(event)) !== expectedRefundLedger) {
+          return failure("REFUND_LEDGER_CHANGED", "events");
+        }
+        if (event.occurredAt > Date.now()) return failure("INVALID_EVENT_TIME", "occurredAt");
+      }
       const balances = projectFinancialVoid(activity, timeline, event, expectedSequence);
       if (!balances.ok) return balances;
 
@@ -738,10 +857,53 @@ export function createFinanceRepository(database: LocalDatabase) {
     createExpense: (activityId: string, occurredAt: number, expense: FinanceExpense) => record(activityId, occurredAt, {
       kind: "expense", expense: copyExpense(expense),
     }),
-    recordMerchantRefund: (activityId: string, occurredAt: number, refund: Omit<MerchantRefund, "kind">) =>
-      record(activityId, occurredAt, {
-        ...refund, kind: "merchantRefund", reductions: refund.reductions?.map((row) => ({ ...row })) ?? [],
-      }),
+    async recordMerchantRefund(activityId: string, occurredAt: number, refund: Omit<FinanceMerchantRefund, "kind" | "recordedAt">) {
+      const event = prepareMerchantRefund(refund, refund.reductions ?? [], refund.distribution);
+      return event.ok ? record(activityId, occurredAt, event.value) : event;
+    },
+    previewMerchantRefund(activityId: string, occurredAt: number, input: MerchantRefundInput) {
+      return readLedger<MerchantRefundPreview>(activityId, (activity, events, revisions, voids) => {
+        if (activity.status === "completed") return failure("ACTIVITY_COMPLETED", "activityId");
+        if (!Number.isSafeInteger(occurredAt) || occurredAt < 0 || !Number.isFinite(new Date(occurredAt).getTime())
+          || occurredAt > Date.now()) return failure("INVALID_EVENT_TIME", "occurredAt");
+        const timeline = orderedTimeline(events, revisions, voids);
+        const context = expenseRefundContext(timeline, input.expenseId);
+        if (!context) return failure("EXPENSE_NOT_FOUND", "expenseId");
+        const reductions = allocateProportionalRefund(input.amountMinor, context.beforeShares);
+        if (!reductions.ok) return reductions;
+        const refund = prepareMerchantRefund(input, reductions.value, "proportional");
+        if (!refund.ok) return refund;
+        if (!activity.memberIds.includes(refund.value.recipientId)) return failure("MEMBER_NOT_PARTICIPATING", "merchantRefund");
+        if (input.currency !== activity.currency) return failure("CURRENCY_MISMATCH", "currency");
+        const after = projectRecordedEvent(activity, timeline, occurredAt, refund.value, true);
+        if (!after.ok) return after;
+        const impact = projectRefundImpact(activity, timeline, context, after.value, [...context.activeRefunds, refund.value],
+          [occurredAt, refund.value]);
+        return impact.ok ? { ok: true, value: { ...impact.value, occurredAt, refund: refund.value } } : impact;
+      });
+    },
+    async commitReviewedMerchantRefund(activityId: string, { occurredAt, refund, ledgerToken }:
+      Pick<MerchantRefundPreview, "occurredAt" | "refund" | "ledgerToken">) {
+      if (!ledgerToken) return failure("REFUND_LEDGER_CHANGED", "events");
+      const event = prepareMerchantRefund(refund, refund.reductions, refund.distribution);
+      if (!event.ok) return event;
+      return withStorage(() => database.write((transaction) =>
+        recordInTransaction(transaction, activityId, occurredAt, event.value, true, undefined, ledgerToken)));
+    },
+    lookupMerchantRefund(activityId: string, { occurredAt, refund }: Pick<MerchantRefundPreview, "occurredAt" | "refund">) {
+      return withStorage<StoredFinanceEvent<FinanceMerchantRefund> | null>(() => database.read(async (connection) => {
+        const receipt = await connection.getFirstAsync<{ activityId: string; kind: string }>(
+          "SELECT activity_id AS activityId, kind FROM financial_events WHERE id = ?", refund.id,
+        );
+        if (!receipt) return { ok: true, value: null };
+        if (receipt.activityId !== activityId || receipt.kind !== "merchantRefund") return failure("EVENT_ID_CONFLICT", "eventId");
+        const activity = await readActivity(connection, activityId);
+        if (!activity) return failure("ACTIVITY_NOT_FOUND", "activityId");
+        const saved = (await readEvents(connection, activity)).find((event) => event.kind === "merchantRefund" && event.id === refund.id);
+        return saved?.kind === "merchantRefund" && saved.occurredAt === occurredAt && sameEvent(saved, refund)
+          ? { ok: true, value: saved } : failure("EVENT_ID_CONFLICT", "eventId");
+      }));
+    },
     recordMemberTransfer(activityId: string, occurredAt: number, transfer: Omit<FinanceMemberTransfer, "kind">,
       expectedBalances?: ExpectedTransferBalances) {
       if (transfer.note !== undefined && typeof transfer.note !== "string") {
@@ -751,6 +913,37 @@ export function createFinanceRepository(database: LocalDatabase) {
         expectedBalances && { ...expectedBalances });
     },
     voidMerchantRefund: (activityId: string, request: FinancialVoidRequest) => voidFinancialEvent(activityId, "merchantRefund", request),
+    previewMerchantRefundVoid(activityId: string, expenseId: string, request: FinancialVoidRequest) {
+      const candidate = { ...request };
+      const event = prepareFinancialVoid(activityId, "merchantRefund", candidate);
+      if (!event.ok) return Promise.resolve(event);
+      if (event.value.occurredAt > Date.now()) return Promise.resolve(failure("INVALID_EVENT_TIME", "occurredAt"));
+      return readLedger<MerchantRefundVoidPreview>(activityId, (activity, events, revisions, voids) => {
+        const refund = events.find((entry) => entry.kind === "merchantRefund" && entry.id === candidate.targetEventId);
+        if (refund?.kind !== "merchantRefund" || refund.expenseId !== expenseId) return failure("INVALID_VOID_TARGET", "targetEventId");
+        const timeline = orderedTimeline(events, revisions, voids);
+        const after = projectFinancialVoid(activity, timeline, event.value);
+        if (!after.ok) return after;
+        const context = expenseRefundContext(timeline, expenseId);
+        if (!context) return failure("EXPENSE_NOT_FOUND", "expenseId");
+        const impact = projectRefundImpact(activity, timeline, context, after.value,
+          context.activeRefunds.filter(({ id }) => id !== refund.id), refundVoidTokenAction(event.value));
+        return impact.ok ? { ok: true, value: { ...impact.value, refund, request: candidate } } : impact;
+      });
+    },
+    async commitReviewedMerchantRefundVoid(activityId: string, { request, ledgerToken }: Pick<MerchantRefundVoidPreview, "request" | "ledgerToken">) {
+      if (!ledgerToken) return failure("REFUND_LEDGER_CHANGED", "events");
+      return voidFinancialEvent(activityId, "merchantRefund", request, undefined, ledgerToken);
+    },
+    async lookupMerchantRefundVoid(activityId: string, request: FinancialVoidRequest) {
+      const event = prepareFinancialVoid(activityId, "merchantRefund", request);
+      if (!event.ok) return event;
+      return withStorage<StoredFinancialVoid | null>(() => database.read(async (connection) => {
+        const saved = await findFinancialVoid(connection, request.id);
+        if (saved && !sameVoid(saved, event.value)) return failure("EVENT_ID_CONFLICT", "eventId");
+        return { ok: true, value: saved };
+      }));
+    },
     async previewMemberTransferVoid(activityId: string, request: FinancialVoidRequest) {
       const prepared = prepareFinancialVoid(activityId, "memberTransfer", request);
       if (!prepared.ok) return prepared;
@@ -770,7 +963,7 @@ export function createFinanceRepository(database: LocalDatabase) {
     getExpense: (activityId: string, expenseId: string) => readLedger<ExpenseDetail>(activityId, (_activity, events, revisions, voids) => {
       const expense = events.find((event) => event.kind === "expense" && event.expense.id === expenseId);
       if (expense?.kind !== "expense") return failure("EXPENSE_NOT_FOUND", "expenseId");
-      const refunds = events.filter((event): event is StoredFinanceEvent<MerchantRefund> =>
+      const refunds = events.filter((event): event is StoredFinanceEvent<FinanceMerchantRefund> =>
         event.kind === "merchantRefund" && event.expenseId === expenseId);
       const refundIds = new Set(refunds.map(({ id }) => id));
       const refundVoids = voids.filter((event) => event.targetKind === "merchantRefund" && refundIds.has(event.targetEventId));

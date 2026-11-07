@@ -2,7 +2,7 @@ import { createActivityRepository } from "../data/activities.ts";
 import { getLocalDatabase, type LocalDatabase } from "../data/database.ts";
 import { createFinanceRepository, expenseEditBlocker, type FinanceExpense, type ReviewedExpenseCorrectionRequest } from "../data/finance.ts";
 import { failure, type Failure } from "../domain/result.ts";
-import type { ActivityEventBalances, MerchantRefund } from "../domain/balance.ts";
+import type { ActivityEventBalances } from "../domain/balance.ts";
 import { withActivityReadSnapshot } from "./activityList.ts";
 
 export type ExpenseDetailData = NonNullable<Awaited<ReturnType<typeof loadExpenseDetail>>>;
@@ -22,10 +22,16 @@ export function loadExpenseDetail(activityId: string, expenseId: string, databas
     if (!history.ok) throw new Error(history.error.code);
     const active = await activities.getCreationBlocker();
     const { expense, occurredAt, currentVersion, refunds, refundVoids } = detail.value;
-    const voided = new Set(refundVoids.map(({ targetEventId }) => targetEventId));
+    const voided = new Map(refundVoids.map((event) => [event.targetEventId, event]));
+    const versions = [...history.value].reverse();
+    const refundHistory = [...refunds].reverse().map((refund) => ({
+      refund, voidEvent: voided.get(refund.id),
+      version: versions.find((version) => version.occurredAt < refund.occurredAt
+        || (version.occurredAt === refund.occurredAt && version.sequence < refund.sequence)),
+    }));
     return {
       activity, expense, expenseDate: expense.expenseDate ?? occurredAt, currentVersion, versions: history.value,
-      refunds: refunds.filter(({ id }) => !voided.has(id)), voidedRefundCount: refundVoids.length,
+      refunds: refunds.filter(({ id }) => !voided.has(id)), voidedRefundCount: refundVoids.length, refundHistory,
       editBlocker: expenseEditBlocker(activity.status, active?.activeCount ?? 0, expense.splitMode),
     };
   });
@@ -84,14 +90,4 @@ export function summarizeCorrectionBalances(snapshot: ActivityEventBalances) {
   };
 }
 
-export function summarizeExpenseRefunds(refunds: readonly MerchantRefund[]) {
-  const reductions = new Map<string, number>();
-  let amountMinor = 0;
-  for (const refund of refunds) {
-    amountMinor += refund.amountMinor;
-    for (const reduction of refund.reductions) {
-      reductions.set(reduction.memberId, (reductions.get(reduction.memberId) ?? 0) + reduction.amountMinor);
-    }
-  }
-  return { amountMinor, reductions };
-}
+export { summarizeExpenseRefunds } from "../domain/refundAllocation.ts";

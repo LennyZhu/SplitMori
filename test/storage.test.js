@@ -25,6 +25,9 @@ import { loadActivitySettlement } from "../src/services/activitySettlement.ts";
 import { loadExpenseCorrectionPreview, loadExpenseDetail, saveReviewedExpenseCorrection, summarizeCorrectionBalances } from "../src/services/expenseDetail.ts";
 import { createExpenseEditor, expenseDateInput, expenseDateTimestamp, hydrateExpenseEditor, prepareExpenseEdit, prepareNewExpense } from "../src/services/expenseEditor.ts";
 import { inspectRepaymentDraft } from "../src/services/memberRepayment.ts";
+import {
+  inspectMerchantRefundDraft, loadMerchantRefundPreview, loadMerchantRefundVoidPreview, saveReviewedMerchantRefund,
+} from "../src/services/merchantRefund.ts";
 import { createQuickHistorySave } from "../src/services/quickHistorySave.ts";
 import { canSelectConversionTarget, createQuickSplitConversionService } from "../src/services/quickSplitConversion.ts";
 import { createRestoreService } from "../src/services/restore.ts";
@@ -2222,9 +2225,9 @@ test("3B7A repairs the early v9 schema and saves a four-person correction withou
     assert.equal(settlement.outstandingMinor, 70_000n);
     assert.deepEqual(settlement.members.map(({ netBalanceMinor }) => netBalanceMinor), [70_000, -42_000, -14_000, -14_000]);
     assert.deepEqual(valueOf(await finance.listEvents("trip")), originalEvents);
-    assert.ok((await inspectBackupDatabase(backupPlatform(path), connection, 10)).ok);
+    assert.ok((await inspectBackupDatabase(backupPlatform(path), connection, migrations.length)).ok);
     await initializeDatabase(connection);
-    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 10);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, migrations.length);
   } finally {
     connection.close();
   }
@@ -2260,3 +2263,194 @@ test("3B7A verifies an ambiguous committed result by revision ID without a secon
     { database: intercepted, verifyOnly: true })), { status: "rejected", error: { code: "REVISION_ID_CONFLICT", field: "revisionId" } });
   assert.equal(valueOf(await finance.listExpenseRevisions("trip", "dinner")).length, 2);
 }));
+
+async function seedRefundTrip(finance, activities, withVoidedRepayment = false) {
+  await activities.addMembers("trip", [{ id: "chris", displayName: "Chris" }, { id: "d", displayName: "d" }]);
+  valueOf(await finance.createExpense("trip", 100, { ...expense("lunch", 56_000), name: "吃飯" }));
+  valueOf(await finance.createExpense("trip", 200, { ...expense("dinner", 56_000), name: "晚餐" }));
+  if (withVoidedRepayment) {
+    valueOf(await finance.recordMemberTransfer("trip", 250, { ...repayment, amountMinor: 20_000 }));
+    valueOf(await finance.voidMemberTransfer("trip", { id: "void-paid", targetEventId: repayment.id, occurredAt: 260 }));
+  }
+  const proposed = { ...expense("dinner", 56_000), split: valueOf(splitEqual(
+    { currency: "HKD", amountMinor: 56_000 }, ["z", "a", "chris", "d"],
+  )) };
+  const preview = valueOf(await finance.previewExpenseCorrection("trip", "dinner", proposed, 1));
+  return valueOf(await finance.commitReviewedExpenseCorrection("trip", correction(56_000, {
+    proposed: preview.expense.after, expectedLedger: preview.ledgerToken,
+  })));
+}
+
+const refundInput = { id: "refund", expenseId: "dinner", recipientId: "z", currency: "HKD", amountMinor: 20_000 };
+
+test("3B7B records and voids a HKD 200 merchant refund against the revised expense and keeps all history", withFinance(
+  async (finance, activities, database, connection, reopen) => {
+    const revision = await seedRefundTrip(finance, activities, true);
+    const original = valueOf(await finance.getActivityLedger("trip"));
+    assert.equal((await finance.previewMerchantRefund("trip", 240, refundInput)).error.code, "REFUND_DATE_CONFLICT");
+    const review = valueOf(await loadMerchantRefundPreview("trip", 400, { ...refundInput, note: " 餐廳退款 " }, database));
+    assert.deepEqual(review.beforeShares.map(({ amountMinor }) => amountMinor), [14_000, 14_000, 14_000, 14_000]);
+    assert.deepEqual(review.refund.reductions.map(({ amountMinor }) => amountMinor), [5000, 5000, 5000, 5000]);
+    assert.equal(review.refund.reductions.reduce((sum, share) => sum + share.amountMinor, 0), review.refund.amountMinor);
+    assert.deepEqual(review.afterShares.map(({ amountMinor }) => amountMinor), [9000, 9000, 9000, 9000]);
+    assert.deepEqual([review.before, review.after].map((snapshot) => summarizeCorrectionBalances(snapshot)), [
+      { effectiveMinor: 112_000n, refundMinor: 0n, repaymentMinor: 0n, outstandingMinor: 70_000n },
+      { effectiveMinor: 92_000n, refundMinor: 20_000n, repaymentMinor: 0n, outstandingMinor: 55_000n },
+    ]);
+    assert.deepEqual(review.after.balances.map(({ netBalanceMinor }) => netBalanceMinor), [55_000, -37_000, -9000, -9000]);
+    assert.deepEqual(review.afterSuggestions.map(({ fromMemberId, toMemberId, amountMinor }) => [fromMemberId, toMemberId, amountMinor]),
+      [["a", "z", 37_000], ["chris", "z", 9000], ["d", "z", 9000]]);
+    assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), original);
+
+    const request = { kind: "record", preview: review };
+    assert.deepEqual(await saveReviewedMerchantRefund("trip", request, { database }), { status: "saved" });
+    assert.deepEqual(await saveReviewedMerchantRefund("trip", request, { database }), { status: "saved" });
+    assert.equal((await connection.getFirstAsync("SELECT COUNT(*) AS n FROM merchant_refunds")).n, 1);
+    const [stored] = (await loadExpenseDetail("trip", "dinner", database)).refundHistory;
+    assert.equal(stored.refund.note, "餐廳退款");
+    assert.equal(stored.refund.distribution, "proportional");
+    assert.ok(stored.refund.recordedAt >= stored.refund.occurredAt);
+    assert.equal(stored.version.id, revision.id);
+    assert.equal(stored.voidEvent, undefined);
+
+    const voidRequest = { id: "refund-void", targetEventId: review.refund.id, occurredAt: 500 };
+    assert.equal((await finance.previewMerchantRefundVoid("trip", "lunch", voidRequest)).error.code, "INVALID_VOID_TARGET");
+    const voidPreview = valueOf(await loadMerchantRefundVoidPreview("trip", "dinner", voidRequest, database));
+    assert.deepEqual(voidPreview.after, original.balanceSnapshot);
+    assert.deepEqual(voidPreview.afterSuggestions, original.suggestions);
+    assert.equal((await loadActivitySettlement("trip", database)).outstandingMinor, 55_000n);
+    const reviewedVoid = { kind: "void", preview: { ...voidPreview, request: { ...voidRequest, occurredAt: 600 } } };
+    assert.deepEqual(await saveReviewedMerchantRefund("trip", reviewedVoid, { database }), { status: "saved" });
+    assert.deepEqual(await saveReviewedMerchantRefund("trip", reviewedVoid, { database }), { status: "saved" });
+    const final = await loadExpenseDetail("trip", "dinner", database);
+    assert.deepEqual(final.refunds, []);
+    assert.equal(final.refundHistory[0].voidEvent.id, voidRequest.id);
+    assert.equal(final.refundHistory[0].voidEvent.occurredAt, 600);
+    assert.deepEqual(final.refundHistory[0].refund, stored.refund);
+    const reopened = await reopen();
+    const ledger = valueOf(await reopened.getActivityLedger("trip"));
+    assert.deepEqual(ledger.events.slice(0, original.events.length), original.events);
+    assert.deepEqual(ledger.balanceSnapshot, original.balanceSnapshot);
+    assert.deepEqual(ledger.revisions, original.revisions);
+    assert.equal((await reopened.previewMerchantRefundVoid("trip", "dinner", { ...voidRequest, id: "second-void" })).error.code,
+      "EVENT_ALREADY_VOIDED");
+  },
+));
+
+test("3B7B keeps HKD 420 in actual repayments and recalculates who should receive money", withFinance(async (finance, activities, database) => {
+  await seedRefundTrip(finance, activities);
+  const paid = valueOf(await finance.recordMemberTransfer("trip", 350, { ...repayment, amountMinor: 42_000, note: "FPS" }));
+  const preview = valueOf(await finance.previewMerchantRefund("trip", 400, refundInput));
+  assert.deepEqual(preview.after.balances.map(({ netBalanceMinor }) => netBalanceMinor), [13_000, 5000, -9000, -9000]);
+  assert.equal(summarizeCorrectionBalances(preview.after).outstandingMinor, 18_000n);
+  assert.equal(summarizeCorrectionBalances(preview.after).repaymentMinor, 42_000n);
+  assert.equal(preview.afterSuggestions.filter(({ toMemberId }) => toMemberId === "a").reduce((sum, row) => sum + row.amountMinor, 0), 5000);
+  valueOf(await finance.commitReviewedMerchantRefund("trip", preview));
+  const ledger = valueOf(await finance.getActivityLedger("trip"));
+  assert.deepEqual(ledger.events.filter(({ kind }) => kind === "memberTransfer"), [paid]);
+  assert.deepEqual((await loadActivitySettlement("trip", database)).suggestions, preview.afterSuggestions);
+}));
+
+test("3B7B validates JPY precision and allocates successive partial refunds in stable order to a non-payer", withFinance(
+  async (finance, activities, database) => {
+    await activities.completeActivity("trip");
+    await activities.createActivity({ id: "yen", name: "東京", currency: "JPY",
+      members: ["payer", "one", "two", "recipient"].map((id) => ({ id, displayName: id })) });
+    const total = { currency: "JPY", amountMinor: 5 };
+    valueOf(await finance.createExpense("yen", 100, { id: "bill", splitMode: "equal", allocationVersion: 1,
+      split: valueOf(splitEqual(total, ["payer", "one", "two"])), merchantPayment: { ...total, memberId: "payer" } }));
+    const detail = await loadExpenseDetail("yen", "bill", database);
+    const now = new Date();
+    const draft = { amount: "2", recipientId: "recipient", note: "", date: expenseDateInput(now) };
+    for (const [amount, code] of [["0", "NON_POSITIVE_AMOUNT"], ["-1", "NEGATIVE_AMOUNT"], ["2.01", "INVALID_AMOUNT_PRECISION"],
+      ["6", "REFUND_EXCEEDS_EXPENSE"]]) {
+      assert.equal(inspectMerchantRefundDraft({ ...draft, amount }, detail, now).errors.amount, code);
+    }
+    assert.equal(inspectMerchantRefundDraft({ ...draft, recipientId: "outsider" }, detail, now).errors.recipientId,
+      "MEMBER_NOT_PARTICIPATING");
+    const parsed = inspectMerchantRefundDraft(draft, detail, now);
+    const input = { ...parsed.prepared.refund, id: "partial-1" };
+    for (const [amountMinor, code] of [[0, "NON_POSITIVE_AMOUNT"], [-1, "NEGATIVE_AMOUNT"], [6, "REFUND_EXCEEDS_EXPENSE"]]) {
+      assert.equal((await finance.previewMerchantRefund("yen", 200, { ...input, amountMinor })).error.code, code);
+    }
+    assert.equal((await finance.previewMerchantRefund("yen", 200, { ...input, currency: "USD" })).error.code, "CURRENCY_MISMATCH");
+    const first = valueOf(await finance.previewMerchantRefund("yen", 200, input));
+    assert.deepEqual(first.refund.reductions, [{ memberId: "payer", amountMinor: 1 }, { memberId: "one", amountMinor: 1 }]);
+    valueOf(await finance.commitReviewedMerchantRefund("yen", first));
+    assert.equal((await finance.previewMerchantRefund("yen", 300, { ...input, id: "too-much", amountMinor: 4 })).error.code, "REFUND_EXCEEDS_EXPENSE");
+    const second = valueOf(await finance.previewMerchantRefund("yen", 300, { ...input, id: "partial-2" }));
+    valueOf(await finance.commitReviewedMerchantRefund("yen", second));
+    assert.deepEqual(second.afterShares.map(({ amountMinor }) => amountMinor), [0, 0, 1]);
+    assert.deepEqual(second.after.balances.map(({ merchantRefundReceivedMinor }) => merchantRefundReceivedMinor), [0, 0, 0, 4]);
+    assert.equal((await loadExpenseDetail("yen", "bill", database)).refundHistory.length, 2);
+  },
+));
+
+test("3B7B rejects stale refund and void confirmations and restricts writes on completed activities", withFinance(async (finance, activities) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  const input = { ...refundInput, amountMinor: 1000 };
+  const first = valueOf(await finance.previewMerchantRefund("trip", 400, input));
+  valueOf(await finance.recordMemberTransfer("trip", 200, { ...repayment, amountMinor: 1000 }));
+  assert.equal((await finance.commitReviewedMerchantRefund("trip", first)).error.code, "REFUND_LEDGER_CHANGED");
+  assert.equal(valueOf(await finance.lookupMerchantRefund("trip", first)), null);
+  const current = valueOf(await finance.previewMerchantRefund("trip", 400, input));
+  assert.equal((await finance.commitReviewedMerchantRefund("trip", { ...current,
+    refund: { ...current.refund, reductions: [{ memberId: "a", amountMinor: 1000 }] },
+  })).error.code, "REFUND_LEDGER_CHANGED");
+  valueOf(await finance.commitReviewedMerchantRefund("trip", current));
+
+  const request = { id: "void", targetEventId: input.id, occurredAt: 500 };
+  const voidPreview = valueOf(await finance.previewMerchantRefundVoid("trip", "dinner", request));
+  valueOf(await finance.recordMemberTransfer("trip", 450, { ...repayment, id: "another", amountMinor: 1000 }));
+  assert.equal((await finance.commitReviewedMerchantRefundVoid("trip", voidPreview)).error.code, "REFUND_LEDGER_CHANGED");
+  const validVoid = valueOf(await finance.previewMerchantRefundVoid("trip", "dinner", request));
+  const pendingRefund = valueOf(await finance.previewMerchantRefund("trip", 500, { ...input, id: "new" }));
+  await activities.completeActivity("trip");
+  assert.equal((await finance.previewMerchantRefund("trip", 500, input)).error.code, "ACTIVITY_COMPLETED");
+  assert.equal((await finance.previewMerchantRefundVoid("trip", "dinner", request)).error.code, "ACTIVITY_COMPLETED");
+  assert.equal((await finance.commitReviewedMerchantRefund("trip", pendingRefund)).error.code, "ACTIVITY_COMPLETED");
+  assert.equal((await finance.commitReviewedMerchantRefundVoid("trip", validVoid)).error.code, "REFUND_LEDGER_CHANGED");
+  assert.equal(valueOf(await finance.lookupMerchantRefundVoid("trip", request)), null);
+  assert.equal(valueOf(await finance.getExpense("trip", "dinner")).refunds.length, 1);
+}));
+
+test("3B7B rolls back both refund writes and resolves an uncertain submission without another write", withFinance(
+  async (finance, _activities, database, connection) => {
+    valueOf(await finance.createExpense("trip", 100, expense()));
+    const preview = valueOf(await finance.previewMerchantRefund("trip", 200, { ...refundInput, amountMinor: 2000 }));
+    const record = { kind: "record", preview };
+    await database.write((db) => db.execAsync(`
+      CREATE TRIGGER fail_refund AFTER INSERT ON refund_reductions BEGIN SELECT RAISE(FAIL, 'injected'); END;
+    `));
+    assert.deepEqual(await saveReviewedMerchantRefund("trip", record, { database }), { status: "notSaved" });
+    assert.equal(valueOf(await finance.listEvents("trip")).length, 1);
+    assert.equal((await connection.getFirstAsync("SELECT COUNT(*) AS n FROM merchant_refunds")).n, 0);
+    await database.write((db) => db.execAsync("DROP TRIGGER fail_refund"));
+
+    let writes = 0;
+    let canRead = false;
+    const intercepted = {
+      ...database,
+      async write(task) { writes++; await database.write(task); throw new Error("The commit response was lost"); },
+      read: (task) => canRead ? database.read(task) : Promise.reject(new Error("Receipt unavailable")),
+    };
+    assert.deepEqual(await saveReviewedMerchantRefund("trip", record, { database: intercepted }), { status: "unknown" });
+    canRead = true;
+    assert.deepEqual(await saveReviewedMerchantRefund("trip", record, { database: intercepted, verifyOnly: true }), { status: "saved" });
+    assert.equal(writes, 1);
+
+    const voidPreview = valueOf(await finance.previewMerchantRefundVoid("trip", "dinner", {
+      id: "void", targetEventId: preview.refund.id, occurredAt: 300,
+    }));
+    await database.write((db) => db.execAsync(`
+      CREATE TRIGGER fail_void AFTER INSERT ON financial_voids BEGIN SELECT RAISE(FAIL, 'injected'); END;
+    `));
+    const reversal = { kind: "void", preview: voidPreview };
+    assert.deepEqual(await saveReviewedMerchantRefund("trip", reversal, { database }), { status: "notSaved" });
+    assert.deepEqual((await loadExpenseDetail("trip", "dinner", database)).refunds.map(({ id }) => id), [preview.refund.id]);
+    await database.write((db) => db.execAsync("DROP TRIGGER fail_void"));
+    assert.deepEqual(await saveReviewedMerchantRefund("trip", reversal, { database: intercepted }), { status: "saved" });
+    assert.equal(writes, 2);
+    assert.equal(valueOf(await finance.listEvents("trip")).filter(({ kind }) => kind === "financialVoid").length, 1);
+  },
+));

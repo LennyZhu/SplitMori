@@ -233,6 +233,11 @@ export const migrations = [
   `
   ALTER TABLE expense_revisions ADD COLUMN reviewed_refund_ids TEXT NOT NULL DEFAULT '[]';
   `,
+  `
+  ALTER TABLE merchant_refunds ADD COLUMN note TEXT;
+  ALTER TABLE merchant_refunds ADD COLUMN distribution TEXT CHECK (distribution IS NULL OR distribution = 'proportional');
+  ALTER TABLE merchant_refunds ADD COLUMN recorded_at INTEGER CHECK (recorded_at BETWEEN 0 AND 9007199254740991);
+  `,
 ] as const;
 
 export async function applyMigration(

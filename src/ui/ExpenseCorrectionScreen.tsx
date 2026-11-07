@@ -1,6 +1,6 @@
 import { uuid } from "expo";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from "react-native";
 import type { FinanceExpense, ReviewedExpenseCorrectionRequest } from "../data/finance.ts";
 import { calculateCharges } from "../domain/charges.ts";
 import type { Failure } from "../domain/result.ts";
@@ -10,7 +10,9 @@ import {
   summarizeExpenseRefunds, type ExpenseDetailData,
 } from "../services/expenseDetail.ts";
 import { formatResultMoney } from "../services/quickSplitResult.ts";
+import { ButtonPair, Card, Compare, Heading, Notice, Row, financeReviewStyles } from "./FinanceReviewUi.tsx";
 import { CreateExpenseScreen } from "./CreateExpenseScreen.tsx";
+import { MerchantRefundScreen, merchantRefundCopy } from "./MerchantRefundScreen.tsx";
 import { ConversionButton, ConversionPage, ConversionReadError, memberLabels } from "./QuickSplitConversionScreen.tsx";
 import { colors, Icon } from "./visuals.tsx";
 
@@ -50,56 +52,6 @@ function correctionError({ code, field }: Failure["error"]) {
     case "REVISION_ID_CONFLICT": return "更正請求與既有修訂衝突，請重新預覽。";
     default: return "未能完成費用更正，請核對資料後再試。";
   }
-}
-
-function Card({ children }: { children: ReactNode }) {
-  return <View style={styles.card}>{children}</View>;
-}
-
-function Heading({ children }: { children: ReactNode }) {
-  return <Text accessibilityRole="header" style={styles.heading}>{children}</Text>;
-}
-
-function Notice({ children, alert = false }: { children: ReactNode; alert?: boolean }) {
-  return <View style={styles.notice}><Text accessibilityRole={alert ? "alert" : undefined} style={styles.caption}>{children}</Text></View>;
-}
-
-function Row({ title, value, divider = true }: { title: string; value: string; divider?: boolean }) {
-  return (
-    <View style={[styles.row, styles.line, divider && styles.divider]}>
-      <Text style={styles.caption}>{title}</Text>
-      <Text style={styles.value}>{value}</Text>
-    </View>
-  );
-}
-
-function Compare({ title, before, after, inline = false }: { title: string; before: string; after: string; inline?: boolean }) {
-  return (
-    <View style={[styles.line, styles.divider, inline && styles.inline]}>
-      <Text style={[styles.compareLabel, inline && styles.inlineLabel]}>{title}</Text>
-      <View style={[styles.compareValues, inline && styles.inlineValues]}>
-        <Text style={styles.oldValue}>{before}</Text><Text style={styles.caption}>→</Text><Text style={styles.value}>{after}</Text>
-      </View>
-    </View>
-  );
-}
-
-function ButtonPair({ secondary, primary }: {
-  secondary: { label: string; action: () => void; disabled?: boolean };
-  primary: { label: string; action: () => void; disabled?: boolean };
-}) {
-  return (
-    <View style={styles.actions}>
-      <Pressable accessibilityRole="button" accessibilityState={{ disabled: secondary.disabled }}
-        disabled={secondary.disabled} onPress={secondary.action}
-        style={({ pressed }) => [styles.secondary, (pressed || secondary.disabled) && styles.dimmed]}>
-        <Text style={styles.buttonText}>{secondary.label}</Text>
-      </Pressable>
-      <View style={styles.primary}>
-        <ConversionButton label={primary.label} onPress={primary.action} disabled={primary.disabled} />
-      </View>
-    </View>
-  );
 }
 
 function BillDetails({ expense, money, nameFor }: { expense: FinanceExpense; money: Money; nameFor: NameFor }) {
@@ -145,8 +97,8 @@ function RefundRows({ refunds, money, nameFor }: {
   ));
 }
 
-function Detail({ data, money, nameFor, onHistory }: {
-  data: ExpenseDetailData; money: Money; nameFor: NameFor; onHistory: () => void;
+function Detail({ data, money, nameFor, onHistory, onRefundHistory }: {
+  data: ExpenseDetailData; money: Money; nameFor: NameFor; onHistory: () => void; onRefundHistory: () => void;
 }) {
   const { activity, expense, refunds } = data;
   const { amountMinor, reductions } = summarizeExpenseRefunds(refunds);
@@ -173,12 +125,19 @@ function Detail({ data, money, nameFor, onHistory }: {
           <Row key={memberId} title={nameFor(memberId)} value={money(share - (reductions.get(memberId) ?? 0))} />)}
       </Card>
       <BillDetails expense={expense} money={money} nameFor={nameFor} />
+      <Heading>{merchantRefundCopy.title}</Heading>
+      <Card>
+        <Row title={merchantRefundCopy.effectiveRefund} value={money(amountMinor)} divider={false} />
+        <Row title={merchantRefundCopy.effectiveExpense} value={money(expense.split.total.amountMinor - amountMinor)} />
+        {data.refundHistory.length === 0 && <Text style={styles.caption}>{merchantRefundCopy.noRecords}</Text>}
+        <Pressable accessibilityRole="button" onPress={onRefundHistory} style={[styles.row, styles.line, styles.divider]}>
+          <Text style={styles.compareLabel}>{merchantRefundCopy.viewHistory}</Text>
+          <Text style={styles.caption}>{data.refundHistory.length} {merchantRefundCopy.amountSuffix}</Text>
+          <Icon name="next" size={17} color={colors.muted} />
+        </Pressable>
+      </Card>
       <Heading>相關記錄</Heading>
       <Card>
-        <Row title="有效商家退款" value={money(amountMinor)} divider={false} />
-        <RefundRows refunds={refunds} money={money} nameFor={nameFor} />
-        {data.voidedRefundCount > 0 && <Text style={styles.caption}>另有 {data.voidedRefundCount} 筆已作廢退款</Text>}
-        <Row title="有效費用" value={money(expense.split.total.amountMinor - amountMinor)} />
         <Pressable accessibilityRole="button" onPress={onHistory} style={[styles.row, styles.line, styles.divider]}>
           <Text style={styles.compareLabel}>修訂歷史</Text><Text style={styles.caption}>{data.versions.length} 個版本</Text>
           <Icon name="next" size={17} color={colors.muted} />
@@ -355,6 +314,7 @@ export function ExpenseCorrectionScreen({ activityId, expenseId, onBack, onViewS
 }) {
   const [data, setData] = useState<ExpenseDetailData | null>();
   const [page, setPage] = useState<"detail" | "edit" | "history">("detail");
+  const [refundRoute, setRefundRoute] = useState<"register" | "history">();
   const [saved, setSaved] = useState(false);
   const [readError, setReadError] = useState(false);
   const [review, setReview] = useState<Reviewed>();
@@ -436,6 +396,11 @@ export function ExpenseCorrectionScreen({ activityId, expenseId, onBack, onViewS
     }
   }
 
+  if (refundRoute) {
+    return <MerchantRefundScreen activityId={activityId} expenseId={expenseId} entryPoint={refundRoute}
+      onBack={() => { setRefundRoute(undefined); void reload(); }} />;
+  }
+
   if (page === "edit" && data) {
     return (
       <>
@@ -461,15 +426,25 @@ export function ExpenseCorrectionScreen({ activityId, expenseId, onBack, onViewS
   const money: Money = (minor) => data ? formatResultMoney(data.activity.currency, minor) : "";
   const names = memberLabels(data?.activity.members ?? []);
   const nameFor = (id: string) => names.get(id) ?? "未知成員";
+  const canRegister = data?.activity.status === "active"
+    && data.expense.split.total.amountMinor > summarizeExpenseRefunds(data.refunds).amountMinor;
   return (
     <ConversionPage key={page} title={page === "history" ? "修訂歷史" : "費用詳情"}
       onBack={page === "history" ? () => setPage("detail") : onBack}
+      endAction={page === "detail" && data && !data.editBlocker ? {
+        label: "更多費用操作",
+        onPress: () => Alert.alert("費用操作", undefined, [
+          { text: "更正費用", onPress: () => setPage("edit") }, { text: "取消", style: "cancel" },
+        ]),
+      } : undefined}
       footer={data && (page === "history"
         ? <ConversionButton label="返回活動結算" onPress={onViewSettlement} />
         : <ButtonPair secondary={{ label: "修訂歷史", action: () => setPage("history") }}
-          primary={{ label: "更正費用", action: () => setPage("edit"), disabled: !!data.editBlocker }} />)}>
+          primary={{ label: canRegister ? merchantRefundCopy.register : merchantRefundCopy.viewHistory,
+            action: () => setRefundRoute(canRegister ? "register" : "history") }} />)}>
       {data ? (page === "history" ? <History data={data} saved={saved} money={money} nameFor={nameFor} />
-        : <Detail data={data} money={money} nameFor={nameFor} onHistory={() => setPage("history")} />)
+        : <Detail data={data} money={money} nameFor={nameFor} onHistory={() => setPage("history")}
+          onRefundHistory={() => setRefundRoute("history")} />)
         : readError ? <>
           {saved && <Notice>更正已儲存。暫時無法讀取最新詳情。</Notice>}
           <ConversionReadError retry={() => { void reload(); }} />
@@ -481,34 +456,10 @@ export function ExpenseCorrectionScreen({ activityId, expenseId, onBack, onViewS
 }
 
 const styles = StyleSheet.create({
-  card: { backgroundColor: colors.surface, borderColor: colors.line, borderWidth: 1, borderRadius: 16, paddingHorizontal: 14, paddingVertical: 11, gap: 4 },
-  notice: { backgroundColor: colors.quiet, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10 },
-  heading: { color: colors.ink, fontSize: 17, fontWeight: "700", marginTop: 4 },
+  ...financeReviewStyles,
   name: { color: colors.ink, fontSize: 22, fontWeight: "700", marginTop: 3 },
-  total: { color: colors.ink, fontSize: 30, fontWeight: "700", fontVariant: ["tabular-nums"], marginVertical: 3 },
-  caption: { color: colors.muted, fontSize: 13, lineHeight: 19, flexShrink: 1 },
-  badge: { color: colors.muted, backgroundColor: colors.quiet, borderRadius: 14, paddingHorizontal: 10, paddingVertical: 4, fontSize: 12 },
-  row: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", columnGap: 10, rowGap: 3 },
-  line: { paddingVertical: 8, gap: 4 },
-  divider: { borderTopColor: colors.line, borderTopWidth: StyleSheet.hairlineWidth },
-  value: { color: colors.ink, fontSize: 14, fontWeight: "700", fontVariant: ["tabular-nums"], flexShrink: 1, textAlign: "right" },
-  compareLabel: { color: colors.ink, fontSize: 14, fontWeight: "600", flexShrink: 1 },
-  inline: { flexDirection: "row", alignItems: "center", gap: 7 },
-  inlineLabel: { flexBasis: "25%" },
-  inlineValues: { flex: 1 },
-  compareValues: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
-  oldValue: { color: colors.muted, fontSize: 14, fontVariant: ["tabular-nums"], flex: 1 },
-  compareHeader: { flexDirection: "row", alignItems: "center", gap: 8, marginVertical: 6 },
-  compareBox: { flex: 1, gap: 4, backgroundColor: colors.quiet, borderRadius: 12, padding: 10 },
-  boxAmount: { color: colors.ink, fontSize: 18, fontWeight: "700", fontVariant: ["tabular-nums"] },
   reviewRow: { flexDirection: "row", alignItems: "center", gap: 9, minHeight: 44 },
   checkbox: { width: 21, height: 21, borderColor: colors.muted, borderWidth: 1, borderRadius: 5, alignItems: "center", justifyContent: "center" },
   checked: { backgroundColor: colors.ink, borderColor: colors.ink },
   revisionHeading: { gap: 5, minHeight: 44 },
-  actions: { flexDirection: "row", gap: 8 },
-  primary: { flex: 1 },
-  secondary: { flex: 0.82, minHeight: 52, padding: 10, borderRadius: 14, borderWidth: 1, borderColor: colors.line,
-    backgroundColor: colors.surface, alignItems: "center", justifyContent: "center" },
-  buttonText: { color: colors.ink, fontSize: 16, fontWeight: "700", textAlign: "center" },
-  dimmed: { opacity: 0.65 },
 });
