@@ -14,6 +14,7 @@ import {
 import {
   findFinancialVoid, insertFinancialVoid, readFinancialVoids, type FinancialVoidRequest, type StoredFinancialVoid,
 } from "./financeVoids.ts";
+import { migrations } from "./migrations.ts";
 
 const splitModes = ["equal", "treat", "individual", "custom"] as const;
 export type FinanceExpense = Expense & {
@@ -24,7 +25,11 @@ export type FinanceExpense = Expense & {
 };
 
 type ExpenseEvent = { readonly kind: "expense"; readonly expense: FinanceExpense };
-type FinanceEvent = ExpenseEvent | MerchantRefund | MemberTransfer;
+export type FinanceMemberTransfer = MemberTransfer & { readonly note?: string };
+
+type FinanceEvent = ExpenseEvent | MerchantRefund | FinanceMemberTransfer;
+
+export type ExpectedTransferBalances = { readonly fromNetBalanceMinor: number; readonly toNetBalanceMinor: number };
 
 export type StoredFinanceEvent<T extends FinanceEvent = FinanceEvent> = T & {
   /** Unix time in milliseconds. Equal times are ordered by insertion sequence. */
@@ -121,6 +126,7 @@ type EventRow = {
   recipientId: string | null;
   fromMemberId: string | null;
   toMemberId: string | null;
+  transferNote: string | null;
 };
 
 async function readActivity(connection: SQLiteReader, id: string): Promise<ActivityContext | null> {
@@ -145,15 +151,16 @@ function groupAllocations(rows: readonly (Allocation & { ownerId: string })[]): 
   return groups;
 }
 
-async function readEvents(connection: SQLiteReader, activity: ActivityContext, hasExpenseName = true): Promise<StoredFinanceEvent[]> {
+async function readEvents(connection: SQLiteReader, activity: ActivityContext, schemaVersion: number = migrations.length): Promise<StoredFinanceEvent[]> {
   const { id: activityId, currency } = activity;
   const rows = await connection.getAllAsync<EventRow>(`
     SELECT f.id, f.kind, f.occurred_at AS occurredAt, f.sequence,
            COALESCE(e.amount_minor, r.amount_minor, t.amount_minor) AS amountMinor,
-           e.currency AS expenseCurrency, ${hasExpenseName ? "e.name" : "NULL"} AS expenseName,
+           e.currency AS expenseCurrency, ${schemaVersion >= 7 ? "e.name" : "NULL"} AS expenseName,
            e.split_mode AS splitMode, e.allocation_version AS allocationVersion,
            r.expense_id AS expenseId, r.recipient_id AS recipientId,
-           t.from_member_id AS fromMemberId, t.to_member_id AS toMemberId
+           t.from_member_id AS fromMemberId, t.to_member_id AS toMemberId,
+           ${schemaVersion >= 8 ? "t.note" : "NULL"} AS transferNote
     FROM financial_events AS f
     LEFT JOIN expenses AS e ON e.id = f.id AND e.activity_id = f.activity_id AND f.kind = 'expense'
     LEFT JOIN merchant_refunds AS r ON r.id = f.id AND r.activity_id = f.activity_id AND f.kind = 'merchantRefund'
@@ -201,7 +208,8 @@ async function readEvents(connection: SQLiteReader, activity: ActivityContext, h
       }
     }
     if (kind === "memberTransfer" && amountMinor !== null && row.fromMemberId && row.toMemberId) {
-      return { ...order, kind, id, currency, amountMinor, fromMemberId: row.fromMemberId, toMemberId: row.toMemberId };
+      return { ...order, kind, id, currency, amountMinor, fromMemberId: row.fromMemberId, toMemberId: row.toMemberId,
+        ...(row.transferNote === null ? {} : { note: row.transferNote }) };
     }
     throw new Error(`Invalid stored financial event ${id}`);
   });
@@ -213,7 +221,7 @@ export async function validateStoredLedgers(connection: SQLiteReader, schemaVers
   for (const { id } of rows) {
     const activity = await readActivity(connection, id);
     if (!activity) return failure("ACTIVITY_NOT_FOUND", "activityId");
-    const events = schemaVersion >= 2 ? await readEvents(connection, activity, schemaVersion >= 7) : [];
+    const events = schemaVersion >= 2 ? await readEvents(connection, activity, schemaVersion) : [];
     const revisions = schemaVersion >= 3 ? await readExpenseRevisions(connection, id, schemaVersion >= 7) : [];
     const voids = schemaVersion >= 6 ? await readFinancialVoids(connection, id) : [];
     const balances = calculateBalances(activity.currency, activity.memberIds, [], orderedTimeline(events, revisions, voids));
@@ -243,7 +251,7 @@ function sameEvent(saved: FinanceEvent, requested: FinanceEvent): boolean {
   }
   if (saved.kind === "memberTransfer" && requested.kind === "memberTransfer") {
     return saved.fromMemberId === requested.fromMemberId && saved.toMemberId === requested.toMemberId
-      && saved.currency === requested.currency && saved.amountMinor === requested.amountMinor;
+      && saved.currency === requested.currency && saved.amountMinor === requested.amountMinor && saved.note === requested.note;
   }
   return false;
 }
@@ -337,11 +345,12 @@ async function insertEvent(
     return { ...order, kind: event.kind, id, expenseId, recipientId, amountMinor, currency, reductions };
   }
 
-  const { fromMemberId, toMemberId, amountMinor, currency } = event;
+  const { fromMemberId, toMemberId, amountMinor, currency, note } = event;
   await transaction.runAsync(`
-    INSERT INTO member_transfers (id, activity_id, from_member_id, to_member_id, amount_minor) VALUES (?, ?, ?, ?, ?)
-  `, id, activityId, fromMemberId, toMemberId, amountMinor);
-  return { ...order, kind: event.kind, id, fromMemberId, toMemberId, amountMinor, currency };
+    INSERT INTO member_transfers (id, activity_id, from_member_id, to_member_id, amount_minor, note) VALUES (?, ?, ?, ?, ?, ?)
+  `, id, activityId, fromMemberId, toMemberId, amountMinor, note ?? null);
+  return { ...order, kind: event.kind, id, fromMemberId, toMemberId, amountMinor, currency,
+    ...(note === undefined ? {} : { note }) };
 }
 
 async function withStorage<T>(task: () => Promise<Result<T>>): Promise<Result<T>> {
@@ -354,6 +363,7 @@ async function withStorage<T>(task: () => Promise<Result<T>>): Promise<Result<T>
 
 async function recordInTransaction(
   transaction: SQLiteConnection, activityId: string, occurredAt: number, event: FinanceEvent, allowRetry = true,
+  expectedBalances?: ExpectedTransferBalances,
 ): Promise<Result<StoredFinanceEvent>> {
   const id = eventId(event);
   if (typeof id !== "string" || id.trim() === "") {
@@ -384,6 +394,7 @@ async function recordInTransaction(
   if (activity.status === "completed" && event.kind !== "memberTransfer") {
     return failure("ACTIVITY_COMPLETED", "activityId");
   }
+  if (event.kind === "memberTransfer" && occurredAt > Date.now()) return failure("INVALID_EVENT_TIME", "occurredAt");
   if (event.kind === "expense") {
     const invalid = validateSplitSnapshot(event.expense);
     if (invalid) return invalid;
@@ -394,9 +405,24 @@ async function recordInTransaction(
   );
   const next = ordered.findIndex((entry) => entry.occurredAt > occurredAt);
   const index = next === -1 ? ordered.length : next;
+  const backdatedTransfer = event.kind === "memberTransfer" && next !== -1;
+  // A backdated repayment must be valid both against current balances and at its place in history.
+  if (backdatedTransfer) {
+    const current = calculateBalances(activity.currency, activity.memberIds, [], [...ordered, event]);
+    if (!current.ok) return current;
+  }
   const timeline = [...ordered.slice(0, index), event, ...ordered.slice(index)];
   const balances = calculateBalances(activity.currency, activity.memberIds, [], timeline);
-  if (!balances.ok) return balances;
+  if (!balances.ok) return backdatedTransfer ? failure("TRANSFER_DATE_CONFLICT", "occurredAt") : balances;
+  if (event.kind === "memberTransfer" && expectedBalances) {
+    const current = calculateBalances(activity.currency, activity.memberIds, [], ordered);
+    if (!current.ok) return current;
+    const from = current.value.balances.find(({ memberId }) => memberId === event.fromMemberId);
+    const to = current.value.balances.find(({ memberId }) => memberId === event.toMemberId);
+    if (from?.netBalanceMinor !== expectedBalances.fromNetBalanceMinor || to?.netBalanceMinor !== expectedBalances.toNetBalanceMinor) {
+      return failure("TRANSFER_BALANCES_CHANGED", "memberTransfer");
+    }
+  }
 
   const saved = await insertEvent(transaction, activity, occurredAt, event);
   return { ok: true, value: saved };
@@ -426,8 +452,8 @@ export function createFinanceRepository(database: LocalDatabase) {
     }));
   }
 
-  function record(activityId: string, occurredAt: number, event: FinanceEvent): Promise<Result<StoredFinanceEvent>> {
-    return withStorage(() => database.write((transaction) => recordInTransaction(transaction, activityId, occurredAt, event)));
+  function record(activityId: string, occurredAt: number, event: FinanceEvent, expectedBalances?: ExpectedTransferBalances): Promise<Result<StoredFinanceEvent>> {
+    return withStorage(() => database.write((transaction) => recordInTransaction(transaction, activityId, occurredAt, event, true, expectedBalances)));
   }
 
   async function voidFinancialEvent(
@@ -573,8 +599,14 @@ export function createFinanceRepository(database: LocalDatabase) {
       record(activityId, occurredAt, {
         ...refund, kind: "merchantRefund", reductions: refund.reductions?.map((row) => ({ ...row })) ?? [],
       }),
-    recordMemberTransfer: (activityId: string, occurredAt: number, transfer: Omit<MemberTransfer, "kind">) =>
-      record(activityId, occurredAt, { ...transfer, kind: "memberTransfer" }),
+    recordMemberTransfer(activityId: string, occurredAt: number, transfer: Omit<FinanceMemberTransfer, "kind">,
+      expectedBalances?: ExpectedTransferBalances) {
+      if (transfer.note !== undefined && typeof transfer.note !== "string") {
+        return Promise.resolve(failure("INVALID_TRANSFER_NOTE", "memberTransfer"));
+      }
+      return record(activityId, occurredAt, { ...transfer, kind: "memberTransfer", note: transfer.note?.trim() || undefined },
+        expectedBalances && { ...expectedBalances });
+    },
     voidMerchantRefund: (activityId: string, request: FinancialVoidRequest) => voidFinancialEvent(activityId, "merchantRefund", request),
     voidMemberTransfer: (activityId: string, request: FinancialVoidRequest) => voidFinancialEvent(activityId, "memberTransfer", request),
     listExpenses: (activityId: string) => readLedger(activityId, (_activity, events, revisions) => ({

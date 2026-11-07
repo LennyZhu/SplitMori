@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ActivityIndicator, Alert, AppState, Pressable, RefreshControl, SectionList, StyleSheet, Text, View, type SectionListData,
+  ActivityIndicator, AppState, Pressable, RefreshControl, SectionList, StyleSheet, Text, View, type SectionListData,
 } from "react-native";
+import type { TransferSuggestion } from "../domain/settlement.ts";
 import { loadActivitySettlement, type ActivitySettlementData } from "../services/activitySettlement.ts";
 import { formatResultMoney } from "../services/quickSplitResult.ts";
 import { colors, Icon } from "./visuals.tsx";
@@ -15,7 +16,8 @@ type Tab = typeof tabs[number]["id"];
 type Member = ActivitySettlementData["members"][number];
 type SettlementRow =
   | { kind: "member"; id: string; member: Member }
-  | { kind: "suggestion" | "repayment"; id: string; fromMemberId: string; toMemberId: string; amountMinor: number };
+  | ({ kind: "suggestion"; id: string } & TransferSuggestion)
+  | ({ kind: "repayment" } & Omit<ActivitySettlementData["repayments"][number], "kind">);
 type Section = SectionListData<SettlementRow, { title: string; caption?: string }>;
 type FormatMoney = (minor: number | bigint) => string;
 
@@ -30,11 +32,13 @@ function AmountLine({ label, value, divider = true }: { label: string; value: st
   );
 }
 
-function FooterButton({ label, onPress, secondary = false }: { label: string; onPress: () => void; secondary?: boolean }) {
+function FooterButton({ label, onPress, secondary = false, disabled = false }: {
+  label: string; onPress: () => void; secondary?: boolean; disabled?: boolean;
+}) {
   return (
     <View style={styles.footer}>
-      <Pressable accessibilityRole="button" onPress={onPress}
-        style={({ pressed }) => [styles.footerButton, secondary && styles.secondary, pressed && styles.pressed]}>
+      <Pressable accessibilityRole="button" disabled={disabled} accessibilityState={{ disabled }} onPress={onPress}
+        style={({ pressed }) => [styles.footerButton, secondary && styles.secondary, (pressed || disabled) && styles.pressed]}>
         <Text style={[styles.buttonText, secondary && styles.secondaryText]}>{label}</Text>
       </Pressable>
     </View>
@@ -193,25 +197,40 @@ function MemberRow({ member, money, currency, first, last, separate, expanded, o
   );
 }
 
-function TransferRow({ from, to, amount, suggestion }: { from: string; to: string; amount: string; suggestion: boolean }) {
-  return (
-    <View style={[styles.card, styles.transferRow]}>
+function TransferRow({ from, to, amount, note, onSelect, selected }: {
+  from: string; to: string; amount: string; note?: string; onSelect?: () => void; selected?: boolean;
+}) {
+  const content = (
+    <>
       <View style={[styles.amountRow, styles.transferAmountRow]}>
         <View style={styles.memberCopy}>
           <Text style={styles.memberName}>{from} → {to}</Text>
-          <Text style={styles.caption}>{suggestion ? `由 ${from} 轉給 ${to}` : "已登記的實際還款"}</Text>
+          <Text style={styles.caption}>{onSelect ? `由 ${from} 轉給 ${to}` : "已登記的實際還款"}</Text>
         </View>
         <Text style={styles.metricValue}>{amount}</Text>
       </View>
-      {suggestion && <Text style={[styles.caption, styles.suggestionNote]}>此筆為建議，不代表已付款或已登記還款。</Text>}
-    </View>
+      {onSelect && <Text style={[styles.caption, styles.suggestionNote]}>此筆為建議，不代表已付款或已登記還款。</Text>}
+      {note && <Text style={[styles.caption, styles.suggestionNote]}>備註：{note}</Text>}
+    </>
   );
+  if (!onSelect) return <View style={[styles.card, styles.transferRow]}>{content}</View>;
+  return <Pressable accessibilityRole="radio" accessibilityState={{ checked: !!selected }}
+    accessibilityLabel={`${from} 轉給 ${to}，${amount}`} onPress={onSelect}
+    style={({ pressed }) => [styles.card, styles.transferRow, selected && styles.selectedTransfer, pressed && styles.pressed]}>
+    {content}
+  </Pressable>;
 }
 
-function SettlementContent({ data, tab, setTab, onBack, refreshing, onRefresh }: {
+function SettlementContent({ data, tab, setTab, onBack, refreshing, onRefresh, onRecordRepayment }: {
   data: ActivitySettlementData; tab: Tab; setTab: (tab: Tab) => void; onBack: () => void; refreshing: boolean; onRefresh: () => void;
+  onRecordRepayment: (suggestion: TransferSuggestion) => void;
 }) {
   const [expandedId, setExpandedId] = useState<string | null | undefined>();
+  const [selectedPair, setSelectedPair] = useState<string>();
+  const pairKey = ({ fromMemberId, toMemberId }: TransferSuggestion) => JSON.stringify([fromMemberId, toMemberId]);
+  const multipleSuggestions = data.suggestions.length > 1;
+  const selectedSuggestion = multipleSuggestions
+    ? data.suggestions.find((suggestion) => pairKey(suggestion) === selectedPair) : data.suggestions[0];
   const openMemberId = tab === "members" ? (expandedId === undefined ? data.members[0]?.memberId : expandedId) : null;
   const { currency } = data.activity;
   const money: FormatMoney = (minor) => formatResultMoney(currency, minor);
@@ -222,13 +241,14 @@ function SettlementContent({ data, tab, setTab, onBack, refreshing, onRefresh }:
     if (data.suggestions.length > 0) {
       sections.push({
         key: "suggestions", title: "建議付款方向",
-        data: data.suggestions.map((suggestion, index) => ({ ...suggestion, kind: "suggestion", id: String(index) })),
+        caption: multipleSuggestions ? "請選擇一筆建議，再記錄實際還款。" : undefined,
+        data: data.suggestions.map((suggestion) => ({ ...suggestion, kind: "suggestion", id: pairKey(suggestion) })),
       });
     }
   } else {
     if (tab === "overview" && data.status === "settled" && data.repayments.length > 0) {
       sections.push({ key: "repayments", title: "已登記的還款",
-        data: data.repayments.map((repayment) => ({ ...repayment, kind: "repayment" })) });
+        data: data.repayments.map(({ kind: _kind, ...repayment }) => ({ ...repayment, kind: "repayment" })) });
     }
     sections.push({
       key: "members", title: tab === "members" ? "成員收支明細" : "每位成員",
@@ -239,7 +259,7 @@ function SettlementContent({ data, tab, setTab, onBack, refreshing, onRefresh }:
 
   const header = (
     <View style={styles.contentStack}>
-      {tab === "overview" && <ActivityHeading activity={data.activity} />}
+      {tab !== "members" && <ActivityHeading activity={data.activity} />}
       <View accessibilityRole="tablist" style={styles.segmented}>
         {tabs.map(({ id, label }) => (
           <Pressable key={id} accessibilityRole="tab" accessibilityState={{ selected: tab === id }}
@@ -274,7 +294,9 @@ function SettlementContent({ data, tab, setTab, onBack, refreshing, onRefresh }:
         renderItem={({ item, index }) => {
           if (item.kind !== "member") {
             return <TransferRow from={nameFor(item.fromMemberId)} to={nameFor(item.toMemberId)}
-              amount={money(item.amountMinor)} suggestion={item.kind === "suggestion"} />;
+              amount={money(item.amountMinor)} note={item.kind === "repayment" ? item.note : undefined}
+              selected={item.kind === "suggestion" && selectedSuggestion !== undefined && pairKey(selectedSuggestion) === item.id}
+              onSelect={item.kind === "suggestion" ? () => setSelectedPair(item.id) : undefined} />;
           }
           const expanded = openMemberId === item.id;
           const first = index === 0 || expanded || data.members[index - 1]?.memberId === openMemberId;
@@ -297,15 +319,17 @@ function SettlementContent({ data, tab, setTab, onBack, refreshing, onRefresh }:
         ) : undefined}
       />
       {tab === "overview" && data.status === "unsettled" && <FooterButton label="查看轉帳建議" onPress={() => setTab("transfers")} />}
-      {tab === "transfers" && data.suggestions.length > 0 && <FooterButton label="記錄還款（下一階段）"
-        onPress={() => Alert.alert("記錄還款", "此功能仍在開發中。")} />}
+      {tab === "transfers" && data.suggestions.length > 0 && <FooterButton label="記錄還款" disabled={!selectedSuggestion || refreshing}
+        onPress={() => { if (selectedSuggestion) onRecordRepayment(selectedSuggestion); }} />}
       {tab !== "members" && data.status !== "unsettled" && <FooterButton label="返回活動詳情" onPress={onBack} secondary />}
     </>
   );
 }
 
-export function ActivitySettlementScreen({ activityId, onBack }: { activityId: string; onBack: () => void }) {
-  const [tab, setTab] = useState<Tab>("overview");
+export function ActivitySettlementScreen({ activityId, onBack, initialTab = "overview", onRecordRepayment }: {
+  activityId: string; onBack: () => void; initialTab?: Tab; onRecordRepayment: (suggestion: TransferSuggestion) => void;
+}) {
+  const [tab, setTab] = useState<Tab>(initialTab);
   const [data, setData] = useState<ActivitySettlementData | null>();
   const [loading, setLoading] = useState(true);
   const [readError, setReadError] = useState(false);
@@ -347,7 +371,8 @@ export function ActivitySettlementScreen({ activityId, onBack }: { activityId: s
         <Text accessibilityRole="header" style={styles.title}>活動結算</Text>
         <View style={styles.headerSide} />
       </View>
-      {data ? <SettlementContent data={data} tab={tab} setTab={setTab} onBack={onBack} refreshing={loading} onRefresh={reload} />
+      {data ? <SettlementContent data={data} tab={tab} setTab={setTab} onBack={onBack} refreshing={loading} onRefresh={reload}
+        onRecordRepayment={onRecordRepayment} />
         : <View style={[styles.content, styles.group]}>
           {loading && <ActivityIndicator accessibilityLabel="正在讀取結算資料" color={colors.ink} />}
           {readError && <View style={[styles.card, styles.group]}>
@@ -414,6 +439,7 @@ const styles = StyleSheet.create({
   netLine: { marginTop: 6, borderRadius: 13, paddingVertical: 12, paddingHorizontal: 12, backgroundColor: colors.quiet },
   transferTotal: { gap: 2 },
   transferRow: { marginBottom: 9 },
+  selectedTransfer: { borderColor: colors.ink },
   transferAmountRow: { paddingVertical: 5 },
   suggestionNote: { borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.line, marginTop: 10, paddingTop: 9 },
   listNotes: { paddingTop: 3, gap: 10 },

@@ -1,7 +1,6 @@
 import { createActivityRepository } from "../data/activities.ts";
 import type { LocalDatabase } from "../data/database.ts";
-import { createFinanceRepository, type StoredFinanceEvent } from "../data/finance.ts";
-import type { MemberTransfer } from "../domain/balance.ts";
+import { createFinanceRepository, type FinanceMemberTransfer, type StoredFinanceEvent } from "../data/finance.ts";
 import { withActivityReadSnapshot } from "./activityList.ts";
 
 export type ActivitySettlementData = NonNullable<Awaited<ReturnType<typeof loadActivitySettlement>>>;
@@ -17,7 +16,7 @@ export function loadActivitySettlement(activityId: string, database?: LocalDatab
     const { balances, effectiveExpenses } = balanceSnapshot;
     const voidedRepayments = new Set(events.flatMap((event) => event.kind === "financialVoid" && event.targetKind === "memberTransfer"
       ? [event.targetEventId] : []));
-    const repayments = events.filter((event): event is StoredFinanceEvent<MemberTransfer> =>
+    const repayments = events.filter((event): event is StoredFinanceEvent<FinanceMemberTransfer> =>
       event.kind === "memberTransfer" && !voidedRepayments.has(event.id)).reverse();
     const outstandingMinor = balances.reduce((sum, balance) => sum + BigInt(Math.max(0, balance.netBalanceMinor)), 0n);
     const status = events.length === 0 && revisions.length === 0 ? "empty" : outstandingMinor === 0n ? "settled" : "unsettled";

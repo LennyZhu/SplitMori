@@ -23,6 +23,7 @@ import { loadActivityDetail } from "../src/services/activityDetail.ts";
 import { loadActivityMembers } from "../src/services/activityMembers.ts";
 import { loadActivitySettlement } from "../src/services/activitySettlement.ts";
 import { createExpenseEditor, expenseDateInput, expenseDateTimestamp, prepareNewExpense } from "../src/services/expenseEditor.ts";
+import { inspectRepaymentDraft } from "../src/services/memberRepayment.ts";
 import { createQuickHistorySave } from "../src/services/quickHistorySave.ts";
 import { canSelectConversionTarget, createQuickSplitConversionService } from "../src/services/quickSplitConversion.ts";
 import { createRestoreService } from "../src/services/restore.ts";
@@ -953,7 +954,7 @@ test("WAL backup preserves every ledger and quick-split record without changing 
   valueOf(await createQuickSplitConversionService(database).convertQuickHistory(conversionRequest()));
   valueOf(await finance.createExpense("trip", 110, expense()));
   valueOf(await finance.recordMerchantRefund("trip", 200, { ...refund, recipientId: "a" }));
-  valueOf(await finance.recordMemberTransfer("trip", 250, { ...repayment, amountMinor: 6000 }));
+  valueOf(await finance.recordMemberTransfer("trip", 250, { ...repayment, amountMinor: 6000, note: "FPS" }));
   valueOf(await finance.commitExpenseCorrection("trip", correction(8000, { reviewedRefundIds: [refund.id] })));
   valueOf(await finance.voidMerchantRefund("trip", { id: "void-refund", targetEventId: refund.id, occurredAt: 400 }));
   const before = valueOf(await finance.getActivityLedger("trip"));
@@ -1472,7 +1473,7 @@ test("v7 migrates a v6 ledger with expense revisions and keeps the legacy displa
     `);
     assert.equal(valueOf(await validateStoredLedgers(connection, 6)), true);
     const database = await initializeDatabase(connection);
-    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 7);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, migrations.length);
     const detail = await loadActivityDetail("trip", database);
     assert.deepEqual(detail.expenses.map(({ name, effectiveMinor }) => [name, effectiveMinor]), [["費用 1", 8000]]);
     assert.equal((await connection.getFirstAsync("SELECT name FROM expenses WHERE id = 'dinner'")).name, null);
@@ -1790,4 +1791,152 @@ test("S09 distinguishes an empty activity from a zero-yen expense with zero bala
   assert.equal(zero.status, "settled");
   assert.deepEqual([zero.expenseCount, zero.effectiveMinor, zero.outstandingMinor, zero.repaymentMinor], [1, 0n, 0n, 0n]);
   assert.deepEqual(zero.suggestions, []);
+}));
+
+test("S10 records partial and full repayments on a completed activity and reloads S09", withFinance(async (finance, activities, database) => {
+  valueOf(await finance.createExpense("trip", 100, expense("first", 56_000)));
+  valueOf(await finance.createExpense("trip", 150, expense("second", 56_000)));
+  await activities.addMembers("trip", [{ id: "c", displayName: "Chris" }, { id: "d", displayName: "d" }]);
+  await activities.completeActivity("trip");
+  const before = await loadActivitySettlement("trip", database);
+  const expenses = valueOf(await finance.listExpenses("trip"));
+  assert.equal(before.outstandingMinor, 56_000n);
+
+  const first = valueOf(await finance.recordMemberTransfer("trip", 200, { ...repayment, amountMinor: 20_000, note: "FPS" }, {
+    fromNetBalanceMinor: -56_000, toNetBalanceMinor: 56_000,
+  }));
+  assert.equal(first.kind, "memberTransfer");
+  assert.equal(first.note, "FPS");
+  const partial = await loadActivitySettlement("trip", database);
+  assert.deepEqual([partial.activity.status, partial.expenseCount, partial.effectiveMinor, partial.repaymentMinor, partial.outstandingMinor],
+    ["completed", 2, 112_000n, 20_000n, 36_000n]);
+  assert.deepEqual(partial.members.map(({ netBalanceMinor }) => netBalanceMinor), [36_000, -36_000, 0, 0]);
+  assert.deepEqual(partial.suggestions, [{ fromMemberId: "a", toMemberId: "z", currency: "HKD", amountMinor: 36_000 }]);
+
+  valueOf(await finance.recordMemberTransfer("trip", 300, { ...repayment, id: "remaining", amountMinor: 36_000 }, {
+    fromNetBalanceMinor: -36_000, toNetBalanceMinor: 36_000,
+  }));
+  const settled = await loadActivitySettlement("trip", database);
+  assert.deepEqual([settled.activity.status, settled.status, settled.effectiveMinor, settled.repaymentMinor, settled.outstandingMinor],
+    ["completed", "settled", 112_000n, 56_000n, 0n]);
+  assert.deepEqual(settled.suggestions, []);
+  assert.deepEqual(valueOf(await finance.listExpenses("trip")), expenses);
+}));
+
+test("S10 serializes confirmations, rejects stale balances, and reuses the ID of the same event", withFinance(async (finance) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  const expected = { fromNetBalanceMinor: -5000, toNetBalanceMinor: 5000 };
+  const transfer = { ...repayment, amountMinor: 1000, note: " 現金 " };
+  const separate = { ...transfer, id: "second-transfer" };
+  const [first, stale] = await Promise.all([
+    finance.recordMemberTransfer("trip", 200, transfer, expected),
+    finance.recordMemberTransfer("trip", 200, separate, expected),
+  ]);
+  assert.equal(valueOf(first).note, "現金");
+  assert.deepEqual(stale.error, { code: "TRANSFER_BALANCES_CHANGED", field: "memberTransfer" });
+  const revised = { fromNetBalanceMinor: -4000, toNetBalanceMinor: 4000 };
+  assert.deepEqual(valueOf(await finance.recordMemberTransfer("trip", 200, transfer, revised)), first.value);
+  assert.equal((await finance.recordMemberTransfer("trip", 200, { ...transfer, note: "FPS" }, revised)).error.code, "EVENT_ID_CONFLICT");
+  const second = valueOf(await finance.recordMemberTransfer("trip", 200, separate, revised));
+  assert.notEqual(second.id, first.value.id);
+  assert.deepEqual(valueOf(await finance.listEvents("trip")).filter(({ kind }) => kind === "memberTransfer"), [first.value, second]);
+}));
+
+test("S10 rejects invalid and backdated repayments without writing any event", withFinance(async (finance) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  const before = valueOf(await finance.listEvents("trip"));
+  const expected = { fromNetBalanceMinor: -5000, toNetBalanceMinor: 5000 };
+  for (const [transfer, occurredAt, code] of [
+    [{ ...repayment, amountMinor: 5001 }, 200, "TRANSFER_EXCEEDS_BALANCE"],
+    [{ ...repayment, amountMinor: 0 }, 200, "NON_POSITIVE_AMOUNT"],
+    [{ ...repayment, toMemberId: repayment.fromMemberId }, 200, "SELF_TRANSFER"],
+    [{ ...repayment, toMemberId: "outsider" }, 200, "MEMBER_NOT_PARTICIPATING"],
+    [repayment, Date.now() + 86_400_000, "INVALID_EVENT_TIME"],
+    [repayment, 99, "TRANSFER_DATE_CONFLICT"],
+  ]) {
+    assert.equal((await finance.recordMemberTransfer("trip", occurredAt, transfer, expected)).error.code, code);
+  }
+  assert.deepEqual(valueOf(await finance.listEvents("trip")), before);
+
+  valueOf(await finance.recordMerchantRefund("trip", 300, { ...refund, amountMinor: 10_000,
+    reductions: [{ memberId: "z", amountMinor: 5000 }, { memberId: "a", amountMinor: 5000 }],
+  }));
+  const afterRefund = valueOf(await finance.listEvents("trip"));
+  // The old date had a payable balance. The full refund has since settled it.
+  assert.equal((await finance.recordMemberTransfer("trip", 200, repayment)).error.code, "TRANSFER_EXCEEDS_BALANCE");
+  assert.deepEqual(valueOf(await finance.listEvents("trip")), afterRefund);
+}));
+
+test("S10 rolls back the financial event if the transfer row fails and can retry the same ID", withFinance(async (finance, _activities, database, connection) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  const before = valueOf(await finance.getActivityLedger("trip"));
+  await database.write((transaction) => transaction.execAsync(`
+    CREATE TRIGGER reject_transfer BEFORE INSERT ON member_transfers
+    BEGIN SELECT RAISE(ABORT, 'test transfer write failure'); END;
+  `));
+  const transfer = { ...repayment, note: "FPS" };
+  assert.equal((await finance.recordMemberTransfer("trip", 200, transfer)).error.code, "FINANCE_STORAGE_ERROR");
+  assert.equal(await connection.getFirstAsync("SELECT id FROM financial_events WHERE id = ?", transfer.id), null);
+  assert.equal(await connection.getFirstAsync("SELECT id FROM member_transfers WHERE id = ?", transfer.id), null);
+  assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
+  await database.write((transaction) => transaction.execAsync("DROP TRIGGER reject_transfer"));
+  const saved = valueOf(await finance.recordMemberTransfer("trip", 200, transfer));
+  assert.equal(saved.note, "FPS");
+  assert.deepEqual(valueOf(await finance.listEvents("trip")).filter(({ kind }) => kind === "memberTransfer"), [saved]);
+}));
+
+test("v8 preserves v7 repayments and persists notes across reopening", withTestFile(async (path) => {
+  let connection = openTestConnection(path);
+  try {
+    for (const sql of migrations.slice(0, 7)) await connection.execAsync(sql);
+    await connection.execAsync(`
+      INSERT INTO activities VALUES ('trip', 'Trip', 'HKD', 'active', 1, 1);
+      INSERT INTO members VALUES ('z', 'Alex', 1), ('a', 'Bo', 1);
+      INSERT INTO activity_members VALUES ('trip', 'z', 0), ('trip', 'a', 1);
+      INSERT INTO financial_events VALUES (1, 'dinner', 'trip', 'expense', 100), (2, 'old', 'trip', 'memberTransfer', 200);
+      INSERT INTO expenses (id, activity_id, currency, amount_minor, split_mode, allocation_version)
+        VALUES ('dinner', 'trip', 'HKD', 10000, 'equal', 1);
+      INSERT INTO expense_allocations VALUES ('trip', 'dinner', 'z', 5000, 0), ('trip', 'dinner', 'a', 5000, 1);
+      INSERT INTO merchant_payments VALUES ('trip', 'dinner', 'z', 10000);
+      INSERT INTO member_transfers VALUES ('old', 'trip', 'a', 'z', 1000);
+      PRAGMA user_version = 7;
+    `);
+    assert.equal(valueOf(await inspectBackupDatabase(backupPlatform(path), connection, 7)).repaymentCount, 1);
+    let database = await initializeDatabase(connection);
+    const finance = createFinanceRepository(database);
+    const legacy = valueOf(await finance.listEvents("trip")).find(({ id }) => id === "old");
+    assert.equal(legacy.note, undefined);
+    const transfer = valueOf(await finance.recordMemberTransfer("trip", 300, { ...repayment, amountMinor: 2000, note: "現金分帳" }));
+    connection.close();
+    connection = openTestConnection(path);
+    database = await initializeDatabase(connection);
+    const settlement = await loadActivitySettlement("trip", database);
+    assert.deepEqual(settlement.repayments, [transfer, legacy]);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 8);
+  } finally {
+    connection.close();
+  }
+}));
+
+test("S10 form uses local dates and rejects zero, negative and fractional yen amounts", withFinance(async (finance, activities, database) => {
+  await activities.completeActivity("trip");
+  await activities.createActivity({ id: "yen", name: "東京", currency: "JPY", members: [{ id: "payer", displayName: "P" }, { id: "debtor", displayName: "D" }] });
+  const total = { currency: "JPY", amountMinor: 1000 };
+  valueOf(await finance.createExpense("yen", 100, {
+    id: "yen-expense", split: valueOf(splitEqual(total, ["payer", "debtor"])),
+    merchantPayment: { memberId: "payer", ...total }, splitMode: "equal", allocationVersion: 1,
+  }));
+  const data = await loadActivitySettlement("yen", database);
+  const now = new Date(2026, 10, 8, 19, 30);
+  const draft = { fromMemberId: "debtor", toMemberId: "payer", amount: "200", date: expenseDateInput(now), note: " 現金 " };
+  const { prepared, limit } = inspectRepaymentDraft(draft, data, now);
+  assert.equal(limit, 500);
+  assert.equal(prepared.occurredAt, now.getTime());
+  assert.deepEqual(prepared.transfer, { currency: "JPY", amountMinor: 200, fromMemberId: "debtor", toMemberId: "payer", note: "現金" });
+  const historical = inspectRepaymentDraft({ ...draft, date: "2026-11-07" }, data, now);
+  assert.equal(expenseDateInput(new Date(historical.prepared.occurredAt)), "2026-11-07");
+  assert.equal(inspectRepaymentDraft({ ...draft, date: "2026-11-09" }, data, now).errors.date, "INVALID_EVENT_TIME");
+  for (const [amount, code] of [["0", "NON_POSITIVE_AMOUNT"], ["-1", "NEGATIVE_AMOUNT"], ["200.5", "INVALID_AMOUNT_PRECISION"], ["501", "TRANSFER_EXCEEDS_BALANCE"]]) {
+    assert.equal(inspectRepaymentDraft({ ...draft, amount }, data, now).errors.amount, code);
+  }
 }));

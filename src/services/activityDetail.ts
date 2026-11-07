@@ -68,7 +68,8 @@ export function loadActivityDetail(activityId: string, database?: LocalDatabase)
         });
       } else if (event.kind === "memberTransfer") {
         history.push({
-          id: `transfer:${event.id}`, label: "成員還款", description: `${memberName(event.fromMemberId)} → ${memberName(event.toMemberId)}`,
+          id: `transfer:${event.id}`, label: "成員還款",
+          description: `${memberName(event.fromMemberId)} → ${memberName(event.toMemberId)}${event.note ? ` · ${event.note}` : ""}`,
           occurredAt, sequence, amountMinor: event.amountMinor, voided: voided.has(event.id),
         });
       } else if (event.kind === "financialVoid") {

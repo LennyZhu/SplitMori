@@ -196,10 +196,11 @@ function PickerField({ label, value, onPress, compact = false }: {
   );
 }
 
-function MemberPicker({ title, members, labels, selected, onSelect, onClose, onClear }: {
+export function MemberPicker({ title, members, labels, selected, onSelect, onClose, onClear,
+  emptyText = "目前沒有可選成員，請先清除其他對應。" }: {
   title: string; members: readonly ActivityMember[]; selected?: string; onSelect: (id: string) => void;
   labels: ReadonlyMap<string, string>;
-  onClose: () => void; onClear?: () => void;
+  onClose: () => void; onClear?: () => void; emptyText?: string;
 }) {
   const { top, bottom, left, right } = useSafeAreaInsets();
   return (
@@ -219,7 +220,7 @@ function MemberPicker({ title, members, labels, selected, onSelect, onClose, onC
                 {id === selected && <Icon name="check" size={17} />}
               </Pressable>
             ))}
-            {members.length === 0 && <Text style={styles.caption}>目前沒有可選成員，請先清除其他對應。</Text>}
+            {members.length === 0 && <Text style={styles.caption}>{emptyText}</Text>}
             {onClear && <Pressable accessibilityRole="button" onPress={onClear} style={styles.retry}><Text style={styles.label}>清除對應</Text></Pressable>}
           </ScrollView>
         </View>
@@ -249,7 +250,7 @@ function conversionError(code: DomainErrorCode): string {
 
 type Picker = { kind: "payer" } | { kind: "mapping"; sourceId: string };
 
-function memberLabels(members: readonly { id: string; displayName: string }[]) {
+export function memberLabels(members: readonly { id: string; displayName: string }[]) {
   const counts = new Map<string, number>();
   for (const { displayName } of members) counts.set(displayName, (counts.get(displayName) ?? 0) + 1);
   return new Map(members.map(({ id, displayName }, index) => [

@@ -218,4 +218,7 @@ export const migrations = [
   `
   ALTER TABLE expenses ADD COLUMN name TEXT CHECK (name IS NULL OR length(trim(name)) > 0);
   `,
+  `
+  ALTER TABLE member_transfers ADD COLUMN note TEXT;
+  `,
 ] as const;

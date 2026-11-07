@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>SplitMori S10 Phase 3B6B — V3.2 參考</title>
+<style>
+:root {color-scheme:light; --text:#282828;--muted:#575757;--line:#E7E5E2;}
+*{box-sizing:border-box} body{margin:0;background:#FDFCFB;color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'PingFang TC','Noto Sans TC',sans-serif;}
+main{max-width:1480px;margin:auto;padding:26px 24px 72px} h1{font-size:26px;margin:0 0 8px} p{color:var(--muted);line-height:1.65}
+.board{width:100%;border:1px solid var(--line);border-radius:20px;background:white;display:block}
+.gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin:22px 0}
+figure{margin:0;padding:10px;background:#fff;border:1px solid var(--line);border-radius:16px} figure img{width:100%;height:auto;display:block} figcaption{text-align:center;padding:8px 0 3px;font-size:14px;font-weight:600}
+.card{padding:18px 22px;border:1px solid var(--line);background:white;border-radius:16px;margin-top:18px} li{margin:6px 0;line-height:1.5}
+</style></head><body><main>
+<h1>SplitMori · S10 記錄還款</h1>
+<p>Phase 3B6B · 使用者已批准的 V3.2 高保真。此檔僅為視覺與流程參考，不含真實帳務互動或付款能力。頁面數字皆為示例，正式 App 必須從 SQLite 真實帳本獲取。</p>
+<img class="board" src="S10_Repayment_Hifi_V3_2.png" alt="S10 全部高保真流程"/>
+<div class="gallery"><figure><img src="S10_01_Entry.png" alt="入口：從 S09 轉帳建議"/><figcaption>1. 入口：從 S09 轉帳建議</figcaption></figure>
+<figure><img src="S10_02_Form.png" alt="記錄還款表單"/><figcaption>2. 記錄還款表單</figcaption></figure>
+<figure><img src="S10_03_Confirm.png" alt="確認還款 Sheet"/><figcaption>3. 確認還款 Sheet</figcaption></figure>
+<figure><img src="S10_04_Success.png" alt="記錄成功"/><figcaption>4. 記錄成功</figcaption></figure>
+<figure><img src="S10_05_UpdatedSettlement.png" alt="返回 S09：部分還款後"/><figcaption>5. 返回 S09：部分還款後</figcaption></figure></div>
+<section class="card"><h2>開發時必須守住的規則</h2><ul>
+<li>S09 的建議只是建議；用戶已在現實中轉帳，才可提交記錄。</li>
+<li>預填付款人、收款人和建議金額；允許部分還款及當天/實際日期、備註。</li>
+<li>二次確認必須寫「此操作只會記錄轉帳，不會代你轉帳。」</li>
+<li>同一次提交 ID 幂等，超額與競態寫入在 SQLite 交易內拒絕。</li>
+<li>真實已完成活動亦可登記還款，不更動歷史費用與活動總額。</li>
+<li>示例 b → a HKD 200 後，應收應付從 560 降到 360；有效費用 1,120 不變。</li>
+<li>錯誤還款事件「作廢 + 重登」UI 保留下一小階段。</li>
+</ul></section>
+</main></body></html>

@@ -4,10 +4,12 @@ import { BackHandler, Pressable, StatusBar, StyleSheet, Text, View } from "react
 import { initialWindowMetrics, SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { createActivityRepository, type ActivityCreationBlocker } from "./src/data/activities.ts";
 import { getLocalDatabase } from "./src/data/database.ts";
+import type { TransferSuggestion } from "./src/domain/settlement.ts";
 import type { QuickSplitPreview } from "./src/services/quickSplitEditor.ts";
 import { ActivityDetailScreen } from "./src/ui/ActivityDetailScreen.tsx";
 import { ActivityListScreen } from "./src/ui/ActivityListScreen.tsx";
 import { ActivityMembersScreen } from "./src/ui/ActivityMembersScreen.tsx";
+import { ActivityRepaymentScreen } from "./src/ui/ActivityRepaymentScreen.tsx";
 import { ActivitySettlementScreen } from "./src/ui/ActivitySettlementScreen.tsx";
 import { ActivityQuotaSheet } from "./src/ui/ActivityQuotaSheet.tsx";
 import { CreateActivityScreen } from "./src/ui/CreateActivityScreen.tsx";
@@ -50,12 +52,14 @@ type ActivityDetailRoute = {
   resumeCreation?: boolean;
   previous?: ActivityDetailRoute | QuickHistoryRoute;
 };
+type ActivitySettlementRoute = { name: "activitySettlement"; previous: ActivityDetailRoute; initialTab?: "transfers" };
 type Route =
   | { name: Tab | "settings" }
   | { name: "createActivity"; origin: ActivityOrigin }
   | { name: "createExpense"; previous: ActivityDetailRoute }
   | { name: "activityMembers"; previous: ActivityDetailRoute }
-  | { name: "activitySettlement"; previous: ActivityDetailRoute }
+  | ActivitySettlementRoute
+  | { name: "activityRepayment"; previous: ActivitySettlementRoute; suggestion: TransferSuggestion }
   | { name: "quickSplit"; focusPayer?: boolean }
   | QuickResultRoute
   | QuickHistoryRoute
@@ -66,7 +70,8 @@ function backRoute(route: Route): Route {
   if (route.name === "quickResult") return { name: "quickSplit" };
   if (route.name === "quickHistory") return { name: route.origin ?? "home" };
   if (route.name === "quickConversion") return route.previous;
-  if (route.name === "createExpense" || route.name === "activityMembers" || route.name === "activitySettlement") return route.previous;
+  if (route.name === "createExpense" || route.name === "activityMembers" || route.name === "activitySettlement"
+    || route.name === "activityRepayment") return route.previous;
   if (route.name === "activityDetails" && route.previous) return route.previous;
   if (route.name === "activityDetails" && route.resumeCreation) {
     return { name: "createActivity", origin: route.origin ?? "home" };
@@ -127,7 +132,8 @@ function App() {
   const inQuickSplit = quickRoute.name === "quickSplit" || quickRoute.name === "quickResult";
   const isQuickResult = quickRoute.name === "quickResult";
   const activeTab = tabs.find((tab) => tab.name === route.name)?.name;
-  const activityRoute = route.name === "createExpense" || route.name === "activityMembers" || route.name === "activitySettlement" ? route.previous : route;
+  const activityRoute = route.name === "activityRepayment" ? route.previous.previous
+    : route.name === "createExpense" || route.name === "activityMembers" || route.name === "activitySettlement" ? route.previous : route;
   const createOrigin = activityRoute.name === "createActivity" || (activityRoute.name === "activityDetails" && activityRoute.resumeCreation)
     ? activityRoute.origin ?? "home" : undefined;
   const activityDetails = route.name === "activityDetails" ? (
@@ -138,7 +144,7 @@ function App() {
       })}
       onAddExpense={() => setRoute({ name: "createExpense", previous: route })}
       onManageMembers={() => setRoute({ name: "activityMembers", previous: route })}
-      onViewSettlement={() => setRoute({ name: "activitySettlement", previous: route })}
+      onViewSettlement={(initialTab) => setRoute({ name: "activitySettlement", previous: route, initialTab })}
     />
   ) : route.name === "createExpense" ? (
     <CreateExpenseScreen key={route.previous.id} activityId={route.previous.id}
@@ -146,7 +152,13 @@ function App() {
   ) : route.name === "activityMembers" ? (
     <ActivityMembersScreen key={route.previous.id} activityId={route.previous.id} onBack={() => setRoute(route.previous)} />
   ) : route.name === "activitySettlement" ? (
-    <ActivitySettlementScreen key={route.previous.id} activityId={route.previous.id} onBack={() => setRoute(route.previous)} />
+    <ActivitySettlementScreen key={route.previous.id} activityId={route.previous.id} initialTab={route.initialTab}
+      onBack={() => setRoute(route.previous)} onRecordRepayment={(suggestion) => setRoute({ name: "activityRepayment", suggestion,
+        previous: { ...route, initialTab: "transfers" },
+      })} />
+  ) : route.name === "activityRepayment" ? (
+    <ActivityRepaymentScreen key={route.previous.previous.id} activityId={route.previous.previous.id}
+      suggestion={route.suggestion} onBack={() => setRoute(route.previous)} />
   ) : null;
   const conversion = route.name === "quickConversion" ? (
     <QuickSplitConversionScreen key={route.historyId} historyId={route.historyId}
