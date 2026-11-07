@@ -56,10 +56,11 @@ function Section({ title, children, action }: { title: string; children: ReactNo
   );
 }
 
-export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAddExpense, onManageMembers }: {
+export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAddExpense, onManageMembers, onViewSettlement }: {
   activityId: string; onBack: () => void; onViewExisting: (blocker: ActivityCreationBlocker) => void;
   onAddExpense: () => void;
   onManageMembers: () => void;
+  onViewSettlement: () => void;
 }) {
   const [data, setData] = useState<ActivityDetailData | null>();
   const [loading, setLoading] = useState(true);
@@ -192,12 +193,12 @@ export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAdd
                 <View style={styles.stateCopy}>
                   <Text style={styles.strong}>{!hasExpenses ? "暫無財務紀錄"
                     : hasOutstanding ? (active ? "款項尚未結清" : "活動已完成 · 款項尚未結清") : "已結清"}</Text>
-                  <Text style={styles.caption}>{!hasExpenses ? "新增費用後可查看結算。"
+                  <Text style={styles.caption}>{!hasExpenses ? "新增費用後會更新結算資料。"
                     : hasOutstanding ? `待結算 ${money(data.outstandingMinor)}` : "各成員目前淨額為零。"}</Text>
                 </View>
-                {hasExpenses && <Pressable accessibilityRole="button" style={styles.textButton} onPress={() => showPlaceholder("查看結算")}>
+                <Pressable accessibilityRole="button" style={styles.textButton} onPress={onViewSettlement}>
                   <Text style={styles.link}>查看結算</Text><Icon name="next" size={14} />
-                </Pressable>}
+                </Pressable>
               </View>
             </View>
 
@@ -282,14 +283,14 @@ export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAdd
           <View style={styles.footerActions}>
             {active ? (
               <>
-                {hasExpenses && <Action title="查看結算" onPress={() => showPlaceholder("查看結算")} />}
+                {hasExpenses && <Action title="查看結算" onPress={onViewSettlement} />}
                 <Action title="新增費用" icon="plus" primary onPress={onAddExpense} disabled={working} />
               </>
             ) : (
               <>
                 <Action title={working ? "正在處理…" : "重新開啟"} disabled={working} onPress={() => { void changeStatus(false); }} />
                 {hasExpenses && <Action title={hasOutstanding ? "記錄還款" : "查看結算"} primary
-                  onPress={() => showPlaceholder(hasOutstanding ? "記錄還款" : "查看結算")} />}
+                  onPress={hasOutstanding ? () => showPlaceholder("記錄還款") : onViewSettlement} />}
               </>
             )}
           </View>

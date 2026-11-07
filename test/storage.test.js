@@ -21,6 +21,7 @@ import { createBackupService, inspectBackupDatabase, inspectStandaloneBackup } f
 import { loadActivityList } from "../src/services/activityList.ts";
 import { loadActivityDetail } from "../src/services/activityDetail.ts";
 import { loadActivityMembers } from "../src/services/activityMembers.ts";
+import { loadActivitySettlement } from "../src/services/activitySettlement.ts";
 import { createExpenseEditor, expenseDateInput, expenseDateTimestamp, prepareNewExpense } from "../src/services/expenseEditor.ts";
 import { createQuickHistorySave } from "../src/services/quickHistorySave.ts";
 import { canSelectConversionTarget, createQuickSplitConversionService } from "../src/services/quickSplitConversion.ts";
@@ -1694,4 +1695,99 @@ test("adding members makes an existing four-person quick history eligible withou
   }
   assert.deepEqual(valueOf(await quick.getQuickHistory("four")), history);
   assert.equal(valueOf(await finance.getActivityLedger("trip")).events.length, 1);
+}));
+
+test("S09 reads the four-person ledger and stays unsettled when an activity is completed", withFinance(async (finance, activities, database) => {
+  valueOf(await finance.createExpense("trip", 100, expense("first", 56_000)));
+  valueOf(await finance.createExpense("trip", 200, expense("second", 56_000)));
+  await activities.addMembers("trip", [{ id: "chris", displayName: "Chris" }, { id: "d", displayName: "d" }]);
+  const open = await loadActivitySettlement("trip", database);
+  assert.equal(open.activity.status, "active");
+  assert.equal(open.status, "unsettled");
+  assert.deepEqual([open.expenseCount, open.effectiveMinor, open.outstandingMinor, open.refundMinor, open.repaymentMinor],
+    [2, 112_000n, 56_000n, 0n, 0n]);
+  assert.deepEqual(open.members.map(({ memberId, merchantPaidMinor, allocatedMinor, netBalanceMinor }) =>
+    [memberId, merchantPaidMinor, allocatedMinor, netBalanceMinor]), [
+    ["z", 112_000, 56_000, 56_000], ["a", 0, 56_000, -56_000], ["chris", 0, 0, 0], ["d", 0, 0, 0],
+  ]);
+  assert.deepEqual(open.suggestions, [{ fromMemberId: "a", toMemberId: "z", currency: "HKD", amountMinor: 56_000 }]);
+
+  await activities.completeActivity("trip");
+  const completed = await loadActivitySettlement("trip", database);
+  assert.equal(completed.activity.status, "completed");
+  assert.equal(completed.status, "unsettled");
+  assert.equal(completed.outstandingMinor, open.outstandingMinor);
+  assert.deepEqual(completed.suggestions, open.suggestions);
+}));
+
+test("S09 separates partial and full repayments from expenses and ignores voided repayments", withFinance(async (finance, _activities, database) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  valueOf(await finance.recordMemberTransfer("trip", 200, { ...repayment, amountMinor: 2000 }));
+  const partial = await loadActivitySettlement("trip", database);
+  assert.equal(partial.status, "unsettled");
+  assert.deepEqual([partial.effectiveMinor, partial.repaymentMinor, partial.outstandingMinor], [10_000n, 2000n, 3000n]);
+  assert.deepEqual(partial.members.map(({ transferSentMinor, transferReceivedMinor }) => [transferSentMinor, transferReceivedMinor]),
+    [[0, 2000], [2000, 0]]);
+  assert.deepEqual(partial.suggestions, [{ fromMemberId: "a", toMemberId: "z", currency: "HKD", amountMinor: 3000 }]);
+
+  valueOf(await finance.recordMemberTransfer("trip", 300, { ...repayment, id: "remainder", amountMinor: 3000 }));
+  const settled = await loadActivitySettlement("trip", database);
+  assert.equal(settled.activity.status, "active");
+  assert.equal(settled.status, "settled");
+  assert.deepEqual([settled.effectiveMinor, settled.repaymentMinor, settled.outstandingMinor], [10_000n, 5000n, 0n]);
+  assert.deepEqual(settled.members.map(({ netBalanceMinor }) => netBalanceMinor), [0, 0]);
+  assert.deepEqual(settled.suggestions, []);
+  assert.deepEqual(settled.repayments.map(({ id }) => id), ["remainder", repayment.id]);
+
+  valueOf(await finance.voidMemberTransfer("trip", { id: "void-first", targetEventId: repayment.id, occurredAt: 400 }));
+  const reopenedBalance = await loadActivitySettlement("trip", database);
+  assert.equal(reopenedBalance.status, "unsettled");
+  assert.deepEqual([reopenedBalance.effectiveMinor, reopenedBalance.repaymentMinor, reopenedBalance.outstandingMinor],
+    [10_000n, 3000n, 2000n]);
+  assert.deepEqual(reopenedBalance.repayments.map(({ id }) => id), ["remainder"]);
+  assert.deepEqual(reopenedBalance.suggestions, [{ fromMemberId: "a", toMemberId: "z", currency: "HKD", amountMinor: 2000 }]);
+}));
+
+test("S09 uses revised expenses and effective refunds, including a different refund recipient", withFinance(async (finance, _activities, database) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  valueOf(await finance.recordMerchantRefund("trip", 200, { ...refund, recipientId: "a" }));
+  valueOf(await finance.commitExpenseCorrection("trip", correction(8000, { reviewedRefundIds: [refund.id] })));
+  const revised = await loadActivitySettlement("trip", database);
+  assert.deepEqual([revised.expenseCount, revised.effectiveMinor, revised.refundMinor, revised.outstandingMinor],
+    [1, 6000n, 2000n, 5000n]);
+  assert.deepEqual(revised.members.map(({ merchantPaidMinor, merchantRefundReceivedMinor, allocatedMinor, netBalanceMinor }) =>
+    [merchantPaidMinor, merchantRefundReceivedMinor, allocatedMinor, netBalanceMinor]), [
+    [8000, 0, 3000, 5000], [0, 2000, 3000, -5000],
+  ]);
+  assert.deepEqual(revised.suggestions, [{ fromMemberId: "a", toMemberId: "z", currency: "HKD", amountMinor: 5000 }]);
+  const detail = await loadActivityDetail("trip", database);
+  assert.deepEqual([detail.effectiveMinor, detail.refundMinor, detail.outstandingMinor],
+    [revised.effectiveMinor, revised.refundMinor, revised.outstandingMinor]);
+
+  valueOf(await finance.voidMerchantRefund("trip", { id: "void-refund", targetEventId: refund.id, occurredAt: 400 }));
+  const voided = await loadActivitySettlement("trip", database);
+  assert.deepEqual([voided.effectiveMinor, voided.refundMinor, voided.outstandingMinor], [8000n, 0n, 4000n]);
+  assert.deepEqual(voided.members.map(({ merchantRefundReceivedMinor }) => merchantRefundReceivedMinor), [0, 0]);
+}));
+
+test("S09 distinguishes an empty activity from a zero-yen expense with zero balances", withFinance(async (finance, activities, database) => {
+  const empty = await loadActivitySettlement("trip", database);
+  assert.equal(empty.status, "empty");
+  assert.deepEqual([empty.expenseCount, empty.effectiveMinor, empty.outstandingMinor], [0, 0n, 0n]);
+  assert.deepEqual(empty.members.map(({ memberId, netBalanceMinor }) => [memberId, netBalanceMinor]), [["z", 0], ["a", 0]]);
+  assert.deepEqual(empty.suggestions, []);
+  assert.equal(await loadActivitySettlement("missing", database), null);
+
+  await activities.completeActivity("trip");
+  await activities.createActivity({ id: "yen", name: "東京", currency: "JPY", members: [{ id: "j", displayName: "J" }] });
+  const total = { currency: "JPY", amountMinor: 0 };
+  valueOf(await finance.createExpense("yen", 100, {
+    id: "zero", split: valueOf(splitEqual(total, ["j"])), merchantPayment: { memberId: "j", ...total },
+    splitMode: "equal", allocationVersion: 1,
+  }));
+  const zero = await loadActivitySettlement("yen", database);
+  assert.equal(zero.activity.currency, "JPY");
+  assert.equal(zero.status, "settled");
+  assert.deepEqual([zero.expenseCount, zero.effectiveMinor, zero.outstandingMinor, zero.repaymentMinor], [1, 0n, 0n, 0n]);
+  assert.deepEqual(zero.suggestions, []);
 }));
