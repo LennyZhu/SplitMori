@@ -215,4 +215,7 @@ export const migrations = [
 
   CREATE INDEX financial_voids_timeline ON financial_voids(activity_id, occurred_at, sequence);
   `,
+  `
+  ALTER TABLE expenses ADD COLUMN name TEXT CHECK (name IS NULL OR length(trim(name)) > 0);
+  `,
 ] as const;

@@ -27,6 +27,7 @@ type RevisionRow = {
   occurredAt: number;
   sequence: number;
   expenseId: string;
+  expenseName: string | null;
   currency: Currency;
   amountMinor: number;
   splitMode: FinanceExpense["splitMode"];
@@ -37,13 +38,17 @@ type RevisionRow = {
   shareMinor: number | null;
 };
 
-export async function readExpenseRevisions(connection: SQLiteReader, activityId: string): Promise<StoredExpenseRevision[]> {
+export async function readExpenseRevisions(
+  connection: SQLiteReader, activityId: string, hasExpenseName = true,
+): Promise<StoredExpenseRevision[]> {
   const rows = await connection.getAllAsync<RevisionRow>(`
     SELECT r.id, r.version, r.occurred_at AS occurredAt, r.sequence, r.expense_id AS expenseId,
+           ${hasExpenseName ? "e.name" : "NULL"} AS expenseName,
            r.currency, r.amount_minor AS amountMinor, r.split_mode AS splitMode,
            r.allocation_version AS allocationVersion, r.payer_id AS payerId, r.paid_minor AS paidMinor,
            a.member_id AS memberId, a.amount_minor AS shareMinor
     FROM expense_revisions AS r
+    LEFT JOIN expenses AS e ON e.id = r.expense_id AND e.activity_id = r.activity_id
     LEFT JOIN expense_revision_allocations AS a ON a.revision_id = r.id AND a.activity_id = r.activity_id
     WHERE r.activity_id = ? ORDER BY r.sequence, a.position
   `, activityId);
@@ -51,13 +56,14 @@ export async function readExpenseRevisions(connection: SQLiteReader, activityId:
   let previousId: string | undefined;
   let allocations: Allocation[] = [];
   for (const row of rows) {
-    const { id, version, occurredAt, sequence, expenseId, currency, amountMinor, splitMode, allocationVersion,
+    const { id, version, occurredAt, sequence, expenseId, expenseName, currency, amountMinor, splitMode, allocationVersion,
       payerId, paidMinor, memberId, shareMinor } = row;
     if (memberId === null || shareMinor === null) throw new Error(`Missing allocations for expense revision ${id}`);
     if (id !== previousId) {
       allocations = [];
       revisions.push({ kind: "expenseRevision", id, version, occurredAt, sequence, expense: {
-        id: expenseId, splitMode, allocationVersion, split: { total: { currency, amountMinor }, allocations },
+        id: expenseId, splitMode, allocationVersion, ...(expenseName === null ? {} : { name: expenseName }),
+        split: { total: { currency, amountMinor }, allocations },
         merchantPayment: { memberId: payerId, currency, amountMinor: paidMinor },
       } });
       previousId = id;
@@ -73,7 +79,7 @@ export async function insertExpenseRevision(
     readonly refundReview: string;
   },
 ): Promise<StoredExpenseRevision> {
-  const { split, merchantPayment, splitMode, allocationVersion } = expense;
+  const { split, merchantPayment, splitMode, allocationVersion, name } = expense;
   const { currency, amountMinor } = split.total;
   const row = await transaction.getFirstAsync<{ sequence: number }>(`
     INSERT INTO expense_revisions (sequence, id, activity_id, expense_id, version, occurred_at,
@@ -96,7 +102,8 @@ export async function insertExpenseRevision(
   }
   return {
     kind: "expenseRevision", id, version, occurredAt, sequence: row.sequence,
-    expense: { id: expense.id, splitMode, allocationVersion, split: { total: { currency, amountMinor }, allocations },
+    expense: { id: expense.id, splitMode, allocationVersion, ...(name === undefined ? {} : { name }),
+      split: { total: { currency, amountMinor }, allocations },
       merchantPayment: { memberId: merchantPayment.memberId, currency, amountMinor: merchantPayment.amountMinor } },
   };
 }

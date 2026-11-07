@@ -17,6 +17,8 @@ import {
 
 const splitModes = ["equal", "treat", "individual", "custom"] as const;
 export type FinanceExpense = Expense & {
+  /** Display metadata of the original expense, shared by its financial revisions. */
+  readonly name?: string;
   readonly splitMode: typeof splitModes[number];
   readonly allocationVersion: number;
 };
@@ -58,7 +60,13 @@ export type ExpenseCorrectionRequest = {
   readonly reviewedRefundIds?: readonly string[];
 };
 
-export type FinanceCorrectionPreview = ExpenseCorrectionPreview & { readonly currentVersion: number };
+export type FinanceCorrectionPreview = Omit<ExpenseCorrectionPreview, "expense"> & {
+  readonly currentVersion: number;
+  readonly expense: ExpenseCorrectionPreview["expense"] & {
+    readonly before: FinanceExpense;
+    readonly after: FinanceExpense;
+  };
+};
 
 type LedgerEntry = AuditEvent | StoredExpenseRevision;
 
@@ -106,6 +114,7 @@ type EventRow = {
   sequence: number;
   amountMinor: number | null;
   expenseCurrency: Currency | null;
+  expenseName: string | null;
   splitMode: FinanceExpense["splitMode"] | null;
   allocationVersion: number | null;
   expenseId: string | null;
@@ -136,12 +145,13 @@ function groupAllocations(rows: readonly (Allocation & { ownerId: string })[]): 
   return groups;
 }
 
-async function readEvents(connection: SQLiteReader, activity: ActivityContext): Promise<StoredFinanceEvent[]> {
+async function readEvents(connection: SQLiteReader, activity: ActivityContext, hasExpenseName = true): Promise<StoredFinanceEvent[]> {
   const { id: activityId, currency } = activity;
   const rows = await connection.getAllAsync<EventRow>(`
     SELECT f.id, f.kind, f.occurred_at AS occurredAt, f.sequence,
            COALESCE(e.amount_minor, r.amount_minor, t.amount_minor) AS amountMinor,
-           e.currency AS expenseCurrency, e.split_mode AS splitMode, e.allocation_version AS allocationVersion,
+           e.currency AS expenseCurrency, ${hasExpenseName ? "e.name" : "NULL"} AS expenseName,
+           e.split_mode AS splitMode, e.allocation_version AS allocationVersion,
            r.expense_id AS expenseId, r.recipient_id AS recipientId,
            t.from_member_id AS fromMemberId, t.to_member_id AS toMemberId
     FROM financial_events AS f
@@ -176,6 +186,7 @@ async function readEvents(connection: SQLiteReader, activity: ActivityContext): 
         return {
           ...order, kind, expense: {
             id, splitMode: row.splitMode, allocationVersion: row.allocationVersion,
+            ...(row.expenseName === null ? {} : { name: row.expenseName }),
             split: { total: { currency: row.expenseCurrency, amountMinor }, allocations: expenseAllocations },
             merchantPayment: { ...merchantPayments[0], currency: row.expenseCurrency },
           },
@@ -202,8 +213,8 @@ export async function validateStoredLedgers(connection: SQLiteReader, schemaVers
   for (const { id } of rows) {
     const activity = await readActivity(connection, id);
     if (!activity) return failure("ACTIVITY_NOT_FOUND", "activityId");
-    const events = schemaVersion >= 2 ? await readEvents(connection, activity) : [];
-    const revisions = schemaVersion >= 3 ? await readExpenseRevisions(connection, id) : [];
+    const events = schemaVersion >= 2 ? await readEvents(connection, activity, schemaVersion >= 7) : [];
+    const revisions = schemaVersion >= 3 ? await readExpenseRevisions(connection, id, schemaVersion >= 7) : [];
     const voids = schemaVersion >= 6 ? await readFinancialVoids(connection, id) : [];
     const balances = calculateBalances(activity.currency, activity.memberIds, [], orderedTimeline(events, revisions, voids));
     if (!balances.ok) return balances;
@@ -223,7 +234,7 @@ function sameAllocations(saved: readonly Allocation[], requested: readonly Alloc
 
 function sameEvent(saved: FinanceEvent, requested: FinanceEvent): boolean {
   if (saved.kind === "expense" && requested.kind === "expense") {
-    return sameExpense(saved.expense, requested.expense);
+    return saved.expense.name === requested.expense.name && sameExpense(saved.expense, requested.expense);
   }
   if (saved.kind === "merchantRefund" && requested.kind === "merchantRefund") {
     return saved.expenseId === requested.expenseId && saved.recipientId === requested.recipientId
@@ -277,12 +288,12 @@ async function insertEvent(
   const order = { occurredAt, sequence: inserted.sequence };
 
   if (event.kind === "expense") {
-    const { split, merchantPayment, splitMode, allocationVersion } = event.expense;
+    const { split, merchantPayment, splitMode, allocationVersion, name } = event.expense;
     const { currency, amountMinor } = split.total;
     await transaction.runAsync(`
-      INSERT INTO expenses (id, activity_id, currency, amount_minor, split_mode, allocation_version)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `, id, activityId, currency, amountMinor, splitMode, allocationVersion);
+      INSERT INTO expenses (id, activity_id, currency, amount_minor, split_mode, allocation_version, name)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `, id, activityId, currency, amountMinor, splitMode, allocationVersion, name ?? null);
 
     const amounts = new Map(split.allocations.map((allocation) => [allocation.memberId, allocation.amountMinor]));
     const allocations: Allocation[] = [];
@@ -300,7 +311,8 @@ async function insertEvent(
     `, activityId, id, merchantPayment.memberId, merchantPayment.amountMinor);
     return {
       ...order, kind: "expense", expense: {
-        id, splitMode, allocationVersion, split: { total: { currency, amountMinor }, allocations },
+        id, splitMode, allocationVersion, ...(name === undefined ? {} : { name }),
+        split: { total: { currency, amountMinor }, allocations },
         merchantPayment: { memberId: merchantPayment.memberId, currency, amountMinor: merchantPayment.amountMinor },
       },
     };
@@ -348,6 +360,10 @@ async function recordInTransaction(
     return event.kind === "expense" ? failure("INVALID_EXPENSE_ID", "expenseId") : failure("INVALID_EVENT_ID", "eventId");
   }
   if (!Number.isSafeInteger(occurredAt) || occurredAt < 0) return failure("INVALID_EVENT_TIME", "occurredAt");
+  if (event.kind === "expense" && event.expense.name !== undefined
+    && (typeof event.expense.name !== "string" || event.expense.name.trim() === "")) {
+    return failure("INVALID_EXPENSE_NAME", "expenseName");
+  }
 
   const existing = await transaction.getFirstAsync<{ activityId: string }>(
     "SELECT activity_id AS activityId FROM financial_events WHERE id = ?", id,
@@ -476,12 +492,18 @@ export function createFinanceRepository(database: LocalDatabase) {
 
     const latest = latestRevision(revisions, expenseId);
     const current = currentExpense(original, latest);
+    const { name: _requestedName, ...financialSnapshot } = proposed;
+    const name = original.expense.name;
+    const replacement = { ...financialSnapshot, ...(name === undefined ? {} : { name }) };
     const preview = previewExpenseCorrection({
       currency: activity.currency, memberIds: activity.memberIds, expenses: [],
-      events: orderedTimeline(events, revisions, voids), original: current.expense, proposed,
+      events: orderedTimeline(events, revisions, voids), original: current.expense, proposed: replacement,
     });
     if (!preview.ok) return preview;
-    return { ok: true, value: { ...preview.value, currentVersion: current.currentVersion } };
+    return { ok: true, value: {
+      ...preview.value, currentVersion: current.currentVersion,
+      expense: { ...preview.value.expense, before: current.expense, after: replacement },
+    } };
   }
 
   function commitExpenseCorrection(activityId: string, request: ExpenseCorrectionRequest): Promise<Result<StoredExpenseRevision>> {
@@ -518,7 +540,7 @@ export function createFinanceRepository(database: LocalDatabase) {
       const events = await readEvents(transaction, activity);
       const voids = await readFinancialVoids(transaction, activityId);
       const original = events.find((event) => event.kind === "expense" && event.expense.id === expenseId);
-      if (!original) return failure("EXPENSE_NOT_FOUND", "expenseId");
+      if (original?.kind !== "expense") return failure("EXPENSE_NOT_FOUND", "expenseId");
       const latest = latestRevision(revisions, expenseId);
       const currentVersion = latest?.version ?? 1;
       if (currentVersion !== expectedVersion) return failure("EXPENSE_VERSION_CONFLICT", "expectedVersion");
@@ -537,7 +559,7 @@ export function createFinanceRepository(database: LocalDatabase) {
       }
 
       const saved = await insertExpenseRevision(transaction, activityId, activity.memberIds, {
-        id: revisionId, version: currentVersion + 1, occurredAt, expense: proposed, refundReview,
+        id: revisionId, version: currentVersion + 1, occurredAt, expense: after, refundReview,
       });
       return { ok: true, value: saved };
     }));

@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { ActiveActivityLimitError, createActivityRepository } from "../src/data/activities.ts";
 import { backupSnapshotName, DatabaseInitializationError, initializeDatabase } from "../src/data/database.ts";
 import { createDatabaseHost, databaseName, restoreFiles } from "../src/data/databaseHost.ts";
-import { createFinanceRepository } from "../src/data/finance.ts";
+import { createFinanceRepository, validateStoredLedgers } from "../src/data/finance.ts";
 import { migrations } from "../src/data/migrations.ts";
 import { createQuickSplitRepository } from "../src/data/quickSplits.ts";
 import { calculateQuickSplit } from "../src/domain/quickSplit.ts";
@@ -20,6 +20,7 @@ import { splitEqual } from "../src/domain/split.ts";
 import { createBackupService, inspectBackupDatabase, inspectStandaloneBackup } from "../src/services/backup.ts";
 import { loadActivityList } from "../src/services/activityList.ts";
 import { loadActivityDetail } from "../src/services/activityDetail.ts";
+import { createExpenseEditor, expenseDateInput, expenseDateTimestamp, prepareNewExpense } from "../src/services/expenseEditor.ts";
 import { createQuickHistorySave } from "../src/services/quickHistorySave.ts";
 import { createQuickSplitConversionService } from "../src/services/quickSplitConversion.ts";
 import { createRestoreService } from "../src/services/restore.ts";
@@ -66,7 +67,7 @@ test("activity/member writes survive closing and reopening SQLite", withTestFile
   try {
     const database = await initializeDatabase(connection);
     const repository = createActivityRepository(database);
-    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 6);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, migrations.length);
     assert.equal((await connection.getFirstAsync("PRAGMA journal_mode")).journal_mode, "wal");
     assert.equal((await connection.getFirstAsync("PRAGMA foreign_keys")).foreign_keys, 1);
 
@@ -93,7 +94,7 @@ test("activity/member writes survive closing and reopening SQLite", withTestFile
     connection.close();
     connection = openTestConnection(path);
     const reopened = createActivityRepository(await initializeDatabase(connection));
-    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 6);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, migrations.length);
     assert.deepEqual((await reopened.listActivities()).map(({ id }) => id), ["dinner"]);
     const saved = await reopened.getActivity("dinner");
     assert.equal(saved.name, "Friday dinner");
@@ -191,7 +192,7 @@ test("forward migrations preserve v1 activities and a saved expense survives reo
     connection.close();
     connection = openTestConnection(path);
     const reopened = createFinanceRepository(await initializeDatabase(connection));
-    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 6);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, migrations.length);
     assert.deepEqual(valueOf(await reopened.listExpenses("trip")), [{ ...saved, currentVersion: 1 }]);
     assert.deepEqual(valueOf(await reopened.getExpense("trip", "dinner")), {
       ...saved, currentVersion: 1, refunds: [], refundVoids: [],
@@ -408,7 +409,7 @@ test("v2 expenses form version one and corrected history survives reopening SQLi
     connection.close();
     connection = openTestConnection(path);
     const reopened = createFinanceRepository(await initializeDatabase(connection));
-    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 6);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, migrations.length);
     assert.deepEqual(valueOf(await reopened.listExpenseRevisions("trip", "dinner")), [baseline, revised]);
     const ledger = valueOf(await reopened.getActivityLedger("trip"));
     assert.deepEqual(ledger.balanceSnapshot.balances.map(({ netBalanceMinor }) => netBalanceMinor), [-2000, 2000]);
@@ -475,7 +476,7 @@ test("v4 quick snapshots retain members, rounding and draft inputs after reopeni
     connection.close();
     connection = openTestConnection(path);
     const reopened = createQuickSplitRepository(await initializeDatabase(connection));
-    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 6);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, migrations.length);
     assert.deepEqual(valueOf(await reopened.getQuickDraft()), draft);
     assert.deepEqual(valueOf(await reopened.getQuickHistory("history")), saved);
     assert.equal(saved.input.members[0].displayName, "Alex");
@@ -804,7 +805,7 @@ test("v6 migration and reopening preserve the original event and its void record
     connection.close();
     connection = openTestConnection(path);
     const reopened = createFinanceRepository(await initializeDatabase(connection));
-    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 6);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, migrations.length);
     assert.deepEqual(valueOf(await reopened.listEvents("trip")), [...original, reversal]);
     assert.deepEqual(valueOf(await reopened.voidMemberTransfer("trip", request)), reversal);
     assert.deepEqual(valueOf(await reopened.getActivityLedger("trip")).balanceSnapshot.balances.map(
@@ -923,7 +924,7 @@ test("WAL backup preserves every ledger and quick-split record without changing 
   const { uri, manifest } = valueOf(await service.exportBackup(database, { destinationDirectoryUri: dirname(path) }));
   const exportedBytes = readFileSync(uri);
   assert.match(uri, /\.splitmori-backup$/);
-  assert.equal(manifest.schemaVersion, 6);
+  assert.equal(manifest.schemaVersion, migrations.length);
   const preview = valueOf(await service.previewBackup(uri));
   assert.deepEqual(preview.manifest, manifest);
   assert.ok(preview.fileModifiedAt > 0);
@@ -1027,7 +1028,7 @@ test("backup validation checks SQLite schema, foreign keys, and financial totals
     ["DROP TABLE quick_history", "BACKUP_SCHEMA_MISMATCH"],
     ["UPDATE merchant_payments SET member_id = 'missing'", "BACKUP_FOREIGN_KEYS_FAILED"],
     ["UPDATE expense_allocations SET amount_minor = 4999 WHERE member_id = 'a'", "BACKUP_LEDGER_INVALID"],
-    ["PRAGMA user_version = 7", "UNSUPPORTED_BACKUP_VERSION"],
+    [`PRAGMA user_version = ${migrations.length + 1}`, "UNSUPPORTED_BACKUP_VERSION"],
   ]) {
     writeFileSync(altered, payload);
     const connection = openTestConnection(altered);
@@ -1364,6 +1365,100 @@ test("new activity detail keeps all stable members with zero expense and outstan
   assert.deepEqual(detail.expenses, []);
   assert.deepEqual(detail.history, []);
   assert.deepEqual([detail.grossMinor, detail.refundMinor, detail.effectiveMinor, detail.outstandingMinor], [0n, 0n, 0n, 0n]);
+}));
+
+test("S08 saves a named HKD 560 expense exactly once and refreshes the activity ledger", withFinance(async (finance, activities, database, _connection, reopen) => {
+  const editor = { ...createExpenseEditor(await activities.getActivity("trip")), finalTotal: "560.00", merchantPayerId: "z" };
+  const entry = valueOf(prepareNewExpense("dinner", " 晚餐 ", editor));
+  const [saved, retry] = await Promise.all([finance.createExpense("trip", 100, entry), finance.createExpense("trip", 100, entry)]);
+  assert.deepEqual(valueOf(saved), valueOf(retry));
+  assert.equal((await finance.createExpense("trip", 100, { ...entry, name: "另一名稱" })).error.code, "EVENT_ID_CONFLICT");
+
+  const detail = await loadActivityDetail("trip", database);
+  assert.deepEqual(detail.expenses.map(({ name, payerName }) => [name, payerName]), [["晚餐", "Alex"]]);
+  assert.equal(detail.effectiveMinor, 56_000n);
+  assert.deepEqual([...detail.balances], [["z", 28_000], ["a", -28_000]]);
+  const ledger = valueOf(await finance.getActivityLedger("trip"));
+  assert.deepEqual(ledger.suggestions, [{ fromMemberId: "a", toMemberId: "z", currency: "HKD", amountMinor: 28_000 }]);
+
+  const request = correction(50_000);
+  assert.equal(valueOf(await finance.previewExpenseCorrection("trip", "dinner", request.proposed)).expense.after.name, "晚餐");
+  assert.equal(valueOf(await finance.commitExpenseCorrection("trip", request)).expense.name, "晚餐");
+  const reopened = await reopen();
+  assert.deepEqual(valueOf(await reopened.listExpenseRevisions("trip", "dinner")).map(({ expense }) => expense.name), ["晚餐", "晚餐"]);
+  assert.equal(valueOf(await reopened.getExpense("trip", "dinner")).expense.name, "晚餐");
+}));
+
+test("S08 requires a merchant payer and accepts a payer outside the selected split", withFinance(async (finance, activities) => {
+  const editor = { ...createExpenseEditor(await activities.getActivity("trip")), finalTotal: "560.00" };
+  assert.equal(prepareNewExpense("dinner", "晚餐", editor).error.code, "MISSING_MERCHANT_PAYMENT");
+  const entry = valueOf(prepareNewExpense("dinner", "晚餐", {
+    ...editor, merchantPayerId: "z", members: editor.members.map((member) => ({ ...member, included: member.id === "a" })),
+  }));
+  assert.equal((await finance.createExpense("trip", 100, { ...entry, merchantPayment: undefined })).error.code, "MISSING_MERCHANT_PAYMENT");
+  assert.equal((await finance.createExpense("trip", 100, { ...entry, merchantPayment: { ...entry.merchantPayment, memberId: "outside" } })).error.code, "MEMBER_NOT_PARTICIPATING");
+  assert.deepEqual(valueOf(await finance.listExpenses("trip")), []);
+  assert.deepEqual(valueOf(await finance.createExpense("trip", 100, entry)).expense.merchantPayment, {
+    memberId: "z", currency: "HKD", amountMinor: 56_000,
+  });
+  assert.deepEqual(valueOf(await finance.listExpenses("trip"))[0].expense.split.allocations, [{ memberId: "a", amountMinor: 56_000 }]);
+}));
+
+test("S08 rejects a completed activity without writing a partial expense", withFinance(async (finance, activities, _database, connection) => {
+  const editor = { ...createExpenseEditor(await activities.getActivity("trip")), finalTotal: "560", merchantPayerId: "z" };
+  await activities.completeActivity("trip");
+  assert.equal((await finance.createExpense("trip", 100, valueOf(prepareNewExpense("dinner", "晚餐", editor)))).error.code, "ACTIVITY_COMPLETED");
+  for (const table of ["financial_events", "expenses", "expense_allocations", "merchant_payments"]) {
+    assert.equal((await connection.getFirstAsync(`SELECT COUNT(*) AS count FROM ${table}`)).count, 0);
+  }
+}));
+
+test("v7 migrates a v6 ledger with expense revisions and keeps the legacy display name fallback", withTestFile(async (path) => {
+  const connection = openTestConnection(path);
+  try {
+    for (const migration of migrations.slice(0, 6)) await connection.execAsync(migration);
+    await connection.execAsync(`
+      INSERT INTO activities VALUES ('trip', 'Trip', 'HKD', 'active', 1, 1);
+      INSERT INTO members VALUES ('z', 'Alex', 1), ('a', 'Bo', 1);
+      INSERT INTO activity_members VALUES ('trip', 'z', 0), ('trip', 'a', 1);
+      INSERT INTO financial_events VALUES (1, 'dinner', 'trip', 'expense', 100);
+      INSERT INTO expenses VALUES ('dinner', 'trip', 'HKD', 10000, 'equal', 1);
+      INSERT INTO expense_allocations VALUES ('trip', 'dinner', 'z', 5000, 0), ('trip', 'dinner', 'a', 5000, 1);
+      INSERT INTO merchant_payments VALUES ('trip', 'dinner', 'z', 10000);
+      INSERT INTO expense_revisions VALUES (2, 'revision', 'trip', 'dinner', 2, 200, 'HKD', 8000, 'equal', 1, 'z', 8000, '[]');
+      INSERT INTO expense_revision_allocations VALUES ('trip', 'revision', 'z', 4000, 0), ('trip', 'revision', 'a', 4000, 1);
+      PRAGMA user_version = 6;
+    `);
+    assert.equal(valueOf(await validateStoredLedgers(connection, 6)), true);
+    const database = await initializeDatabase(connection);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 7);
+    const detail = await loadActivityDetail("trip", database);
+    assert.deepEqual(detail.expenses.map(({ name, effectiveMinor }) => [name, effectiveMinor]), [["費用 1", 8000]]);
+    assert.equal((await connection.getFirstAsync("SELECT name FROM expenses WHERE id = 'dinner'")).name, null);
+    assert.equal(valueOf(await validateStoredLedgers(connection, 7)), true);
+  } finally {
+    connection.close();
+  }
+}));
+
+test("S08 reuses the Free treat and individual calculations, validates charges, and handles local dates", withFinance(async (_finance, activities) => {
+  const editor = { ...createExpenseEditor(await activities.getActivity("trip")), finalTotal: "55", merchantPayerId: "a" };
+  const charges = { chargeMode: "details", subtotal: "60", discount: "10", serviceFeeMode: "quick10", serviceFeeBasis: "afterDiscount" };
+  const treat = valueOf(prepareNewExpense("treat", "請客", {
+    ...editor, ...charges, mode: "treat", hostId: "z", coverKind: "percentage", coverPercentage: "20",
+  }));
+  assert.deepEqual(treat.split.allocations.map(({ amountMinor }) => amountMinor), [1100, 4400]);
+  const individual = valueOf(prepareNewExpense("individual", "各自消費", {
+    ...editor, ...charges, mode: "individual", sharedAmount: "20",
+    members: editor.members.map((member, index) => ({ ...member, personalAmount: index === 0 ? "30" : "10" })),
+  }));
+  assert.equal(individual.split.total.amountMinor, 5500);
+  assert.equal(individual.split.allocations.reduce((sum, { amountMinor }) => sum + amountMinor, 0), 5500);
+  assert.equal(prepareNewExpense("mismatch", "測試", { ...editor, ...charges, finalTotal: "56" }).error.code, "TOTAL_MISMATCH");
+  const openedAt = new Date(2026, 10, 7, 14, 21);
+  assert.equal(expenseDateTimestamp(expenseDateInput(openedAt), openedAt), openedAt.getTime());
+  assert.equal(expenseDateTimestamp("2026-02-30", openedAt), undefined);
+  assert.equal(expenseDateTimestamp("2026-11-06", openedAt), new Date(2026, 10, 6, 12).getTime());
 }));
 
 test("activity detail reads revised expenses, effective refunds and repayments from the ledger snapshot", withFinance(async (finance, _activities, database) => {

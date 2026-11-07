@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ComponentRef, type ReactNode } from "react";
 import {
   ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Switch,
-  Text, TextInput, View, useWindowDimensions,
+  Text, TextInput, View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { parseAmount } from "../domain/money.ts";
@@ -10,18 +10,13 @@ import {
   type EditorError, type EditorField, type QuickSplitEditorState, type QuickSplitPreview,
 } from "../services/quickSplitEditor.ts";
 import { CurrencyPicker } from "./CurrencyPicker.tsx";
+import { SplitModeSelector } from "./SplitModeSelector.tsx";
+import { validationMessage } from "./splitEditorMessages.ts";
 import { useQuickSplitDraft } from "./useQuickSplitDraft.ts";
 import { colors, Icon } from "./visuals.tsx";
 
 type SectionName = "total" | "members" | "details" | "payer";
 type Member = QuickSplitEditorState["members"][number];
-
-const modes = [
-  { kind: "equal", label: "平均分攤", icon: "equalSplit" },
-  { kind: "treat", label: "請客", icon: "treatSplit" },
-  { kind: "individual", label: "各自消費", icon: "individualSplit" },
-  { kind: "custom", label: "自訂分攤", icon: "customSplit" },
-] as const;
 
 const errorSections: Record<EditorField, SectionName> = {
   currency: "total", finalTotal: "total",
@@ -29,31 +24,6 @@ const errorSections: Record<EditorField, SectionName> = {
   personalAmount: "members", sharedAmount: "members", sharedMembers: "members",
   subtotal: "details", discount: "details", serviceFee: "details", merchantPayerId: "payer",
 };
-
-function validationMessage({ code, field }: EditorError) {
-  switch (code) {
-    case "NEGATIVE_AMOUNT": return "金額不可小於 0。";
-    case "INVALID_AMOUNT_PRECISION": return "小數位數超出此幣種的上限。";
-    case "AMOUNT_OVERFLOW": return "金額過大，請核對後再試。";
-    case "UNSUPPORTED_CURRENCY": return "請選擇支援的幣種。";
-    case "INVALID_PERCENTAGE": return "請輸入 0 至 100 的百分比，最多兩位小數。";
-    case "COVER_EXCEEDS_TOTAL": return "請客金額不可超過實際帳單總額。";
-    case "HOST_NOT_PARTICIPATING": return "請選擇一位請客者。";
-    case "NO_REMAINDER_PARTICIPANTS": return "請增加分攤成員，或讓請客者參與餘額分攤。";
-    case "NO_PARTICIPANTS": return field === "sharedMembers" ? "請選擇至少一位公共消費參與者。" : "請選擇至少一位參與成員。";
-    case "DISCOUNT_EXCEEDS_SUBTOTAL": return "折扣不可超過商品小計。";
-    case "NO_CHARGE_WEIGHTS": return "有服務費時，請核對商品小計及分攤金額。";
-    case "SERVICE_FEE_CONFLICT": return "請選擇一種服務費計算方式。";
-    case "TOTAL_MISMATCH": return field === "finalTotal"
-      ? "按明細計算的總額與實際帳單不符，請核對小計、折扣及服務費。"
-      : "個人與公共消費的合計不符，請核對實付總額或商品小計。";
-    default:
-      if (field === "merchantPayerId") return "請重新選擇付款人，或保留為未指定。";
-      if (field === "hostId") return "請選擇一位請客者。";
-      if (field === "members") return "請檢查參與成員。";
-      return "請輸入有效金額。";
-  }
-}
 
 function InlineError({ message }: { message?: string }) {
   return message ? <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={styles.error}>{message}</Text> : null;
@@ -119,9 +89,7 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer }: {
   const scroll = useRef<ComponentRef<typeof ScrollView>>(null);
   const offsets = useRef<Partial<Record<SectionName, number>>>({});
   const chrome = useRef({ header: 0, footer: 0 });
-  const { width, fontScale } = useWindowDimensions();
   const { top } = useSafeAreaInsets();
-  const compact = width < 370 || fontScale > 1.2;
   const details = editor.chargeMode === "details";
   const amountPlaceholder = editor.currency === "JPY" ? "0" : "0.00";
   const busy = loading || discarding;
@@ -296,29 +264,7 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer }: {
             </View>
 
             <Section title="分帳方式">
-              <View accessibilityRole="radiogroup" style={styles.choices}>
-                {modes.map(({ kind, label, icon }) => {
-                  const selected = editor.mode === kind;
-                  return (
-                    <Pressable
-                      key={kind}
-                      accessibilityRole="radio"
-                      accessibilityLabel={kind === "custom" ? `${label}，Pro` : label}
-                      accessibilityState={{ checked: selected }}
-                      onPress={() => kind === "custom"
-                        ? Alert.alert("自訂分攤 · Pro", "此功能需要 Pro。購買及解鎖尚未開放，你仍可繼續編輯目前的分帳。")
-                        : setField("mode", kind)}
-                      style={({ pressed }) => [
-                        styles.mode, compact && styles.compactMode, selected && styles.activeMode, pressed && styles.pressed,
-                      ]}
-                    >
-                      <Icon name={icon} size={22} color={selected ? colors.onPrimary : colors.accentText} />
-                      <Text style={[styles.modeLabel, selected && styles.inverse]}>{label}</Text>
-                      <Text style={[styles.modeTier, selected && styles.inverse]}>{kind === "custom" ? "Pro" : "Free"}</Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
+              <SplitModeSelector mode={editor.mode} onSelect={(mode) => setField("mode", mode)} />
             </Section>
 
             <View onLayout={({ nativeEvent }) => { offsets.current.members = nativeEvent.layout.y; }}>
@@ -532,15 +478,6 @@ const styles = StyleSheet.create({
   selectedChoice: { borderColor: colors.accentText, backgroundColor: colors.quiet },
   choiceText: { color: colors.ink, fontSize: 14, flexShrink: 1 },
   selectedChoiceText: { color: colors.accentText, fontWeight: "600" },
-  mode: {
-    flexBasis: "22%", flexGrow: 1, minHeight: 76, borderWidth: 1, borderColor: colors.line, borderRadius: 11,
-    paddingVertical: 8, paddingHorizontal: 3, justifyContent: "center", alignItems: "center", gap: 4,
-  },
-  compactMode: { flexBasis: "45%" },
-  activeMode: { borderColor: colors.primary, backgroundColor: colors.primary },
-  modeLabel: { color: colors.ink, fontSize: 13, fontWeight: "600", textAlign: "center" },
-  modeTier: { color: colors.muted, fontSize: 12, textAlign: "center" },
-  inverse: { color: colors.onPrimary },
   member: { gap: 8 },
   memberRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   nameInput: { flex: 1 },

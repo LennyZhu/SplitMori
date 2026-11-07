@@ -53,8 +53,9 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-export function ActivityDetailScreen({ activityId, onBack, onViewExisting }: {
+export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAddExpense }: {
   activityId: string; onBack: () => void; onViewExisting: (blocker: ActivityCreationBlocker) => void;
+  onAddExpense: () => void;
 }) {
   const [data, setData] = useState<ActivityDetailData | null>();
   const [loading, setLoading] = useState(true);
@@ -234,7 +235,6 @@ export function ActivityDetailScreen({ activityId, onBack, onViewExisting }: {
                       </View>
                     ))}
                   </View>
-                  <Text style={styles.caption}>現有費用記錄未儲存名稱，以序號識別。</Text>
                 </>
               ) : (
                 <View style={[styles.card, styles.empty]}>
@@ -274,7 +274,7 @@ export function ActivityDetailScreen({ activityId, onBack, onViewExisting }: {
             {active ? (
               <>
                 {hasExpenses && <Action title="查看結算" onPress={() => showPlaceholder("查看結算")} />}
-                <Action title="新增費用" icon="plus" primary onPress={() => showPlaceholder("新增費用")} />
+                <Action title="新增費用" icon="plus" primary onPress={onAddExpense} disabled={working} />
               </>
             ) : (
               <>

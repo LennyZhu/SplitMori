@@ -9,6 +9,7 @@ import { ActivityDetailScreen } from "./src/ui/ActivityDetailScreen.tsx";
 import { ActivityListScreen } from "./src/ui/ActivityListScreen.tsx";
 import { ActivityQuotaSheet } from "./src/ui/ActivityQuotaSheet.tsx";
 import { CreateActivityScreen } from "./src/ui/CreateActivityScreen.tsx";
+import { CreateExpenseScreen } from "./src/ui/CreateExpenseScreen.tsx";
 import { HomeScreen } from "./src/ui/HomeScreen.tsx";
 import { QuickSplitResultScreen } from "./src/ui/QuickSplitResultScreen.tsx";
 import { QuickSplitScreen } from "./src/ui/QuickSplitScreen.tsx";
@@ -48,6 +49,7 @@ type ActivityDetailRoute = {
 type Route =
   | { name: Tab | "settings" }
   | { name: "createActivity"; origin: ActivityOrigin }
+  | { name: "createExpense"; previous: ActivityDetailRoute }
   | { name: "quickSplit"; focusPayer?: boolean }
   | { name: "quickResult"; result: QuickSplitPreview }
   | ActivityDetailRoute
@@ -55,6 +57,7 @@ type Route =
 
 function backRoute(route: Route): Route {
   if (route.name === "quickResult") return { name: "quickSplit" };
+  if (route.name === "createExpense") return route.previous;
   if (route.name === "activityDetails" && route.previous) return route.previous;
   if (route.name === "activityDetails" && route.resumeCreation) {
     return { name: "createActivity", origin: route.origin ?? "home" };
@@ -114,15 +117,20 @@ function App() {
   const inQuickSplit = route.name === "quickSplit" || route.name === "quickResult";
   const isQuickResult = route.name === "quickResult";
   const activeTab = tabs.find((tab) => tab.name === route.name)?.name;
-  const createOrigin = route.name === "createActivity" || (route.name === "activityDetails" && route.resumeCreation)
-    ? route.origin ?? "home" : undefined;
+  const activityRoute = route.name === "createExpense" ? route.previous : route;
+  const createOrigin = activityRoute.name === "createActivity" || (activityRoute.name === "activityDetails" && activityRoute.resumeCreation)
+    ? activityRoute.origin ?? "home" : undefined;
   const activityDetails = route.name === "activityDetails" ? (
     <ActivityDetailScreen
       key={route.id} activityId={route.id} onBack={() => setRoute(backRoute)}
       onViewExisting={({ id }) => setRoute({
         name: "activityDetails", id, origin: route.origin, resumeCreation: route.resumeCreation, previous: route,
       })}
+      onAddExpense={() => setRoute({ name: "createExpense", previous: route })}
     />
+  ) : route.name === "createExpense" ? (
+    <CreateExpenseScreen key={route.previous.id} activityId={route.previous.id}
+      onBack={() => setRoute(route.previous)} onSaved={() => setRoute(route.previous)} />
   ) : null;
 
   useLayoutEffect(() => {
@@ -196,7 +204,7 @@ function App() {
             </View>
             {activityDetails}
           </>
-        ) : route.name === "activityDetails" ? (
+        ) : route.name === "activityDetails" || route.name === "createExpense" ? (
           activityDetails
         ) : inQuickSplit ? (
           <>
