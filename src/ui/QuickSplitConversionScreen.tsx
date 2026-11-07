@@ -53,7 +53,7 @@ export function QuickRecordSummary({ history, target, destination }: {
 }
 
 export function ConversionPage({ title, endLabel, onBack, children, footer, scrollRef, busy = false }: {
-  title: string; endLabel: string; onBack: () => void; children: ReactNode; footer?: ReactNode;
+  title: string; endLabel?: string; onBack: () => void; children: ReactNode; footer?: ReactNode;
   scrollRef?: RefObject<ComponentRef<typeof ScrollView> | null>; busy?: boolean;
 }) {
   const { top } = useSafeAreaInsets();
@@ -69,9 +69,11 @@ export function ConversionPage({ title, endLabel, onBack, children, footer, scro
           <Icon name="back" size={23} />
         </Pressable>
         <Text accessibilityRole="header" style={styles.title}>{title}</Text>
-        <Pressable accessibilityRole="button" disabled={busy} onPress={onBack} style={[styles.headerSide, styles.headerEnd]}>
-          <Text style={styles.body}>{endLabel}</Text>
-        </Pressable>
+        {endLabel ? (
+          <Pressable accessibilityRole="button" disabled={busy} onPress={onBack} style={[styles.headerSide, styles.headerEnd]}>
+            <Text style={styles.body}>{endLabel}</Text>
+          </Pressable>
+        ) : <View style={styles.headerSide} />}
       </View>
       <ScrollView ref={scrollRef} style={styles.screen} contentContainerStyle={styles.content}
         keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" pointerEvents={busy ? "none" : "auto"}>

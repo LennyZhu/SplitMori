@@ -50,7 +50,7 @@ export function QuickHistoryScreen({ historyId, onBack, onConvert, onViewActivit
   const allocations = new Map(split?.allocations.map(({ memberId, amountMinor }) => [memberId, amountMinor]));
 
   return (
-    <ConversionPage title="快速分帳記錄" endLabel="返回" onBack={onBack}
+    <ConversionPage title="快速分帳記錄" onBack={onBack}
       footer={source && (destination
         ? <ConversionButton label="查看活動" onPress={() => onViewActivity(destination.activityId)} />
         : <ConversionButton label="加入活動" onPress={onConvert} />)}>

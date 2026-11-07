@@ -9,7 +9,7 @@ import { basename, dirname, join } from "node:path";
 import { backup as sqliteBackup, DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { ActiveActivityLimitError, createActivityRepository } from "../src/data/activities.ts";
+import { ActiveActivityLimitError, createActivityRepository, MemberManagementError, memberNameMaxLength } from "../src/data/activities.ts";
 import { backupSnapshotName, DatabaseInitializationError, initializeDatabase } from "../src/data/database.ts";
 import { createDatabaseHost, databaseName, restoreFiles } from "../src/data/databaseHost.ts";
 import { createFinanceRepository, validateStoredLedgers } from "../src/data/finance.ts";
@@ -20,6 +20,7 @@ import { splitEqual } from "../src/domain/split.ts";
 import { createBackupService, inspectBackupDatabase, inspectStandaloneBackup } from "../src/services/backup.ts";
 import { loadActivityList } from "../src/services/activityList.ts";
 import { loadActivityDetail } from "../src/services/activityDetail.ts";
+import { loadActivityMembers } from "../src/services/activityMembers.ts";
 import { createExpenseEditor, expenseDateInput, expenseDateTimestamp, prepareNewExpense } from "../src/services/expenseEditor.ts";
 import { createQuickHistorySave } from "../src/services/quickHistorySave.ts";
 import { canSelectConversionTarget, createQuickSplitConversionService } from "../src/services/quickSplitConversion.ts";
@@ -1550,4 +1551,147 @@ test("reopen is rejected by the current Free slot while a completed ledger remai
   const before = await loadActivityDetail("trip", database);
   await assert.rejects(activities.reopenActivity("trip"), (error) => error instanceof ActiveActivityLimitError && error.blocker.id === "active");
   assert.deepEqual(await loadActivityDetail("trip", database), before);
+}));
+
+test("batch members persist after reopening and leave two original expenses and balances intact", withTestFile(async (path) => {
+  let connection = openTestConnection(path);
+  try {
+    let database = await initializeDatabase(connection);
+    const activities = createActivityRepository(database);
+    let finance = createFinanceRepository(database);
+    await activities.createActivity({
+      id: "trip", name: "旅行", currency: "HKD", members: [{ id: "z", displayName: "a" }, { id: "a", displayName: "b" }],
+    });
+    valueOf(await finance.createExpense("trip", 100, expense("first", 56_000)));
+    valueOf(await finance.createExpense("trip", 200, expense("second", 56_000)));
+    const original = valueOf(await finance.getActivityLedger("trip"));
+    const batch = [{ id: "c", displayName: " c " }, { id: "d", displayName: "d" }];
+    const added = await activities.addMembers("trip", batch);
+    assert.deepEqual(added.map(({ id, displayName, position }) => [id, displayName, position]), [["c", "c", 2], ["d", "d", 3]]);
+    const ledger = valueOf(await finance.getActivityLedger("trip"));
+    assert.deepEqual(ledger.events, original.events);
+    assert.deepEqual(ledger.revisions, original.revisions);
+    assert.deepEqual(ledger.suggestions, original.suggestions);
+    assert.deepEqual(ledger.balanceSnapshot.balances.slice(0, 2), original.balanceSnapshot.balances);
+    assert.deepEqual(ledger.balanceSnapshot.balances.map(({ memberId, netBalanceMinor }) => [memberId, netBalanceMinor]),
+      [["z", 56_000], ["a", -56_000], ["c", 0], ["d", 0]]);
+    const detail = await loadActivityDetail("trip", database);
+    assert.deepEqual([detail.grossMinor, detail.effectiveMinor], [112_000n, 112_000n]);
+    assert.equal((await loadActivityList(database))[0].memberCount, 4);
+
+    connection.close();
+    connection = openTestConnection(path);
+    database = await initializeDatabase(connection);
+    finance = createFinanceRepository(database);
+    assert.deepEqual((await createActivityRepository(database).getActivity("trip")).members.slice(2), added);
+    assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), ledger);
+  } finally {
+    connection.close();
+  }
+}));
+
+test("member batches roll back completely and concurrent retries reuse the same stable IDs", withFinance(async (_finance, activities, database, connection) => {
+  const batch = [{ id: "c", displayName: "同名" }, { id: "d", displayName: "同名" }];
+  await database.write((transaction) => transaction.execAsync(`
+    CREATE TRIGGER reject_second_member BEFORE INSERT ON members WHEN NEW.id = 'd'
+    BEGIN SELECT RAISE(ABORT, 'member write failure'); END;
+  `));
+  await assert.rejects(activities.addMembers("trip", batch), /member write failure/);
+  assert.equal((await activities.listMembers("trip")).length, 2);
+  assert.equal((await connection.getFirstAsync("SELECT COUNT(*) AS count FROM members WHERE id IN ('c', 'd')")).count, 0);
+  await database.write((transaction) => transaction.execAsync("DROP TRIGGER reject_second_member"));
+  const [first, retry] = await Promise.all([activities.addMembers("trip", batch), activities.addMembers("trip", batch)]);
+  assert.deepEqual(first, retry);
+  assert.equal((await activities.listMembers("trip")).length, 4);
+  const conflict = (error) => error instanceof MemberManagementError && error.code === "MEMBER_CONFLICT";
+  await assert.rejects(activities.addMembers("trip", [batch[0], { ...batch[1], displayName: "變更名稱" }]), conflict);
+  await assert.rejects(activities.addMembers("trip", [batch[0], { id: "e", displayName: "e" }]), conflict);
+  for (const invalid of ["   ", "名".repeat(memberNameMaxLength + 1)]) {
+    await assert.rejects(activities.addMembers("trip", [{ id: "e", displayName: invalid }]),
+      (error) => error instanceof MemberManagementError && error.code === "INVALID_MEMBER_NAME");
+  }
+  assert.equal(await connection.getFirstAsync("SELECT id FROM members WHERE id = 'e'"), null);
+  assert.equal((await activities.listMembers("trip")).length, 4);
+}));
+
+test("completed activity state is checked inside member write transactions", withFinance(async (_finance, activities, _database, connection) => {
+  const before = await activities.listMembers("trip");
+  const [completed, added] = await Promise.allSettled([
+    activities.completeActivity("trip"), activities.addMembers("trip", [{ id: "c", displayName: "c" }]),
+  ]);
+  assert.equal(completed.status, "fulfilled");
+  assert.equal(added.status, "rejected");
+  assert.equal(added.reason.code, "ACTIVITY_COMPLETED");
+  await assert.rejects(activities.addMember("trip", { id: "d", displayName: "d" }),
+    (error) => error.code === "ACTIVITY_COMPLETED");
+  await assert.rejects(activities.renameMember("trip", "z", "更名"),
+    (error) => error.code === "ACTIVITY_COMPLETED");
+  assert.deepEqual(await activities.listMembers("trip"), before);
+  assert.equal((await connection.getFirstAsync("SELECT COUNT(*) AS count FROM members WHERE id IN ('c', 'd')")).count, 0);
+}));
+
+test("member rename and additions preserve refunds repayments revisions voids and all original balances", withFinance(async (finance, activities, database) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  valueOf(await finance.recordMerchantRefund("trip", 200, refund));
+  valueOf(await finance.recordMemberTransfer("trip", 250, { ...repayment, amountMinor: 3000 }));
+  valueOf(await finance.commitExpenseCorrection("trip", correction(8000, { reviewedRefundIds: [refund.id] })));
+  valueOf(await finance.voidMemberTransfer("trip", { id: "void", targetEventId: repayment.id, occurredAt: 400 }));
+  const original = valueOf(await finance.getActivityLedger("trip"));
+  const members = await activities.listMembers("trip");
+  const renamed = await activities.renameMember("trip", "z", " 阿明 ");
+  assert.deepEqual(renamed, { ...members[0], displayName: "阿明" });
+  assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), original);
+  assert.deepEqual((await loadActivityDetail("trip", database)).expenses.map(({ payerName }) => payerName), ["阿明"]);
+  await activities.addMembers("trip", [{ id: "c", displayName: "阿明" }, { id: "d", displayName: "d" }]);
+  const ledger = valueOf(await finance.getActivityLedger("trip"));
+  assert.deepEqual(ledger.events, original.events);
+  assert.deepEqual(ledger.revisions, original.revisions);
+  assert.deepEqual(ledger.balanceSnapshot.balances.slice(0, 2), original.balanceSnapshot.balances);
+  assert.deepEqual(ledger.balanceSnapshot.balances.slice(2).map(({ netBalanceMinor }) => netBalanceMinor), [0, 0]);
+  const management = await loadActivityMembers("trip", database);
+  assert.deepEqual(management.members.map(({ id, hasHistory }) => [id, hasHistory]), [["z", true], ["a", true], ["c", false], ["d", false]]);
+  await assert.rejects(activities.renameMember("trip", "missing", "名稱"), (error) => error.code === "MEMBER_NOT_FOUND");
+}));
+
+test("renaming a shared member cannot change another activity's display name", withFinance(async (_finance, activities, database) => {
+  await activities.completeActivity("trip");
+  await activities.createActivity({ id: "other", name: "另一活動", currency: "HKD", members: [{ id: "other", displayName: "Alex" }] });
+  await database.write((transaction) => transaction.runAsync(
+    "INSERT INTO activity_members (activity_id, member_id, position) VALUES ('other', 'z', 1)",
+  ));
+  await activities.completeActivity("other");
+  await activities.reopenActivity("trip");
+  assert.equal((await loadActivityMembers("trip", database)).members.find(({ id }) => id === "z").shared, true);
+  await assert.rejects(activities.renameMember("trip", "z", "更名"), (error) => error.code === "SHARED_MEMBER");
+  assert.equal((await activities.getActivity("other")).members.find(({ id }) => id === "z").displayName, "Alex");
+  await activities.renameMember("trip", "a", "新名稱");
+  assert.equal((await activities.getActivity("other")).members.find(({ id }) => id === "other").displayName, "Alex");
+}));
+
+test("adding members makes an existing four-person quick history eligible without changing its shares", withFinance(async (finance, activities, database) => {
+  const input = {
+    members: ["w", "x", "y", "v"].map((id) => ({ id, displayName: id })),
+    charges: { kind: "finalTotal", total: { currency: "HKD", amountMinor: 10_001 } },
+    method: { kind: "equal", memberIds: ["w", "x", "y", "v"] },
+  };
+  const quick = createQuickSplitRepository(database);
+  const history = valueOf(await quick.saveQuickHistory("four", input));
+  const conversions = createQuickSplitConversionService(database);
+  assert.equal((await conversions.listTargets("HKD")).some((target) => canSelectConversionTarget(target, history)), false);
+  await activities.addMembers("trip", [{ id: "c", displayName: "c" }, { id: "d", displayName: "d" }]);
+  assert.equal((await conversions.listTargets("HKD")).some((target) => canSelectConversionTarget(target, history)), true);
+  const mappings = ["z", "a", "c", "d"];
+  const request = {
+    requestId: "four-members", historyId: "four", activityId: "trip", expenseName: "四人費用", occurredAt: 100,
+    memberMapping: input.members.map(({ id }, index) => ({ quickMemberId: id, activityMemberId: mappings[index] })),
+    merchantPayment: { memberId: "z", ...history.snapshot.split.total },
+  };
+  const saved = valueOf(await conversions.convertQuickHistory(request));
+  const sourceAmounts = new Map(history.snapshot.split.allocations.map(({ memberId, amountMinor }) => [memberId, amountMinor]));
+  const targetAmounts = new Map(saved.event.expense.split.allocations.map(({ memberId, amountMinor }) => [memberId, amountMinor]));
+  for (const { quickMemberId, activityMemberId } of request.memberMapping) {
+    assert.equal(targetAmounts.get(activityMemberId), sourceAmounts.get(quickMemberId));
+  }
+  assert.deepEqual(valueOf(await quick.getQuickHistory("four")), history);
+  assert.equal(valueOf(await finance.getActivityLedger("trip")).events.length, 1);
 }));

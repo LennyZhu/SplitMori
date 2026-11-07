@@ -44,18 +44,22 @@ function AmountLine({ title, value, strong }: { title: string; value: string; st
   );
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function Section({ title, children, action }: { title: string; children: ReactNode; action?: ReactNode }) {
   return (
     <View style={styles.section}>
-      <Text accessibilityRole="header" style={styles.sectionTitle}>{title}</Text>
+      <View style={styles.amountRow}>
+        <Text accessibilityRole="header" style={styles.sectionTitle}>{title}</Text>
+        {action}
+      </View>
       {children}
     </View>
   );
 }
 
-export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAddExpense }: {
+export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAddExpense, onManageMembers }: {
   activityId: string; onBack: () => void; onViewExisting: (blocker: ActivityCreationBlocker) => void;
   onAddExpense: () => void;
+  onManageMembers: () => void;
 }) {
   const [data, setData] = useState<ActivityDetailData | null>();
   const [loading, setLoading] = useState(true);
@@ -197,7 +201,12 @@ export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAdd
               </View>
             </View>
 
-            <Section title={`成員（${data.activity.members.length}）`}>
+            <Section title={`成員（${data.activity.members.length}）`} action={
+              <Pressable accessibilityRole="button" accessibilityLabel="管理活動成員" disabled={working}
+                onPress={onManageMembers} hitSlop={8} style={styles.manageButton}>
+                <Text style={styles.link}>管理</Text><Icon name="next" size={14} />
+              </Pressable>
+            }>
               <View style={styles.card}>
                 {data.activity.members.map(({ id, displayName }, index) => {
                   const net = data.balances.get(id);
@@ -319,6 +328,7 @@ const styles = StyleSheet.create({
   sectionTitle: { color: colors.ink, fontSize: 16, fontWeight: "700" },
   textButton: { minHeight: 44, alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: 3 },
   link: { color: colors.ink, fontSize: 14, fontWeight: "600" },
+  manageButton: { minWidth: 44, minHeight: 28, flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: 2 },
   row: { minHeight: 44, flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8, paddingHorizontal: 10, paddingVertical: 8 },
   divider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
   tile: { width: 30, height: 30, borderRadius: 15, alignItems: "center", justifyContent: "center", backgroundColor: colors.quiet },

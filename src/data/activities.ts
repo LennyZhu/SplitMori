@@ -22,6 +22,23 @@ export type ActivityMember = Member & { readonly activityId: string; readonly po
 export type ActivityDetail = Activity & { readonly members: readonly ActivityMember[] };
 
 export type NewMember = Pick<Member, "id" | "displayName">;
+export const memberNameMaxLength = 50;
+type MemberManagementCode = "INVALID_MEMBER_NAME" | "INVALID_MEMBER_BATCH" | "MEMBER_CONFLICT"
+  | "ACTIVITY_COMPLETED" | "ACTIVITY_NOT_FOUND" | "MEMBER_NOT_FOUND" | "SHARED_MEMBER";
+
+export class MemberManagementError extends Error {
+  readonly code: MemberManagementCode;
+
+  constructor(code: MemberManagementCode) {
+    super(code);
+    this.name = "MemberManagementError";
+    this.code = code;
+  }
+}
+
+export function validMemberName(name: string): boolean {
+  return typeof name === "string" && name.trim() !== "" && Array.from(name.trim()).length <= memberNameMaxLength;
+}
 export type NewActivity = Pick<Activity, "id" | "name" | "currency"> & {
   readonly members: readonly NewMember[];
 };
@@ -98,6 +115,48 @@ function requireActivity(activity: Activity | null, id: string): Activity {
 }
 
 export function createActivityRepository(database: LocalDatabase) {
+  function addMembers(activityId: string, input: readonly NewMember[]): Promise<ActivityMember[]> {
+    const requested = input.map((member) => ({ ...member }));
+    return database.write(async (transaction) => {
+      const activity = await selectActivity(transaction, activityId);
+      if (!activity) throw new MemberManagementError("ACTIVITY_NOT_FOUND");
+      if (requested.length === 0 || new Set(requested.map(({ id }) => id)).size !== requested.length
+        || requested.some(({ id }) => typeof id !== "string" || id.trim() === "")) {
+        throw new MemberManagementError("INVALID_MEMBER_BATCH");
+      }
+      if (requested.some(({ displayName }) => !validMemberName(displayName))) {
+        throw new MemberManagementError("INVALID_MEMBER_NAME");
+      }
+
+      const members = await selectMembers(transaction, activityId);
+      const ids = new Set(requested.map(({ id }) => id));
+      const existing = members.filter(({ id }) => ids.has(id));
+      // Stable member IDs are the retry keys. A partial or changed batch is a conflict.
+      if (existing.length > 0) {
+        if (existing.length !== requested.length || !existing.every((member, index) =>
+          member.id === requested[index].id && member.displayName === requested[index].displayName.trim()
+          && member.position === existing[0].position + index)) {
+          throw new MemberManagementError("MEMBER_CONFLICT");
+        }
+        return existing;
+      }
+      if (activity.status !== "active") throw new MemberManagementError("ACTIVITY_COMPLETED");
+
+      const now = Date.now();
+      const nextPosition = members.reduce((next, member) => Math.max(next, member.position + 1), 0);
+      if (!Number.isSafeInteger(nextPosition + requested.length)) throw new MemberManagementError("INVALID_MEMBER_BATCH");
+      const added: ActivityMember[] = [];
+      for (const [index, member] of requested.entries()) {
+        if (await transaction.getFirstAsync("SELECT id FROM members WHERE id = ?", member.id)) {
+          throw new MemberManagementError("MEMBER_CONFLICT");
+        }
+        added.push(await insertMember(transaction, activityId, member, nextPosition + index, now));
+      }
+      await transaction.runAsync("UPDATE activities SET updated_at = MAX(updated_at, ?) WHERE id = ?", now, activityId);
+      return added;
+    });
+  }
+
   function setStatus(id: string, status: ActivityStatus): Promise<Activity> {
     return database.write(async (transaction) => {
       const current = requireActivity(await selectActivity(transaction, id), id);
@@ -159,19 +218,29 @@ export function createActivityRepository(database: LocalDatabase) {
       });
     },
 
-    addMember(activityId: string, input: NewMember): Promise<ActivityMember> {
+    addMember: (activityId: string, input: NewMember): Promise<ActivityMember> =>
+      addMembers(activityId, [input]).then((members) => members[0]),
+
+    addMembers,
+
+    renameMember(activityId: string, memberId: string, name: string): Promise<ActivityMember> {
       return database.write(async (transaction) => {
-        requireActivity(await selectActivity(transaction, activityId), activityId);
-        const next = await transaction.getFirstAsync<{ position: number }>(`
-          SELECT COALESCE(MAX(position) + 1, 0) AS position FROM activity_members WHERE activity_id = ?
-        `, activityId);
-        if (!next) throw new Error("Cannot determine activity member position");
-        const now = Date.now();
-        const member = await insertMember(transaction, activityId, input, next.position, now);
-        await transaction.runAsync(
-          "UPDATE activities SET updated_at = MAX(updated_at, ?) WHERE id = ?", now, activityId,
+        const activity = await selectActivity(transaction, activityId);
+        if (!activity) throw new MemberManagementError("ACTIVITY_NOT_FOUND");
+        if (activity.status !== "active") throw new MemberManagementError("ACTIVITY_COMPLETED");
+        if (!validMemberName(name)) throw new MemberManagementError("INVALID_MEMBER_NAME");
+        const members = await selectMembers(transaction, activityId);
+        const member = members.find(({ id }) => id === memberId);
+        if (!member) throw new MemberManagementError("MEMBER_NOT_FOUND");
+        const displayName = name.trim();
+        if (displayName === member.displayName) return member;
+        const links = await transaction.getFirstAsync<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM activity_members WHERE member_id = ?", memberId,
         );
-        return member;
+        if (links?.count !== 1) throw new MemberManagementError("SHARED_MEMBER");
+        await transaction.runAsync("UPDATE members SET display_name = ? WHERE id = ?", displayName, memberId);
+        await transaction.runAsync("UPDATE activities SET updated_at = MAX(updated_at, ?) WHERE id = ?", Date.now(), activityId);
+        return { ...member, displayName };
       });
     },
 
