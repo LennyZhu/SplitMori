@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { createAppPreferencesStore, currencyLabels, resolveAppLanguage } from "../src/services/appPreferences.ts";
+import { createAppPreferencesStore, currencyLabels, resolveAppLanguage, searchCurrencies } from "../src/services/appPreferences.ts";
 import { resolveSettlementPngLanguages } from "../src/services/activitySettlementPng.ts";
 import { createQuickSplitEditor, hydrateQuickSplitDraft, serializeQuickSplitDraft } from "../src/services/quickSplitEditor.ts";
 
@@ -38,6 +38,12 @@ test("S13 follows the device on first launch and persists language and currency 
       assert.equal(createQuickSplitEditor(saved.defaultCurrency).currency, "USD");
       assert.equal(resolveAppLanguage(saved.language, [device]), language);
     }
+    for (const defaultCurrency of ["CAD", "AUD", "NZD", "MYR", "THB", "PHP", "KRW", "SGD", "VND"]) {
+      await connection.store.save({ language: "en", defaultCurrency });
+      connection.close();
+      connection = openPreferences(path);
+      assert.equal((await connection.store.load()).defaultCurrency, defaultCurrency);
+    }
   } finally {
     connection.close();
     rmSync(directory, { recursive: true, force: true });
@@ -56,10 +62,21 @@ test("S13 passes the resolved language to S11 and keeps PNG selection independen
   }
 });
 
-test("S13 uses USD for a new quick split and preserves an existing HKD draft", () => {
-  assert.deepEqual(Object.keys(currencyLabels), ["HKD", "CNY", "MOP", "TWD", "USD", "JPY"]);
+test("S13 and the currency picker expose exactly 15 currencies with bilingual search", () => {
+  const codes = ["HKD", "USD", "CNY", "MOP", "TWD", "JPY", "CAD", "AUD", "NZD", "MYR", "THB", "PHP", "KRW", "SGD", "VND"];
+  assert.deepEqual(searchCurrencies(""), codes);
+  for (const code of codes) {
+    assert.deepEqual(searchCurrencies(` ${code.toLowerCase()} `), [code]);
+    assert.ok(searchCurrencies(currencyLabels[code]["zh-HK"]).includes(code));
+    assert.ok(searchCurrencies(currencyLabels[code].en).includes(code));
+  }
+  assert.deepEqual(searchCurrencies("韓元"), ["KRW"]);
+  assert.deepEqual(searchCurrencies("EUR"), []);
+});
+
+test("S13 uses CAD for a new quick split and preserves an existing HKD draft", () => {
   const oldDraft = serializeQuickSplitDraft({ ...createQuickSplitEditor("HKD"), finalTotal: "560" });
-  assert.equal(createQuickSplitEditor("USD").currency, "USD");
+  assert.equal(createQuickSplitEditor("CAD").currency, "CAD");
   const hydrated = hydrateQuickSplitDraft(oldDraft);
   assert.equal(hydrated.currency, "HKD");
   assert.equal(hydrated.finalTotal, "560");

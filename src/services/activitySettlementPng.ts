@@ -1,5 +1,5 @@
 import type { LocalDatabase } from "../data/database.ts";
-import { normalizeAppLanguage, type AppLanguage } from "./appPreferences.ts";
+import { currencyLabels, normalizeAppLanguage, type AppLanguage } from "./appPreferences.ts";
 import { loadActivitySettlement, type ActivitySettlementData } from "./activitySettlement.ts";
 import { formatResultMoney } from "./quickSplitResult.ts";
 
@@ -66,8 +66,6 @@ export function resolveSettlementPngLanguages({ appLocale, preferredLocale, syst
   return { appLanguage, outputLanguage: selectedOutputLanguage ?? appLanguage, copy: settlementPngCopy[appLanguage] };
 }
 
-const currencyNames = { HKD: "港幣", CNY: "人民幣", MOP: "澳門元", TWD: "新台幣", USD: "美元", JPY: "日圓" } as const;
-
 export function captureSettlementSnapshot(data: ActivitySettlementData, generatedAt: Date) {
   const { activity, status, outstandingMinor, effectiveMinor, refundMinor, repaymentMinor } = data;
   return {
@@ -106,7 +104,7 @@ export function buildSettlementPngCard(snapshot: SettlementPngSnapshot, language
   const nameFor = (id: string) => labels.get(id) ?? copy.unknownMember;
   const safeName = Array.from(snapshot.name.replace(/[\u0000-\u001f\u007f/\\:*?"<>|]/g, " ").trim()).slice(0, 45).join("");
   return {
-    language, name: snapshot.name, currency, currencyLabel: language === "zh-HK" ? `${currencyNames[currency]} ${currency}` : currency,
+    language, name: snapshot.name, currency, currencyLabel: language === "zh-HK" ? `${currencyLabels[currency][language]} ${currency}` : currency,
     activityDate: date(snapshot.createdAt), generatedAt: date(snapshot.generatedAt, true),
     activityStatus: copy[snapshot.activityStatus], settlementStatus: copy[snapshot.status],
     settled: snapshot.status === "settled",

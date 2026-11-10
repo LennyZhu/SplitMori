@@ -1,6 +1,9 @@
 import { failure, type Failure, type Result } from "./result.ts";
 
-const minorDigits = { HKD: 2, CNY: 2, MOP: 2, TWD: 2, USD: 2, JPY: 0 } as const;
+export const minorDigits = {
+  HKD: 2, CNY: 2, MOP: 2, TWD: 2, USD: 2, JPY: 0,
+  CAD: 2, AUD: 2, NZD: 2, MYR: 2, THB: 2, PHP: 2, KRW: 0, SGD: 2, VND: 0,
+} as const;
 export const wholeBasisPoints = 10_000;
 
 export type Currency = keyof typeof minorDigits;

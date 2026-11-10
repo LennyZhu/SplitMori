@@ -1,5 +1,5 @@
 import type { SQLiteDatabase } from "expo-sqlite";
-import { applyMigration, migrations } from "./migrations.ts";
+import { applyMigration, expandedCurrencySchemaVersion, migrations } from "./migrations.ts";
 
 export type SQLiteReader = Pick<SQLiteDatabase, "getFirstAsync" | "getAllAsync">;
 export type SQLiteConnection = SQLiteReader & Pick<SQLiteDatabase, "execAsync" | "runAsync">;
@@ -87,17 +87,30 @@ export async function initializeDatabase(connection: SQLiteConnection, snapshotW
 
   const database = createDatabase(connection, snapshotWriter);
   try {
-    await database.write(async (transaction) => {
-      const metadata = await transaction.getFirstAsync<{ user_version: number }>("PRAGMA user_version");
-      const version = metadata?.user_version;
-      if (version === undefined || !Number.isInteger(version) || version < 0 || version > migrations.length) {
-        throw new Error(`Unsupported schema version ${String(version)} (latest ${migrations.length})`);
+    const metadata = await connection.getFirstAsync<{ user_version: number }>("PRAGMA user_version");
+    const rebuildActivities = metadata !== null && metadata.user_version < expandedCurrencySchemaVersion;
+    try {
+      // SQLite requires this before BEGIN when replacing a referenced parent table.
+      // The dedicated connection is still private, and v14 checks all references before COMMIT.
+      if (rebuildActivities) await connection.execAsync("PRAGMA foreign_keys = OFF;");
+      await database.write(async (transaction) => {
+        const metadata = await transaction.getFirstAsync<{ user_version: number }>("PRAGMA user_version");
+        const version = metadata?.user_version;
+        if (version === undefined || !Number.isInteger(version) || version < 0 || version > migrations.length) {
+          throw new Error(`Unsupported schema version ${String(version)} (latest ${migrations.length})`);
+        }
+        for (let next = version; next < migrations.length; next += 1) {
+          await applyMigration(transaction, next);
+          await transaction.execAsync(`PRAGMA user_version = ${next + 1}`);
+        }
+      });
+    } finally {
+      if (rebuildActivities) {
+        await connection.execAsync("PRAGMA foreign_keys = ON;");
+        const foreignKeys = await connection.getFirstAsync<{ foreign_keys: number }>("PRAGMA foreign_keys");
+        if (foreignKeys?.foreign_keys !== 1) throw new Error("Could not re-enable foreign keys after migration");
       }
-      for (let next = version; next < migrations.length; next += 1) {
-        await applyMigration(transaction, next);
-        await transaction.execAsync(`PRAGMA user_version = ${next + 1}`);
-      }
-    });
+    }
   } catch (error) {
     throw new DatabaseInitializationError("migration", error);
   }

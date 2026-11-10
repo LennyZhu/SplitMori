@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState, type ComponentRef } from "rea
 import { ActivityIndicator, Keyboard, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import type { DomainErrorCode } from "../domain/result.ts";
 import { merchantPaymentsOf } from "../domain/balance.ts";
+import { minorDigits } from "../domain/money.ts";
 import type { TransferSuggestion } from "../domain/settlement.ts";
 import { loadExpenseDetail, summarizeCorrectionBalances, summarizeExpenseRefunds, type ExpenseDetailData } from "../services/expenseDetail.ts";
 import { expenseDateInput } from "../services/expenseEditor.ts";
@@ -414,7 +415,7 @@ export function MerchantRefundScreen({ activityId, expenseId, entryPoint, onBack
                   <Text style={reviewStyles.caption}>{data.activity.currency}</Text>
                   <TextInput accessibilityLabel={copy.amount} value={draft.amount} onChangeText={(value) => edit("amount", value)}
                     style={styles.moneyInput} keyboardType="decimal-pad" onFocus={onFocus}
-                    placeholder={data.activity.currency === "JPY" ? "0" : "0.00"} placeholderTextColor={colors.muted} />
+                    placeholder={minorDigits[data.activity.currency] === 0 ? "0" : "0.00"} placeholderTextColor={colors.muted} />
                 </View>
                 {fieldError("amount")}
               </View>

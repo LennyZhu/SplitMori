@@ -3,7 +3,7 @@ import test from "node:test";
 import { calculateBalances } from "../src/domain/balance.ts";
 import { allocateCharges, calculateCharges } from "../src/domain/charges.ts";
 import { previewExpenseCorrection } from "../src/domain/correction.ts";
-import { formatAmount, parseAmount } from "../src/domain/money.ts";
+import { formatAmount, isCurrency, parseAmount } from "../src/domain/money.ts";
 import { suggestTransfers } from "../src/domain/settlement.ts";
 import { splitCustom, splitEqual, splitIndividual, splitTreat } from "../src/domain/split.ts";
 
@@ -25,15 +25,22 @@ const bill = { currency: "HKD", amountMinor: 100_000 };
 const fixed = { hostId: "host", cover: { kind: "fixed", amountMinor: 60_000 } };
 
 test("money round-trips exactly at the supported currency scales and safe integer boundary", () => {
-  for (const currency of ["HKD", "CNY", "MOP", "TWD", "USD"]) {
+  for (const currency of ["HKD", "CNY", "MOP", "TWD", "USD", "CAD", "AUD", "NZD", "MYR", "THB", "PHP", "SGD"]) {
     const amount = valueOf(parseAmount("0.1", currency));
     assert.deepEqual(amount, { currency, amountMinor: 10 });
     assert.equal(valueOf(formatAmount(amount)), "0.10");
   }
-  assert.equal(valueOf(formatAmount(valueOf(parseAmount("100", "JPY")))), "100");
+  for (const currency of ["JPY", "KRW", "VND"]) {
+    const amount = valueOf(parseAmount("100", currency));
+    assert.deepEqual(amount, { currency, amountMinor: 100 });
+    assert.equal(valueOf(formatAmount(amount)), "100");
+  }
   const max = valueOf(parseAmount("90071992547409.91", "HKD"));
   assert.equal(max.amountMinor, Number.MAX_SAFE_INTEGER);
   assert.equal(valueOf(formatAmount(max)), "90071992547409.91");
+  assert.equal(valueOf(parseAmount("9007199254740991", "VND")).amountMinor, Number.MAX_SAFE_INTEGER);
+  assert.equal(valueOf(formatAmount({ currency: "VND", amountMinor: Number.MAX_SAFE_INTEGER })), "9007199254740991");
+  for (const code of ["EUR", "GBP"]) assert.equal(isCurrency(code), false);
 });
 
 test("money rejects invalid syntax, precision, negative amounts and overflow", () => {
@@ -43,6 +50,9 @@ test("money rejects invalid syntax, precision, negative amounts and overflow", (
     ["-0.01", "HKD", "NEGATIVE_AMOUNT"],
     ["0.001", "HKD", "INVALID_AMOUNT_PRECISION"],
     ["1.0", "JPY", "INVALID_AMOUNT_PRECISION"],
+    ["100.0", "KRW", "INVALID_AMOUNT_PRECISION"],
+    ["100000.5", "VND", "INVALID_AMOUNT_PRECISION"],
+    ["9007199254740992", "VND", "AMOUNT_OVERFLOW"],
     ["90071992547409.92", "HKD", "AMOUNT_OVERFLOW"],
   ]) {
     assert.deepEqual(parseAmount(input, currency), { ok: false, error: { code, field: "amount" } });
@@ -63,6 +73,14 @@ test("HKD 100 splits into 33.34, 33.33, 33.33 in stable member order", () => {
 test("JPY 100 splits into 34, 33, 33", () => {
   const total = valueOf(parseAmount("100", "JPY"));
   assertShares(splitEqual(total, ["a", "b", "c"]), [34, 33, 33], total);
+});
+
+test("KRW and VND equal splits conserve whole-unit totals with stable remainders", () => {
+  const memberIds = ["a", "b", "c"];
+  const won = valueOf(parseAmount("100", "KRW"));
+  const dong = valueOf(parseAmount("100000", "VND"));
+  assertShares(splitEqual(won, memberIds), [34, 33, 33], won);
+  assertShares(splitEqual(dong, memberIds), [33_334, 33_333, 33_333], dong);
 });
 
 test("a host covering HKD 600 of 1000 leaves four HKD 100 shares by default", () => {

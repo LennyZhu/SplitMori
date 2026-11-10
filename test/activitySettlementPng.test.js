@@ -3,6 +3,9 @@ import test from "node:test";
 import { buildSettlementPngCard, resolveSettlementPngLanguages, settlementPngLayout } from "../src/services/activitySettlementPng.ts";
 import { buildSettlementDocument, shareSettlementDocument } from "../src/services/activitySettlementExport.ts";
 
+const currencies = ["HKD", "CNY", "MOP", "TWD", "USD", "JPY", "CAD", "AUD", "NZD", "MYR", "THB", "PHP", "KRW", "SGD", "VND"];
+const wholeUnitCurrencies = ["JPY", "KRW", "VND"];
+
 const snapshot = {
   name: "香港 / Tokyo", createdAt: Date.UTC(2026, 10, 7, 12), currency: "HKD", activityStatus: "completed", status: "unsettled",
   generatedAt: Date.UTC(2026, 10, 8, 12), outstandingMinor: 1001n, effectiveMinor: 5000n, refundMinor: 1000n, repaymentMinor: 300n,
@@ -11,7 +14,7 @@ const snapshot = {
 };
 
 test("S11 Pro PDF and CSV reuse the preview's amounts, language, dates and separate statuses in all currencies", () => {
-  for (const currency of ["HKD", "CNY", "MOP", "TWD", "USD", "JPY"]) {
+  for (const currency of currencies) {
     for (const language of ["zh-HK", "en"]) {
       const data = { ...snapshot, currency };
       const card = buildSettlementPngCard(data, language);
@@ -25,7 +28,7 @@ test("S11 Pro PDF and CSV reuse the preview's amounts, language, dates and separ
         assert.ok(csv.content.includes(value));
       }
       assert.ok(pdf.content.includes(card.outstanding));
-      const digits = currency === "JPY" ? "1001" : "10.01";
+      const digits = wholeUnitCurrencies.includes(currency) ? "1001" : "10.01";
       assert.ok(csv.content.includes(`"${currency}","${digits}"`));
       assert.ok(csv.content.includes(`"Alex","陳小明","${currency}","${digits}"`));
       assert.match(pdf.content, language === "en" ? /Suggested transfers are not completed payments/ : /轉帳建議不代表已完成付款/);
@@ -146,11 +149,13 @@ test("S11 output language selection leaves the App copy and underlying snapshot 
   assert.equal(resolveSettlementPngLanguages({ appLocale: "zh-HK", selectedOutputLanguage: en.language }).outputLanguage, "en");
 });
 
-test("S11 uses the same snapshot for both output languages and formats all six currencies", () => {
-  for (const currency of ["HKD", "CNY", "MOP", "TWD", "USD", "JPY"]) {
+test("S11 uses the same snapshot for both output languages and formats all 15 currencies", () => {
+  for (const currency of currencies) {
     const zh = buildSettlementPngCard({ ...snapshot, currency }, "zh-HK");
     const en = buildSettlementPngCard({ ...snapshot, currency }, "en");
-    assert.equal(zh.outstanding, currency === "JPY" ? "JPY 1,001" : `${currency} 10.01`);
+    assert.equal(zh.outstanding, `${currency} ${wholeUnitCurrencies.includes(currency) ? "1,001" : "10.01"}`);
+    assert.ok(zh.currencyLabel.endsWith(` ${currency}`));
+    assert.doesNotMatch(zh.currencyLabel, /undefined/);
     assert.equal(zh.outstanding, en.outstanding);
     assert.deepEqual(zh.transfers, en.transfers);
     assert.deepEqual(zh.transfers.map(({ from, to, amount }) => [from, to, amount]), [["Alex", "陳小明", zh.outstanding]]);

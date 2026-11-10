@@ -13,7 +13,7 @@ import { ActiveActivityLimitError, createActivityRepository, MemberManagementErr
 import { backupSnapshotName, DatabaseInitializationError, initializeDatabase } from "../src/data/database.ts";
 import { createDatabaseHost, databaseName, restoreFiles } from "../src/data/databaseHost.ts";
 import { createFinanceRepository, validateStoredLedgers } from "../src/data/finance.ts";
-import { applyMigration, migrations } from "../src/data/migrations.ts";
+import { applyMigration, expandedCurrencySchemaVersion, migrations, multiPayerSchemaVersion } from "../src/data/migrations.ts";
 import { createQuickSplitRepository } from "../src/data/quickSplits.ts";
 import { calculateQuickSplit } from "../src/domain/quickSplit.ts";
 import { splitEqual } from "../src/domain/split.ts";
@@ -24,7 +24,7 @@ import { loadActivityMembers } from "../src/services/activityMembers.ts";
 import { loadActivitySettlement } from "../src/services/activitySettlement.ts";
 import { buildSettlementPngCard, loadSettlementPngSnapshot } from "../src/services/activitySettlementPng.ts";
 import { buildSettlementDocument } from "../src/services/activitySettlementExport.ts";
-import { createAppPreferencesStore } from "../src/services/appPreferences.ts";
+import { createAppPreferencesStore, searchCurrencies } from "../src/services/appPreferences.ts";
 import { loadExpenseCorrectionPreview, loadExpenseDetail, saveReviewedExpenseCorrection, summarizeCorrectionBalances } from "../src/services/expenseDetail.ts";
 import { createExpenseEditor, expenseDateInput, expenseDateTimestamp, hydrateExpenseEditor, prepareExpenseEdit, prepareNewExpense } from "../src/services/expenseEditor.ts";
 import { inspectRepaymentDraft } from "../src/services/memberRepayment.ts";
@@ -1142,9 +1142,9 @@ test("backup validation rejects corrupt and future files and can preview an olde
   assert.equal(preview.financialEventCount, 0);
 }));
 
-test("S13 backup schema accepts the known standard and early revision layouts through v12 and the unified v13 layout", withTestFile(async (path) => {
+test("backup schema accepts the known early revision layouts and the canonical v13 and v14 schemas", withTestFile(async (path) => {
   const service = backupService(path);
-  for (const version of [9, 10, 11, 12, 13]) {
+  for (const version of [9, 10, 11, 12, 13, 14]) {
     for (const early of [false, true]) {
       const fixture = `${path}-${version}-${early}.sqlite`;
       const connection = openTestConnection(fixture);
@@ -1220,6 +1220,62 @@ async function seedLegacyPayments(connection, version) {
     PRAGMA user_version = ${version};
   `);
 }
+
+async function seedV13Payments(connection) {
+  await seedLegacyPayments(connection, 12);
+  await applyMigration(connection, multiPayerSchemaVersion - 1);
+  await connection.execAsync(`
+    UPDATE merchant_payments SET amount_minor = 9000 WHERE expense_id = 'dinner';
+    INSERT INTO merchant_payments VALUES ('trip', 'dinner', 'a', 1000);
+    UPDATE expense_revision_payments SET amount_minor = 7000 WHERE revision_id = 'legacy-revision';
+    INSERT INTO expense_revision_payments VALUES ('trip', 'legacy-revision', 'a', 1000);
+    PRAGMA user_version = 13;
+  `);
+}
+
+test("v14 expands the activity currency constraint without changing any v13 ledger rows", withTestFile(async (path) => {
+  const connection = openTestConnection(path);
+  try {
+    await seedV13Payments(connection);
+    const tables = ["activities", "members", "activity_members", "financial_events", "expenses", "expense_allocations",
+      "merchant_payments", "merchant_refunds", "refund_reductions", "member_transfers", "expense_revisions",
+      "expense_revision_allocations", "expense_revision_payments"];
+    const snapshot = () => Promise.all(tables.map((name) => connection.getAllAsync(`SELECT * FROM ${name} ORDER BY rowid`)));
+    const before = await snapshot();
+    const database = await initializeDatabase(connection);
+    assert.deepEqual(await snapshot(), before);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, expandedCurrencySchemaVersion);
+    assert.equal((await connection.getFirstAsync("PRAGMA foreign_keys")).foreign_keys, 1);
+    assert.equal(await connection.getFirstAsync("PRAGMA foreign_key_check"), null);
+    const ledger = valueOf(await createFinanceRepository(database).getActivityLedger("trip"));
+    assert.deepEqual(ledger.balanceSnapshot.balances.map(({ netBalanceMinor }) => netBalanceMinor), [3000, -3000]);
+    await assert.rejects(database.write((tx) => tx.execAsync(`
+      UPDATE activities SET currency = 'CAD' WHERE id = 'trip';
+    `)), /FOREIGN KEY constraint/);
+    await assert.rejects(database.write((tx) => tx.execAsync(`
+      INSERT INTO activities VALUES ('unsupported', 'Unsupported', 'EUR', 'active', 1, 1);
+    `)), /CHECK constraint/);
+  } finally {
+    connection.close();
+  }
+}));
+
+test("v14 rolls back the activity rebuild if the foreign key check fails", withTestFile(async (path) => {
+  const connection = openTestConnection(path);
+  try {
+    await seedV13Payments(connection);
+    await connection.execAsync("PRAGMA foreign_keys = OFF; UPDATE merchant_payments SET member_id = 'missing' WHERE member_id = 'z';");
+    const schema = () => connection.getFirstAsync("SELECT sql FROM sqlite_schema WHERE name = 'activities'");
+    const before = await schema();
+    await assert.rejects(initializeDatabase(connection), /Foreign key check failed after the currency migration/);
+    assert.deepEqual(await schema(), before);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, multiPayerSchemaVersion);
+    assert.equal((await connection.getFirstAsync("PRAGMA foreign_keys")).foreign_keys, 1);
+    assert.equal((await connection.getFirstAsync("SELECT member_id FROM merchant_payments WHERE member_id = 'missing'")).member_id, "missing");
+  } finally {
+    connection.close();
+  }
+}));
 
 test("Batch B migrates the S13 v11 index repair and preserves old single-payer revisions and cash flows", withTestFile(async (path) => {
   const connection = openTestConnection(path);
@@ -1367,6 +1423,71 @@ test("S13 creates a new activity with the saved USD default and preserves the or
   assert.equal(created.currency, "USD");
   assert.equal((await activities.getActivity("trip")).currency, "HKD");
 }));
+
+test("currency expansion persists all nine new activity currencies, quick records and formal expenses across reopening", withTestFile(async (path) => {
+  const added = ["CAD", "AUD", "NZD", "MYR", "THB", "PHP", "KRW", "SGD", "VND"];
+  let connection = openTestConnection(path);
+  try {
+    const database = await initializeDatabase(connection);
+    const activities = createActivityRepository(database, () => true);
+    const finance = createFinanceRepository(database, () => true);
+    const quick = createQuickSplitRepository(database);
+    for (const [index, currency] of added.entries()) {
+      assert.deepEqual(searchCurrencies(currency), [currency]);
+      const activity = await activities.createActivity({
+        id: currency, name: currency, currency, members: [{ id: `${currency}-owner`, displayName: "Owner" }],
+      });
+      const editor = { ...createExpenseEditor(activity), finalTotal: "100", merchantPayerId: activity.members[0].id };
+      const expense = valueOf(prepareNewExpense(`bill-${currency}`, "Dinner", editor));
+      valueOf(await finance.createExpense(activity.id, 100, expense));
+      const trial = { ...createQuickSplitEditor(currency), finalTotal: "100" };
+      const draft = valueOf(await quick.saveQuickDraft(`draft-${currency}`, serializeQuickSplitDraft(trial), index + 1));
+      assert.equal(hydrateQuickSplitDraft(draft.input).currency, currency);
+      valueOf(await quick.saveQuickHistory(`quick-${currency}`, valueOf(calculateQuickSplitEditor(trial)).input));
+    }
+    connection.close();
+    connection = openTestConnection(path);
+    const reopened = await initializeDatabase(connection);
+    const savedActivities = createActivityRepository(reopened);
+    const savedFinance = createFinanceRepository(reopened);
+    const savedQuick = createQuickSplitRepository(reopened);
+    for (const currency of added) {
+      const total = { currency, amountMinor: ["KRW", "VND"].includes(currency) ? 100 : 10_000 };
+      assert.equal((await savedActivities.getActivity(currency)).currency, currency);
+      assert.deepEqual(valueOf(await savedFinance.getExpense(currency, `bill-${currency}`)).expense.split.total, total);
+      assert.deepEqual(valueOf(await savedQuick.getQuickHistory(`quick-${currency}`)).snapshot.split.total, total);
+    }
+    const latest = valueOf(await savedQuick.getQuickDraft());
+    assert.deepEqual([latest.input.currency, hydrateQuickSplitDraft(latest.input).finalTotal], ["VND", "100"]);
+  } finally {
+    connection.close();
+  }
+}));
+
+test("currency expansion applies the saved CAD default to new S02/S06 forms while an HKD draft keeps its currency and amount", withFinance(
+  async (_finance, activities, database) => {
+    let rawPreferences = null;
+    const preferences = createAppPreferencesStore({
+      getItem: async () => rawPreferences,
+      setItem: async (_key, value) => { rawPreferences = value; },
+    });
+    const quick = createQuickSplitRepository(database);
+    const oldEditor = { ...createQuickSplitEditor((await preferences.load()).defaultCurrency), finalTotal: "560.00" };
+    valueOf(await quick.saveQuickDraft("old", serializeQuickSplitDraft(oldEditor), 100));
+    await preferences.save({ language: "en", defaultCurrency: "CAD" });
+    const { defaultCurrency } = await preferences.load();
+    await activities.completeActivity("trip");
+    const created = await activities.createActivity({
+      id: "canada", name: "Canada", currency: defaultCurrency, members: [{ id: "cad-member", displayName: "Member" }],
+    });
+    assert.equal(created.currency, "CAD");
+    assert.equal((await activities.getActivity("trip")).currency, "HKD");
+    const restored = hydrateQuickSplitDraft(valueOf(await quick.getQuickDraft()).input);
+    assert.deepEqual([restored.currency, restored.finalTotal], ["HKD", "560.00"]);
+    assert.equal(valueOf(await quick.clearQuickDraft()), true);
+    assert.equal(createQuickSplitEditor(defaultCurrency).currency, "CAD");
+  },
+));
 
 function restoreHost(directoryUri, platform, faults = {}) {
   const opened = new Set();
@@ -3059,7 +3180,7 @@ test("Batch B corrects payer amounts with reviewed refunds and prior repayments,
   },
 ));
 
-test("Batch B restores both v12 single-payer and v13 multi-payer backups with revisions and event history", withRestore(async ({
+test("Batch B restores v12, v13 and current backups with revisions and event history", withRestore(async ({
   directory, platform, live, source, service, exportSource, prepare,
 }) => {
   const legacyPath = join(directory, "legacy-v12.sqlite");
@@ -3080,7 +3201,24 @@ test("Batch B restores both v12 single-payer and v13 multi-payer backups with re
   const free = createFinanceRepository(live);
   assert.deepEqual(valueOf(await free.listExpenseRevisions("trip", "dinner")).map(({ expense }) => expense.merchantPayment.amountMinor),
     [10_000, 8000]);
-  assert.equal((await live.read((db) => db.getFirstAsync("PRAGMA user_version"))).user_version, 13);
+  assert.equal((await live.read((db) => db.getFirstAsync("PRAGMA user_version"))).user_version, expandedCurrencySchemaVersion);
+
+  const v13Path = join(directory, "legacy-v13.sqlite");
+  const v13 = openTestConnection(v13Path);
+  try {
+    await seedV13Payments(v13);
+  } finally {
+    v13.close();
+  }
+  const v13Bytes = readFileSync(v13Path);
+  const v13Backup = join(directory, "v13.splitmori-backup");
+  writeBackup(v13Backup, {
+    formatVersion: 1, schemaVersion: multiPayerSchemaVersion, createdAt: null, byteLength: v13Bytes.length, sha256: sha256(v13Bytes), assets: [],
+  }, v13Bytes);
+  await restore(v13Backup);
+  const v13Ledger = valueOf(await free.getActivityLedger("trip"));
+  assert.deepEqual(v13Ledger.revisions[0].expense.merchantPayments.map(({ amountMinor }) => amountMinor), [7000, 1000]);
+  assert.deepEqual(v13Ledger.balanceSnapshot.balances.map(({ netBalanceMinor }) => netBalanceMinor), [3000, -3000]);
 
   const pro = createFinanceRepository(source, () => true, () => true);
   valueOf(await pro.createExpense("trip", 100, multiPayerExpense()));
@@ -3092,7 +3230,7 @@ test("Batch B restores both v12 single-payer and v13 multi-payer backups with re
   valueOf(await pro.voidMerchantRefund("trip", { id: "refund-void", targetEventId: refund.id, occurredAt: 500 }));
   const before = valueOf(await pro.getActivityLedger("trip"));
   const uri = await exportSource();
-  assert.equal(valueOf(await createBackupService(platform).previewBackup(uri)).manifest.schemaVersion, 13);
+  assert.equal(valueOf(await createBackupService(platform).previewBackup(uri)).manifest.schemaVersion, expandedCurrencySchemaVersion);
   assert.deepEqual(valueOf(await pro.getActivityLedger("trip")), before);
   await restore(uri);
   assert.deepEqual(valueOf(await free.getActivityLedger("trip")), before);
@@ -3113,6 +3251,68 @@ test("Batch B restores both v12 single-payer and v13 multi-payer backups with re
   assert.deepEqual(await service.prepareRestore(pathToFileURL(invalid).href),
     { status: "validation-failed", code: "BACKUP_LEDGER_INVALID" });
   assert.deepEqual(valueOf(await free.getActivityLedger("trip")), before);
+}));
+
+test("currency expansion preserves VND payments, refunds, repayments and reviewed corrections through backup restore", withRestore(async ({
+  live, source, service, exportSource, prepare,
+}) => {
+  const currency = "VND";
+  const activities = createActivityRepository(source);
+  await activities.completeActivity("trip");
+  const activity = await activities.createActivity({
+    id: "vnd-trip", name: "Vietnam", currency, members: [{ id: "vnd-a", displayName: "A" }, { id: "vnd-b", displayName: "B" }],
+  });
+  const finance = createFinanceRepository(source, () => true, () => true);
+  const editor = {
+    ...createExpenseEditor(activity), finalTotal: "100000",
+    paymentRows: [{ memberId: "vnd-a", amount: "60000" }, { memberId: "vnd-b", amount: "40000" }],
+  };
+  const expenseId = "vnd-dinner";
+  assert.equal(prepareNewExpense(expenseId, "Dinner", { ...editor, finalTotal: "100000.5" }).error.code, "INVALID_AMOUNT_PRECISION");
+  const created = valueOf(prepareNewExpense(expenseId, "Dinner", editor));
+  valueOf(await finance.createExpense(activity.id, 100, created));
+  const refundNow = new Date(200);
+  const refundDetail = await loadExpenseDetail(activity.id, expenseId, source);
+  const refundDraft = { amount: "20000", recipientId: "vnd-b", date: expenseDateInput(refundNow), note: "" };
+  assert.equal(inspectMerchantRefundDraft({ ...refundDraft, amount: "20000.5" }, refundDetail, refundNow).errors.amount,
+    "INVALID_AMOUNT_PRECISION");
+  const preparedRefund = inspectMerchantRefundDraft(refundDraft, refundDetail, refundNow).prepared;
+  assert.ok(preparedRefund);
+  const review = valueOf(await finance.previewMerchantRefund(activity.id, preparedRefund.occurredAt,
+    { id: "vnd-refund", ...preparedRefund.refund }));
+  assert.deepEqual(review.refund.reductions.map(({ amountMinor }) => amountMinor), [10_000, 10_000]);
+  valueOf(await finance.commitReviewedMerchantRefund(activity.id, review));
+  const repaymentNow = new Date(300);
+  const afterRefund = await loadActivitySettlement(activity.id, source);
+  const repaymentDraft = { amount: "5000", fromMemberId: "vnd-b", toMemberId: "vnd-a", date: expenseDateInput(repaymentNow), note: "" };
+  assert.equal(inspectRepaymentDraft({ ...repaymentDraft, amount: "5000.0" }, afterRefund, repaymentNow).errors.amount,
+    "INVALID_AMOUNT_PRECISION");
+  const preparedRepayment = inspectRepaymentDraft(repaymentDraft, afterRefund, repaymentNow).prepared;
+  assert.ok(preparedRepayment);
+  valueOf(await finance.recordMemberTransfer(activity.id, preparedRepayment.occurredAt,
+    { id: "vnd-repayment", ...preparedRepayment.transfer }, preparedRepayment.expectedBalances));
+
+  const detail = await loadExpenseDetail(activity.id, expenseId, source);
+  const original = hydrateExpenseEditor(activity, detail.expense);
+  const corrected = valueOf(prepareExpenseEdit(detail.expense, original, {
+    ...original, paymentRows: [{ memberId: "vnd-a", amount: "70000" }, { memberId: "vnd-b", amount: "30000" }],
+  }, "Dinner", detail.expenseDate));
+  const impact = valueOf(await finance.previewExpenseCorrection(activity.id, expenseId, corrected, 1));
+  valueOf(await finance.commitReviewedExpenseCorrection(activity.id, {
+    expenseId, expectedVersion: 1, revisionId: "vnd-revision", occurredAt: 400,
+    proposed: impact.expense.after, expectedLedger: impact.ledgerToken, reviewedRefundIds: [review.refund.id],
+  }));
+  const before = valueOf(await finance.getActivityLedger(activity.id));
+  const summary = await loadActivitySettlement(activity.id, source);
+  assert.deepEqual([summary.effectiveMinor, summary.refundMinor, summary.repaymentMinor, summary.outstandingMinor],
+    [80_000n, 20_000n, 5000n, 25_000n]);
+  assert.deepEqual(before.balanceSnapshot.balances.map(({ netBalanceMinor }) => netBalanceMinor), [25_000, -25_000]);
+  assert.deepEqual(before.suggestions, [{ fromMemberId: "vnd-b", toMemberId: "vnd-a", currency, amountMinor: 25_000 }]);
+
+  const { confirmation } = await prepare(await exportSource());
+  assert.deepEqual(await service.restoreBackup({ confirmation, confirmed: true }), { status: "restored" });
+  assert.equal((await createActivityRepository(live).getActivity(activity.id)).currency, currency);
+  assert.deepEqual(valueOf(await createFinanceRepository(live).getActivityLedger(activity.id)), before);
 }));
 
 test("Phase 4A localizes activity ledger labels and legacy fallback names without changing stored names", withFinance(async (finance, _activities, database) => {

@@ -1,4 +1,4 @@
-import { currencyLabels, type AppLanguage } from "../services/appPreferences.ts";
+import { currencyLabels, searchCurrencies, type AppLanguage } from "../services/appPreferences.ts";
 import { useCopy } from "./useCopy.ts";
 import { useState } from "react";
 import {
@@ -8,17 +8,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { Currency } from "../domain/money.ts";
 import { colors, Icon } from "./visuals.tsx";
 
-const currencies: readonly { code: Currency; name: string; aliases?: readonly string[] }[] = [
-  { code: "HKD", name: "港元", aliases: ["港幣"] },
-  { code: "CNY", name: "人民幣" },
-  { code: "MOP", name: "澳門元", aliases: ["澳門幣"] },
-  { code: "TWD", name: "新台幣", aliases: ["新臺幣", "台幣", "臺幣"] },
-  { code: "USD", name: "美元", aliases: ["美金"] },
-  { code: "JPY", name: "日圓", aliases: ["日元", "日幣"] },
-];
-
 export function currencyName(code: Currency, language: AppLanguage): string {
-  return language === "en" ? currencyLabels[code].en : currencies.find((currency) => currency.code === code)?.name ?? code;
+  return currencyLabels[code][language];
 }
 
 export function CurrencyPicker({ selected, onSelect, onClose }: {
@@ -27,10 +18,7 @@ export function CurrencyPicker({ selected, onSelect, onClose }: {
   const t = useCopy();
   const [query, setQuery] = useState("");
   const { top, bottom, left, right } = useSafeAreaInsets();
-  const term = query.trim().toUpperCase();
-  const options = currencies.filter(({ code, name, aliases }) =>
-    code.includes(term) || currencyLabels[code].en.toUpperCase().includes(term) || name.includes(term) || aliases?.some((alias) => alias.includes(term)),
-  );
+  const options = searchCurrencies(query);
 
   function cancel() {
     Keyboard.dismiss();
@@ -73,7 +61,7 @@ export function CurrencyPicker({ selected, onSelect, onClose }: {
             keyboardDismissMode="on-drag"
           >
             <View accessibilityRole="radiogroup">
-              {options.map(({ code }) => {
+              {options.map((code) => {
                 const name = currencyName(code, t.language);
                 const checked = code === selected;
                 return (

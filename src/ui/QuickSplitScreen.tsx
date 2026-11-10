@@ -5,7 +5,7 @@ import {
   Text, TextInput, View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { parseAmount, type Currency } from "../domain/money.ts";
+import { minorDigits, parseAmount, type Currency } from "../domain/money.ts";
 import {
   addEditorMember, calculateQuickSplitEditor, editorMemberName, removeEditorMember,
   type EditorError, type EditorField, type QuickSplitEditorState, type QuickSplitPreview,
@@ -99,7 +99,7 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
   const chrome = useRef({ header: 0, footer: 0 });
   const { top } = useSafeAreaInsets();
   const details = editor.chargeMode === "details";
-  const amountPlaceholder = editor.currency === "JPY" ? "0" : "0.00";
+  const amountPlaceholder = minorDigits[editor.currency] === 0 ? "0" : "0.00";
   const busy = loading || discarding;
   const editable = !busy && draftError !== "load";
 

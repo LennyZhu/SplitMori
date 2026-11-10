@@ -17,7 +17,7 @@ type HomeActions = {
   onRecord: (record: HomeRecentRecord) => void;
 };
 
-const currencySymbols: Record<Currency, string> = {
+const currencySymbols: Partial<Record<Currency, string>> = {
   HKD: "HK$", CNY: "CN¥", MOP: "MOP$", TWD: "NT$", USD: "US$", JPY: "JP¥",
 };
 
@@ -98,7 +98,7 @@ function ActivityCard({ activity, onPress }: { activity: HomeActivity; onPress: 
             <View style={styles.badge}><Text style={styles.badgeText}>{t("進行中")}</Text></View>
           </View>
           <Text style={styles.activityAmount} accessibilityLabel={`${total.currency} ${amount}`}>
-            <Text style={styles.activityCurrency}>{currencySymbols[total.currency]} </Text>
+            <Text style={styles.activityCurrency}>{currencySymbols[total.currency] ?? total.currency} </Text>
             {amount}
           </Text>
         </View>
@@ -130,7 +130,7 @@ function RecentRow({ record, onPress }: { record: HomeRecentRecord; onPress: () 
           <Text style={styles.meta}>{quick ? t("快速計算") : activityStatus}{date ? ` · ${date}` : ""}</Text>
         </View>
         <Text style={styles.recordAmount} accessibilityLabel={`${total.currency} ${amount}`}>
-          {currencySymbols[total.currency]} {amount}
+          {currencySymbols[total.currency] ?? total.currency} {amount}
         </Text>
       </View>
       <Icon name="next" color={colors.muted} size={15} />

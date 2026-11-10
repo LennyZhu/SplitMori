@@ -1,6 +1,7 @@
 import type { SQLiteConnection } from "./database.ts";
 
 export const multiPayerSchemaVersion = 13;
+export const expandedCurrencySchemaVersion = 14;
 
 export const migrations = [
   `
@@ -308,6 +309,24 @@ export const migrations = [
   DROP INDEX merchant_payments_single_payer;
   CREATE INDEX merchant_payments_by_activity ON merchant_payments(activity_id, expense_id);
   `,
+  `
+  -- Rebuild only the parent table so all financial tables keep their original references and rows.
+  CREATE TABLE activities_v14 (
+    id TEXT NOT NULL PRIMARY KEY,
+    name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+    currency TEXT NOT NULL CHECK (currency IN (
+      'HKD', 'CNY', 'MOP', 'TWD', 'USD', 'JPY', 'CAD', 'AUD', 'NZD', 'MYR', 'THB', 'PHP', 'KRW', 'SGD', 'VND'
+    )),
+    status TEXT NOT NULL CHECK (status IN ('active', 'completed')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL CHECK (updated_at >= created_at)
+  );
+  INSERT INTO activities_v14 (id, name, currency, status, created_at, updated_at)
+  SELECT id, name, currency, status, created_at, updated_at FROM activities;
+  DROP TABLE activities;
+  ALTER TABLE activities_v14 RENAME TO activities;
+  CREATE UNIQUE INDEX activities_id_currency ON activities(id, currency);
+  `,
 ] as const;
 
 export async function applyMigration(
@@ -318,4 +337,7 @@ export async function applyMigration(
     "SELECT name FROM pragma_table_info('expense_revisions') WHERE name = 'reviewed_refund_ids'",
   )) return;
   await connection.execAsync(migrations[index]);
+  if (index === expandedCurrencySchemaVersion - 1 && await connection.getFirstAsync("PRAGMA foreign_key_check")) {
+    throw new Error("Foreign key check failed after the currency migration");
+  }
 }

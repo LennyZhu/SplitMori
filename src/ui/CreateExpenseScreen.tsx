@@ -12,7 +12,7 @@ import { createActivityRepository, type ActivityDetail } from "../data/activitie
 import { getLocalDatabase } from "../data/database.ts";
 import { createFinanceRepository, type FinanceExpense } from "../data/finance.ts";
 import { merchantPaymentsOf } from "../domain/balance.ts";
-import { parseAmount } from "../domain/money.ts";
+import { minorDigits, parseAmount } from "../domain/money.ts";
 import type { DomainErrorCode } from "../domain/result.ts";
 import {
   calculateExpenseSplit, createExpenseEditor, expenseDateInput, expenseDateTimestamp, expenseSplitUnchanged,
@@ -298,7 +298,7 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
     }
   }
 
-  const placeholder = activity?.currency === "JPY" ? "0" : "0.00";
+  const placeholder = activity && minorDigits[activity.currency] === 0 ? "0" : "0.00";
   const money = (minor: number | bigint) => activity ? formatResultMoney(activity.currency, minor) : "";
   const shares = new Map(split?.allocations.map(({ memberId, amountMinor }) => [memberId, amountMinor]));
   const total = split && money(split.total.amountMinor);
