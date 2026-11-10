@@ -1,5 +1,8 @@
+import { formatUiCount, splitModeLabel } from "../services/localizedCopy.ts";
+import type { Copy } from "../services/localizedCopy.ts";
+import { useCopy } from "./useCopy.ts";
 import { uuid } from "expo";
-import { useCallback, useContext, useEffect, useRef, useState, type ComponentRef, type ReactNode, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type ComponentRef, type ReactNode, type RefObject } from "react";
 import {
   ActivityIndicator, BackHandler, Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView,
   StyleSheet, Text, TextInput, View,
@@ -15,11 +18,9 @@ import {
 } from "../services/quickSplitConversion.ts";
 import { formatResultMoney } from "../services/quickSplitResult.ts";
 import { usePro } from "./ProContext.ts";
-import { AppLanguageContext } from "./AppLanguageContext.ts";
 import { advancedSplitCopy } from "./advancedSplitCopy.ts";
 import { colors, Icon } from "./visuals.tsx";
 
-const modeLabels = { equal: "平均分攤", treat: "請客", individual: "各自消費", custom: "自訂分攤" } as const;
 
 export function useConversionRead<T>(read: () => Promise<T>) {
   const [state, setState] = useState<{ status: "loading" | "error" } | { status: "loaded"; value: T }>({ status: "loading" });
@@ -39,27 +40,29 @@ export function useConversionRead<T>(read: () => Promise<T>) {
 export function QuickRecordSummary({ history, target, destination }: {
   history: QuickHistoryRecord; target?: Pick<ConversionTarget, "name" | "currency">; destination?: ConversionDestination | null;
 }) {
+  const t = useCopy();
   const { total } = history.snapshot.split;
-  const mode = modeLabels[history.input.method.kind];
+  const mode = splitModeLabel(t, history.input.method.kind);
   const count = history.input.members.length;
   return (
     <View style={[styles.card, styles.summary]}>
-      <Text style={styles.caption}>{target ? "來源快速記錄" : "來源 · 已儲存的快速分帳記錄"}</Text>
+      <Text style={styles.caption}>{target ? t("來源快速記錄") : t("來源 · 已儲存的快速分帳記錄")}</Text>
       <View style={styles.amountRow}>
         <Text style={[styles.summaryAmount, target && styles.confirmAmount]}>{formatResultMoney(total.currency, total.amountMinor)}</Text>
-        {target && <Text style={styles.caption}>{mode} · {count} 人</Text>}
+        {target && <Text style={styles.caption}>{mode} · {formatUiCount(t, count, "participants")}</Text>}
       </View>
-      <Text style={styles.caption}>{target ? `目標活動：${target.name} · ${target.currency}`
-        : `${mode} · ${count} 位成員 · ${destination ? `已加入活動「${destination.activityName}」` : "尚未加入活動"}`}</Text>
+      <Text style={styles.caption}>{target ? t("目標活動：{0} · {1}", target.name, target.currency)
+        : t("{0} · {1} · {2}", mode, formatUiCount(t, count, "members"), destination ? t("已加入活動「{0}」", destination.activityName) : t("尚未加入活動"))}</Text>
     </View>
   );
 }
 
-export function ConversionPage({ title, backLabel = "返回", endLabel, endAction, onBack, children, footer, scrollRef, busy = false }: {
+export function ConversionPage({ title, backLabel, endLabel, endAction, onBack, children, footer, scrollRef, busy = false }: {
   title: string; backLabel?: string; endLabel?: string; onBack: () => void; children: ReactNode; footer?: ReactNode;
   endAction?: { label: string; onPress: () => void };
   scrollRef?: RefObject<ComponentRef<typeof ScrollView> | null>; busy?: boolean;
 }) {
+  const t = useCopy();
   const { top } = useSafeAreaInsets();
   useEffect(() => {
     const sub = BackHandler.addEventListener("hardwareBackPress", () => { onBack(); return true; });
@@ -69,7 +72,7 @@ export function ConversionPage({ title, backLabel = "返回", endLabel, endActio
   return (
     <KeyboardAvoidingView style={styles.screen} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={top}>
       <View style={styles.header}>
-        <Pressable accessibilityRole="button" accessibilityLabel={backLabel} disabled={busy} onPress={onBack} style={styles.headerSide}>
+        <Pressable accessibilityRole="button" accessibilityLabel={backLabel ?? t("返回")} disabled={busy} onPress={onBack} style={styles.headerSide}>
           <Icon name="back" size={23} />
         </Pressable>
         <Text accessibilityRole="header" style={styles.title}>{title}</Text>
@@ -105,15 +108,17 @@ export function ConversionButton({ label, onPress, disabled = false }: {
 }
 
 export function ConversionReadError({ retry }: { retry: () => void }) {
+  const t = useCopy();
   return <View style={styles.card}>
-    <Text accessibilityRole="alert" style={styles.body}>未能讀取本機資料，請重試。</Text>
-    <Pressable accessibilityRole="button" onPress={retry} style={styles.retry}><Text style={styles.label}>重新讀取</Text></Pressable>
+    <Text accessibilityRole="alert" style={styles.body}>{t("未能讀取本機資料，請重試。")}</Text>
+    <Pressable accessibilityRole="button" onPress={retry} style={styles.retry}><Text style={styles.label}>{t("重新讀取")}</Text></Pressable>
   </View>;
 }
 
 function ActivityOption({ item, history, selected, onPress }: {
   item: ConversionTarget; history: QuickHistoryRecord; selected: boolean; onPress: () => void;
 }) {
+  const t = useCopy();
   const enabled = canSelectConversionTarget(item, history);
   return (
     <Pressable accessibilityRole="radio" accessibilityState={{ checked: selected, disabled: !enabled }}
@@ -122,11 +127,11 @@ function ActivityOption({ item, history, selected, onPress }: {
       <View style={styles.fill}>
         <View style={styles.activityTitle}>
           <Text style={styles.heading}>{item.name}</Text>
-          <Text style={[styles.caption, styles.badge]}>{item.status === "active" ? "進行中" : "已完成"}</Text>
+          <Text style={[styles.caption, styles.badge]}>{item.status === "active" ? t("進行中") : t("已完成")}</Text>
         </View>
-        <Text style={styles.caption}>{item.currency} · {item.status === "completed" ? "需重新開啟才能加入"
-          : !enabled ? `目前 ${item.memberCount} 位成員，未足夠一對一對應`
-            : `${item.memberCount} 位成員 · 目前 ${item.expenseCount} 筆費用`}</Text>
+        <Text style={styles.caption}>{item.currency} · {item.status === "completed" ? t("需重新開啟才能加入")
+          : !enabled ? t("目前有 {0}，未足夠一對一對應", formatUiCount(t, item.memberCount, "members"))
+            : t("{0} · 目前 {1}", formatUiCount(t, item.memberCount, "members"), formatUiCount(t, item.expenseCount, "expenses"))}</Text>
       </View>
       <View style={[styles.radio, selected && styles.checked]}>
         {selected && <Icon name="check" size={14} color={colors.onPrimary} />}
@@ -138,6 +143,7 @@ function ActivityOption({ item, history, selected, onPress }: {
 export function QuickSplitConversionScreen({ historyId, onBack, onJoined }: {
   historyId: string; onBack: () => void; onJoined: (activityId: string) => void;
 }) {
+  const t = useCopy();
   const [selectedId, setSelectedId] = useState<string>();
   const [confirmId, setConfirmId] = useState<string>();
   const read = useCallback(async () => {
@@ -159,23 +165,23 @@ export function QuickSplitConversionScreen({ historyId, onBack, onJoined }: {
   }
 
   return (
-    <ConversionPage title="選擇活動" endLabel="取消" onBack={onBack}
+    <ConversionPage title={t("選擇活動")} endLabel={t("取消")} onBack={onBack}
       footer={source && (destination
-        ? <ConversionButton label="查看活動" onPress={() => onJoined(destination.activityId)} />
-        : <ConversionButton label="下一步 · 確認加入" disabled={!selected} onPress={() => selected && setConfirmId(selected.id)} />)}>
-      {state.status === "loading" && <ActivityIndicator accessibilityLabel="正在讀取活動" color={colors.ink} />}
+        ? <ConversionButton label={t("查看活動")} onPress={() => onJoined(destination.activityId)} />
+        : <ConversionButton label={t("下一步 · 確認加入")} disabled={!selected} onPress={() => selected && setConfirmId(selected.id)} />)}>
+      {state.status === "loading" && <ActivityIndicator accessibilityLabel={t("正在讀取活動")} color={colors.ink} />}
       {state.status === "error" && <ConversionReadError retry={retry} />}
-      {source === null && <Text style={styles.body}>找不到這筆已儲存的快速記錄。</Text>}
+      {source === null && <Text style={styles.body}>{t("找不到這筆已儲存的快速記錄。")}</Text>}
       {source && <QuickRecordSummary history={source.history} destination={destination} />}
       {source && !destination && (
         <>
           <View style={styles.intro}>
-            <Text accessibilityRole="header" style={styles.heading}>加入哪個活動？</Text>
-            <Text style={styles.caption}>只可加入同幣種、進行中的活動。</Text>
+            <Text accessibilityRole="header" style={styles.heading}>{t("加入哪個活動？")}</Text>
+            <Text style={styles.caption}>{t("只可加入同幣種、進行中的活動。")}</Text>
           </View>
           {eligible.length === 0 && <View style={styles.card}>
-            <Text style={styles.label}>暫無可加入的活動</Text>
-            <Text style={styles.caption}>請先在「活動」開啟同幣種且有足夠成員的活動，再返回這筆記錄。</Text>
+            <Text style={styles.label}>{t("暫無可加入的活動")}</Text>
+            <Text style={styles.caption}>{t("請先在「活動」開啟同幣種且有足夠成員的活動，再返回這筆記錄。")}</Text>
           </View>}
           <View accessibilityRole="radiogroup" style={styles.options}>
             {targets.map((item) => <ActivityOption key={item.id} item={item} history={source.history}
@@ -183,10 +189,10 @@ export function QuickSplitConversionScreen({ historyId, onBack, onJoined }: {
           </View>
           <View style={styles.createNotice}>
             <Icon name="plus" size={15} color={colors.muted} />
-            <Text style={[styles.body, styles.fill]}>建立新活動</Text>
-            <Text style={styles.caption}>此流程僅支援已有活動</Text>
+            <Text style={[styles.body, styles.fill]}>{t("建立新活動")}</Text>
+            <Text style={styles.caption}>{t("此流程僅支援已有活動")}</Text>
           </View>
-          <Text style={styles.caption}>其他幣種的活動不會出現在清單。此流程會新增一筆正式費用，原分攤結果會保留。</Text>
+          <Text style={styles.caption}>{t("其他幣種的活動不會出現在清單。此流程會新增一筆正式費用，原分攤結果會保留。")}</Text>
         </>
       )}
     </ConversionPage>
@@ -205,12 +211,12 @@ function PickerField({ label, value, onPress, compact = false }: {
   );
 }
 
-export function MemberPicker({ title, members, labels, selected, onSelect, onClose, onClear,
-  emptyText = "目前沒有可選成員，請先清除其他對應。" }: {
+export function MemberPicker({ title, members, labels, selected, onSelect, onClose, onClear, emptyText }: {
   title: string; members: readonly ActivityMember[]; selected?: string; onSelect: (id: string) => void;
   labels: ReadonlyMap<string, string>;
   onClose: () => void; onClear?: () => void; emptyText?: string;
 }) {
+  const t = useCopy();
   const { top, bottom, left, right } = useSafeAreaInsets();
   return (
     <Modal visible transparent animationType="fade" onRequestClose={onClose}>
@@ -219,7 +225,7 @@ export function MemberPicker({ title, members, labels, selected, onSelect, onClo
         <View accessibilityViewIsModal onAccessibilityEscape={onClose} style={[styles.sheet, { paddingBottom: Math.max(14, bottom) }]}>
           <View style={styles.amountRow}>
             <Text accessibilityRole="header" style={[styles.heading, styles.fill]}>{title}</Text>
-            <Pressable accessibilityRole="button" onPress={onClose} style={styles.retry}><Text style={styles.body}>取消</Text></Pressable>
+            <Pressable accessibilityRole="button" onPress={onClose} style={styles.retry}><Text style={styles.body}>{t("取消")}</Text></Pressable>
           </View>
           <ScrollView style={styles.pickerScroll}>
             {members.map(({ id, displayName }) => (
@@ -229,8 +235,8 @@ export function MemberPicker({ title, members, labels, selected, onSelect, onClo
                 {id === selected && <Icon name="check" size={17} />}
               </Pressable>
             ))}
-            {members.length === 0 && <Text style={styles.caption}>{emptyText}</Text>}
-            {onClear && <Pressable accessibilityRole="button" onPress={onClear} style={styles.retry}><Text style={styles.label}>清除對應</Text></Pressable>}
+            {members.length === 0 && <Text style={styles.caption}>{emptyText ?? t("目前沒有可選成員，請先清除其他對應。")}</Text>}
+            {onClear && <Pressable accessibilityRole="button" onPress={onClear} style={styles.retry}><Text style={styles.label}>{t("清除對應")}</Text></Pressable>}
           </ScrollView>
         </View>
       </View>
@@ -238,41 +244,42 @@ export function MemberPicker({ title, members, labels, selected, onSelect, onClo
   );
 }
 
-function conversionError(code: DomainErrorCode): string {
+function conversionError(t: Copy, code: DomainErrorCode): string {
   switch (code) {
-    case "ACTIVITY_COMPLETED": return "活動已完成，請返回選擇其他活動。";
-    case "EXPENSE_EDIT_LIMIT": return "目前有多於一個進行中的活動。請先完成其他活動或確認 Pro 狀態。";
-    case "ACTIVITY_NOT_FOUND": return "找不到目標活動，請返回重新選擇。";
-    case "CURRENCY_MISMATCH": return "幣種不一致，請返回重新選擇活動。";
-    case "QUICK_HISTORY_NOT_FOUND": return "找不到來源記錄，請返回重新讀取。";
-    case "QUICK_HISTORY_ALREADY_CONVERTED": return "這筆記錄已加入活動，請返回查看。";
-    case "CONVERSION_REQUEST_CONFLICT": return "此請求已有不同的入帳資料，請返回核對記錄狀態。";
-    case "INVALID_MEMBER_MAPPING": return "請確認每位來源成員各自對應一位不同的活動成員。";
+    case "ACTIVITY_COMPLETED": return t("活動已完成，請返回選擇其他活動。");
+    case "EXPENSE_EDIT_LIMIT": return t("目前有多於一個進行中的活動。請先完成其他活動或確認 Pro 狀態。");
+    case "ACTIVITY_NOT_FOUND": return t("找不到目標活動，請返回重新選擇。");
+    case "CURRENCY_MISMATCH": return t("幣種不一致，請返回重新選擇活動。");
+    case "QUICK_HISTORY_NOT_FOUND": return t("找不到來源記錄，請返回重新讀取。");
+    case "QUICK_HISTORY_ALREADY_CONVERTED": return t("這筆記錄已加入活動，請返回查看。");
+    case "CONVERSION_REQUEST_CONFLICT": return t("此請求已有不同的入帳資料，請返回核對記錄狀態。");
+    case "INVALID_MEMBER_MAPPING": return t("請確認每位來源成員各自對應一位不同的活動成員。");
     case "MISSING_MERCHANT_PAYMENT":
-    case "MEMBER_NOT_PARTICIPATING": return "請選擇一位有效的活動成員作為實際付款人。";
-    case "INVALID_EXPENSE_NAME": return "請輸入費用名稱。";
+    case "MEMBER_NOT_PARTICIPATING": return t("請選擇一位有效的活動成員作為實際付款人。");
+    case "INVALID_EXPENSE_NAME": return t("請輸入費用名稱。");
     case "TOTAL_MISMATCH":
-    case "INVALID_SPLIT_SNAPSHOT": return "來源快照的分攤金額無法核對，未能加入活動。";
-    case "AMOUNT_OVERFLOW": return "入帳後的金額超出上限。";
-    default: return "未能加入活動，請核對資料後再試。";
+    case "INVALID_SPLIT_SNAPSHOT": return t("來源快照的分攤金額無法核對，未能加入活動。");
+    case "AMOUNT_OVERFLOW": return t("入帳後的金額超出上限。");
+    default: return t("未能加入活動，請核對資料後再試。");
   }
 }
 
 type Picker = { kind: "payer" } | { kind: "mapping"; sourceId: string };
 
-export function memberLabels(members: readonly { id: string; displayName: string }[]) {
+export function memberLabels(t: Copy, members: readonly { id: string; displayName: string }[]) {
   const counts = new Map<string, number>();
   for (const { displayName } of members) counts.set(displayName, (counts.get(displayName) ?? 0) + 1);
   return new Map(members.map(({ id, displayName }, index) => [
-    id, counts.get(displayName) === 1 ? displayName : `${displayName}（成員 ${index + 1}）`,
+    id, counts.get(displayName) === 1 ? displayName : t("{0}（成員 {1}）", displayName, index + 1),
   ]));
 }
 
 function ConfirmConversion({ history, activityId, onBack, onJoined }: {
   history: QuickHistoryRecord; activityId: string; onBack: () => void; onJoined: (id: string) => void;
 }) {
+  const t = useCopy();
   const { hasProAccess } = usePro();
-  const copy = advancedSplitCopy(useContext(AppLanguageContext));
+  const copy = advancedSplitCopy(t.language);
   const read = useCallback(async () => createActivityRepository(await getLocalDatabase()).getActivity(activityId), [activityId]);
   const { state, retry } = useConversionRead(read);
   const activity = state.status === "loaded" ? state.value : undefined;
@@ -310,8 +317,8 @@ function ConfirmConversion({ history, activityId, onBack, onJoined }: {
 
   const { total, allocations } = history.snapshot.split;
   const members = activity?.members ?? [];
-  const names = memberLabels(members);
-  const sourceNames = memberLabels(history.input.members);
+  const names = memberLabels(t, members);
+  const sourceNames = memberLabels(t, history.input.members);
   const memberMapping: MemberMapping[] = Array.from(mapping, ([quickMemberId, activityMemberId]) => ({ quickMemberId, activityMemberId }));
   const preview = activity && projectQuickConversion(history, activity, memberMapping);
   const available = activity?.status === "active" && activity.currency === total.currency
@@ -372,68 +379,68 @@ function ConfirmConversion({ history, activityId, onBack, onJoined }: {
 
   return (
     <>
-      <ConversionPage title="確認加入活動" endLabel="返回" onBack={back} busy={saving} scrollRef={scroll}
+      <ConversionPage title={t("確認加入活動")} endLabel={t("返回")} onBack={back} busy={saving} scrollRef={scroll}
         footer={<>
           {error && <Text accessibilityRole="alert" style={styles.error}>
-            {error === "PRO_REQUIRED" ? copy.locked : conversionError(error)}
+            {error === "PRO_REQUIRED" ? copy.locked : conversionError(t, error)}
           </Text>}
-          <ConversionButton label={saving ? "正在加入…" : "確認加入活動"} disabled={!available || saving} onPress={() => { void submit(); }} />
+          <ConversionButton label={saving ? t("正在加入…") : t("確認加入活動")} disabled={!available || saving} onPress={() => { void submit(); }} />
         </>}>
-        {state.status === "loading" && <ActivityIndicator accessibilityLabel="正在讀取活動" color={colors.ink} />}
+        {state.status === "loading" && <ActivityIndicator accessibilityLabel={t("正在讀取活動")} color={colors.ink} />}
         {state.status === "error" && <ConversionReadError retry={retry} />}
-        {activity === null && <Text style={styles.body}>{conversionError("ACTIVITY_NOT_FOUND")}</Text>}
+        {activity === null && <Text style={styles.body}>{conversionError(t, "ACTIVITY_NOT_FOUND")}</Text>}
         {activity && <QuickRecordSummary history={history} target={activity} />}
-        {activity && !available && <Text style={styles.body}>{activity.status !== "active" ? conversionError("ACTIVITY_COMPLETED")
-          : activity.currency !== total.currency ? conversionError("CURRENCY_MISMATCH") : "活動成員不足，無法完成一對一對應。"}</Text>}
+        {activity && !available && <Text style={styles.body}>{activity.status !== "active" ? conversionError(t, "ACTIVITY_COMPLETED")
+          : activity.currency !== total.currency ? conversionError(t, "CURRENCY_MISMATCH") : t("活動成員不足，無法完成一對一對應。")}</Text>}
         {available && (
           <>
             <View style={styles.field} onLayout={({ nativeEvent }) => { offsets.current.name = nativeEvent.layout.y; }}>
-              <Text style={styles.label}>費用名稱 *</Text>
-              <TextInput accessibilityLabel="費用名稱" placeholder="輸入費用名稱" placeholderTextColor={colors.muted}
+              <Text style={styles.label}>{t("費用名稱 *")}</Text>
+              <TextInput accessibilityLabel={t("費用名稱")} placeholder={t("輸入費用名稱")} placeholderTextColor={colors.muted}
                 value={name} onChangeText={(value) => { setName(value); setError(undefined); }} editable={!saving}
                 onFocus={() => { if (Platform.OS === "ios" && Keyboard.isVisible()) requestAnimationFrame(revealInput); }} style={styles.input} />
-              {attempted && !name.trim() && <Text accessibilityRole="alert" style={styles.error}>請輸入費用名稱。</Text>}
+              {attempted && !name.trim() && <Text accessibilityRole="alert" style={styles.error}>{t("請輸入費用名稱。")}</Text>}
             </View>
             <View style={styles.field} onLayout={({ nativeEvent }) => { offsets.current.payer = nativeEvent.layout.y; }}>
-              <Text style={styles.label}>實際商家付款人 *</Text>
-              <PickerField label="實際商家付款人" value={names.get(payerId ?? "") ?? "選擇實際付款人"} onPress={() => openPicker({ kind: "payer" })} />
-              {attempted && !names.has(payerId ?? "") && <Text accessibilityRole="alert" style={styles.error}>請選擇實際付款人。</Text>}
+              <Text style={styles.label}>{t("實際商家付款人 *")}</Text>
+              <PickerField label={t("實際商家付款人")} value={names.get(payerId ?? "") ?? t("選擇實際付款人")} onPress={() => openPicker({ kind: "payer" })} />
+              {attempted && !names.has(payerId ?? "") && <Text accessibilityRole="alert" style={styles.error}>{t("請選擇實際付款人。")}</Text>}
             </View>
             <View style={styles.card} onLayout={({ nativeEvent }) => { offsets.current.mapping = nativeEvent.layout.y; }}>
-              <Text accessibilityRole="header" style={styles.label}>成員對應</Text>
-              <Text style={styles.caption}>將快速記錄的成員對應至活動成員，原分攤金額及尾差會保留。</Text>
+              <Text accessibilityRole="header" style={styles.label}>{t("成員對應")}</Text>
+              <Text style={styles.caption}>{t("將快速記錄的成員對應至活動成員，原分攤金額及尾差會保留。")}</Text>
               {history.input.members.map(({ id }) => (
                 <View key={id} style={styles.mappingRow}>
                   <View style={[styles.input, styles.compactField, styles.originalMember]}>
                     <Text style={styles.body}>{sourceNames.get(id)}</Text>
                   </View>
                   <Text accessible={false} style={styles.arrow}>→</Text>
-                  <PickerField compact label={`${sourceNames.get(id)}對應的活動成員`}
-                    value={names.get(mapping.get(id) ?? "") ?? "選擇成員"} onPress={() => openPicker({ kind: "mapping", sourceId: id })} />
+                  <PickerField compact label={t("{0}對應的活動成員", sourceNames.get(id) ?? t("未知成員"))}
+                    value={names.get(mapping.get(id) ?? "") ?? t("選擇成員")} onPress={() => openPicker({ kind: "mapping", sourceId: id })} />
                 </View>
               ))}
-              {attempted && preview?.ok === false && <Text accessibilityRole="alert" style={styles.error}>{conversionError(preview.error.code)}</Text>}
+              {attempted && preview?.ok === false && <Text accessibilityRole="alert" style={styles.error}>{conversionError(t, preview.error.code)}</Text>}
             </View>
             <View style={styles.card}>
-              <Text accessibilityRole="header" style={styles.label}>轉入後的分攤</Text>
+              <Text accessibilityRole="header" style={styles.label}>{t("轉入後的分攤")}</Text>
               {history.input.members.map(({ id }) => {
                 const targetId = mapping.get(id);
-                const label = names.get(targetId ?? "") ?? "待對應";
+                const label = names.get(targetId ?? "") ?? t("待對應");
                 const share = targetShares.get(targetId ?? "") ?? originShares.get(id) ?? 0;
                 return <View key={id} style={[styles.amountRow, styles.previewRow]}>
-                  <Text style={[styles.body, styles.fill]}>{label} · 原 {sourceNames.get(id)}</Text>
+                  <Text style={[styles.body, styles.fill]}>{label}{" " + t("· 原") + " "}{sourceNames.get(id)}</Text>
                   <Text style={styles.amount}>{money(share)}</Text>
                 </View>;
               })}
               <View style={[styles.amountRow, styles.previewRow]}>
-                <Text style={styles.label}>合計</Text><Text style={styles.amount}>{money(total.amountMinor)}</Text>
+                <Text style={styles.label}>{t("合計")}</Text><Text style={styles.amount}>{money(total.amountMinor)}</Text>
               </View>
             </View>
-            <Text style={styles.caption}>確認後會新增一筆正式費用。付款人記錄的是向商家實付的人，分攤金額則依照原快照入帳。</Text>
+            <Text style={styles.caption}>{t("確認後會新增一筆正式費用。付款人記錄的是向商家實付的人，分攤金額則依照原快照入帳。")}</Text>
           </>
         )}
       </ConversionPage>
-      {picker && <MemberPicker title={picker.kind === "payer" ? "選擇實際付款人" : "對應活動成員"}
+      {picker && <MemberPicker title={picker.kind === "payer" ? t("選擇實際付款人") : t("對應活動成員")}
         members={options} labels={names} selected={assignedId} onClose={() => setPicker(undefined)}
         onClear={picker.kind === "mapping" && assignedId ? () => changeMapping(picker.sourceId) : undefined}
         onSelect={(id) => {

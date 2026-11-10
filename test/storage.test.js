@@ -34,7 +34,7 @@ import {
 } from "../src/services/merchantRefund.ts";
 import { createQuickHistorySave } from "../src/services/quickHistorySave.ts";
 import { canSelectConversionTarget, createQuickSplitConversionService } from "../src/services/quickSplitConversion.ts";
-import { calculateQuickSplitEditor, createQuickSplitEditor } from "../src/services/quickSplitEditor.ts";
+import { calculateQuickSplitEditor, createQuickSplitEditor, hydrateQuickSplitDraft, serializeQuickSplitDraft } from "../src/services/quickSplitEditor.ts";
 import { createRestoreService } from "../src/services/restore.ts";
 
 // Exercises the production SQL against a real file with Node's SQLite adapter.
@@ -472,6 +472,70 @@ test("one quick draft preserves incomplete input and rejects a stale replacement
   assert.deepEqual(valueOf(await quick.getQuickDraft()), second);
   assert.equal(valueOf(await quick.clearQuickDraft()), true);
   assert.equal(valueOf(await quick.getQuickDraft()), null);
+}));
+
+test("S02 starts a new draft in USD when the saved default is USD and SQLite has no draft", withFinance(async (_finance, _activities, database) => {
+  const preferences = await createAppPreferencesStore({
+    getItem: async () => JSON.stringify({ language: "system", defaultCurrency: "USD" }),
+    setItem: async () => {},
+  }).load();
+  const quick = createQuickSplitRepository(database);
+  assert.equal(valueOf(await quick.getQuickDraft()), null);
+  const editor = createQuickSplitEditor(preferences.defaultCurrency);
+  assert.equal(editor.currency, "USD");
+  assert.equal(editor.finalTotal, "");
+  valueOf(await quick.saveQuickDraft("usd-draft", serializeQuickSplitDraft({ ...editor, finalTotal: "20.50" }), 100));
+  assert.equal(valueOf(await quick.getQuickDraft()).input.currency, "USD");
+}));
+
+test("S02 retains an HKD draft after changing the default to USD and uses USD after explicitly discarding it", withFinance(async (_finance, activities, database) => {
+  let savedPreferences = null;
+  const preferences = createAppPreferencesStore({
+    getItem: async () => savedPreferences,
+    setItem: async (_key, value) => { savedPreferences = value; },
+  });
+  const initial = await preferences.load();
+  assert.equal(initial.defaultCurrency, "HKD");
+  const quick = createQuickSplitRepository(database);
+  const hkdDraft = serializeQuickSplitDraft({ ...createQuickSplitEditor(initial.defaultCurrency), finalTotal: "560.00" });
+  const original = valueOf(await quick.saveQuickDraft("hkd-draft", hkdDraft, 100));
+  const history = valueOf(await quick.saveQuickHistory("hkd-history", quickInput()));
+  await preferences.save({ ...initial, defaultCurrency: "USD" });
+  const current = await preferences.load();
+
+  const stored = valueOf(await quick.getQuickDraft());
+  assert.deepEqual(stored, original);
+  const restored = hydrateQuickSplitDraft(stored.input);
+  assert.deepEqual([restored.currency, restored.finalTotal], ["HKD", "560.00"]);
+  assert.deepEqual(valueOf(await quick.getQuickDraft()), original);
+
+  assert.equal(valueOf(await quick.clearQuickDraft()), true);
+  assert.equal(valueOf(await quick.getQuickDraft()), null);
+  const fresh = createQuickSplitEditor(current.defaultCurrency);
+  assert.deepEqual([fresh.currency, fresh.finalTotal], ["USD", ""]);
+  valueOf(await quick.saveQuickDraft("new-usd-draft", serializeQuickSplitDraft({ ...fresh, finalTotal: "5" }), 200));
+  assert.equal(valueOf(await quick.getQuickDraft()).input.currency, "USD");
+  assert.deepEqual(valueOf(await quick.getQuickHistory(history.id)), history);
+  assert.equal((await activities.getActivity("trip")).currency, "HKD");
+}));
+
+test("S02 preserves a manually selected JPY currency when another field and the default are updated", withFinance(async (_finance, _activities, database) => {
+  let savedPreferences = null;
+  const preferences = createAppPreferencesStore({
+    getItem: async () => savedPreferences,
+    setItem: async (_key, value) => { savedPreferences = value; },
+  });
+  await preferences.save({ language: "system", defaultCurrency: "USD" });
+  const quick = createQuickSplitRepository(database);
+  const initial = createQuickSplitEditor((await preferences.load()).defaultCurrency);
+  const selected = { ...initial, currency: "JPY" };
+  valueOf(await quick.saveQuickDraft("selected-jpy", serializeQuickSplitDraft(selected), 100));
+  await preferences.save({ language: "system", defaultCurrency: "HKD" });
+  assert.equal((await preferences.load()).defaultCurrency, "HKD");
+  const updated = { ...selected, finalTotal: "3000" };
+  valueOf(await quick.saveQuickDraft("edited-jpy", serializeQuickSplitDraft(updated), 200));
+  const restored = hydrateQuickSplitDraft(valueOf(await quick.getQuickDraft()).input);
+  assert.deepEqual([restored.currency, restored.finalTotal], ["JPY", "3000"]);
 }));
 
 test("v4 quick snapshots retain members, rounding and draft inputs after reopening", withTestFile(async (path) => {
@@ -3049,4 +3113,39 @@ test("Batch B restores both v12 single-payer and v13 multi-payer backups with re
   assert.deepEqual(await service.prepareRestore(pathToFileURL(invalid).href),
     { status: "validation-failed", code: "BACKUP_LEDGER_INVALID" });
   assert.deepEqual(valueOf(await free.getActivityLedger("trip")), before);
+}));
+
+test("Phase 4A localizes activity ledger labels and legacy fallback names without changing stored names", withFinance(async (finance, _activities, database) => {
+  valueOf(await finance.createExpense("trip", 100, expense()));
+  valueOf(await finance.createExpense("trip", 150, { ...expense("named"), name: "費用 1" }));
+  valueOf(await finance.recordMerchantRefund("trip", 200, { ...refund, recipientId: "a" }));
+  const zh = await loadActivityDetail("trip", database, "zh-HK");
+  const en = await loadActivityDetail("trip", database, "en");
+  assert.deepEqual(zh.expenses.map(({ name }) => name), ["費用 1", "費用 1"]);
+  assert.deepEqual(en.expenses.map(({ name }) => name), ["費用 1", "Expense 1"]);
+  assert.deepEqual([en.activity.name, en.effectiveMinor, en.balances], [zh.activity.name, zh.effectiveMinor, zh.balances]);
+  assert.equal(en.history[0].label, "Merchant refund");
+  assert.equal(en.history[0].description, "Expense 1 · Received by Bo");
+}));
+
+test("Phase 4A keeps the device language and default currency when restoring a ledger", withRestore(async ({
+  directory, activities, service, exportSource, prepare,
+}) => {
+  const preferencesPath = join(directory, "splitmori-preferences.db");
+  const prefsDb = openTestConnection(preferencesPath);
+  try {
+    await prefsDb.execAsync("CREATE TABLE preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    const preferences = createAppPreferencesStore({
+      getItem: async (key) => (await prefsDb.getFirstAsync("SELECT value FROM preferences WHERE key = ?", key))?.value ?? null,
+      setItem: async (key, value) => { await prefsDb.runAsync("INSERT OR REPLACE INTO preferences VALUES (?, ?)", key, value); },
+    });
+    const selected = { language: "en", defaultCurrency: "USD" };
+    await preferences.save(selected);
+    const { confirmation } = await prepare(await exportSource());
+    assert.deepEqual(await service.restoreBackup({ confirmation, confirmed: true }), { status: "restored" });
+    assert.equal((await activities.listActivities())[0].id, "trip");
+    assert.deepEqual(await preferences.load(), selected);
+  } finally {
+    prefsDb.close();
+  }
 }));

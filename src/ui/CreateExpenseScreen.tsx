@@ -1,5 +1,8 @@
+import { formatUiCount, formatUiDate } from "../services/localizedCopy.ts";
+import type { Copy } from "../services/localizedCopy.ts";
+import { useCopy } from "./useCopy.ts";
 import { uuid } from "expo";
-import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ComponentRef, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ComponentRef, type ReactNode } from "react";
 import {
   ActivityIndicator, Alert, BackHandler, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView,
   StyleSheet, Switch, Text, TextInput, View,
@@ -22,12 +25,10 @@ import { SplitModeSelector } from "./SplitModeSelector.tsx";
 import { usePro, useProSnapshot } from "./ProContext.ts";
 import { AdvancedChargeFields, AdvancedMethodFields } from "./AdvancedSplitFields.tsx";
 import { advancedEditorMessage, advancedSplitCopy } from "./advancedSplitCopy.ts";
-import { AppLanguageContext } from "./AppLanguageContext.ts";
 import { merchantPaymentCopy, merchantPaymentError } from "./merchantPaymentCopy.ts";
 import { validationMessage } from "./splitEditorMessages.ts";
 import { colors, Icon } from "./visuals.tsx";
 
-const dateFormat = new Intl.DateTimeFormat("zh-HK", { year: "numeric", month: "long", day: "numeric" });
 type FormSection = "basic" | "total" | "members" | "payer" | "details" | "date";
 const editorSections: Record<EditorField, FormSection> = {
   currency: "total", finalTotal: "total", members: "members", hostId: "members", coverAmount: "members",
@@ -36,17 +37,17 @@ const editorSections: Record<EditorField, FormSection> = {
   hosts: "members", items: "members", custom: "members", chargeDistribution: "details",
 };
 
-function storageMessage(code: DomainErrorCode) {
+function storageMessage(t: Copy, code: DomainErrorCode) {
   switch (code) {
-    case "ACTIVITY_COMPLETED": return "活動已完成，請先重新開啟再新增費用。";
-    case "EXPENSE_EDIT_LIMIT": return "目前有多於一個進行中的活動。請先完成其他活動或確認 Pro 狀態。";
-    case "ACTIVITY_NOT_FOUND": return "找不到這個活動。";
-    case "MEMBER_NOT_PARTICIPATING": return "活動成員資料已變更，請返回活動詳情後再試。";
-    case "CURRENCY_MISMATCH": return "活動幣種已變更，請返回活動詳情後再試。";
-    case "TRANSFER_EXCEEDS_BALANCE": return "所選日期會令已記錄的還款與帳本不符，請核對費用日期。";
-    case "AMOUNT_OVERFLOW": return "活動帳本的金額超出上限，請核對後再試。";
-    case "EVENT_ID_CONFLICT": return "儲存請求與已有費用不符，請返回活動詳情核對。";
-    default: return "未能儲存費用，請核對資料後再試。";
+    case "ACTIVITY_COMPLETED": return t("活動已完成，請先重新開啟再新增費用。");
+    case "EXPENSE_EDIT_LIMIT": return t("目前有多於一個進行中的活動。請先完成其他活動或確認 Pro 狀態。");
+    case "ACTIVITY_NOT_FOUND": return t("找不到這個活動。");
+    case "MEMBER_NOT_PARTICIPATING": return t("活動成員資料已變更，請返回活動詳情後再試。");
+    case "CURRENCY_MISMATCH": return t("活動幣種已變更，請返回活動詳情後再試。");
+    case "TRANSFER_EXCEEDS_BALANCE": return t("所選日期會令已記錄的還款與帳本不符，請核對費用日期。");
+    case "AMOUNT_OVERFLOW": return t("活動帳本的金額超出上限，請核對後再試。");
+    case "EVENT_ID_CONFLICT": return t("儲存請求與已有費用不符，請返回活動詳情核對。");
+    default: return t("未能儲存費用，請核對資料後再試。");
   }
 }
 
@@ -102,9 +103,10 @@ type EditExpenseForm = {
 export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
   activityId: string; onBack: () => void;
 } & ({ onSaved: () => void; edit?: never } | { onSaved?: never; edit: EditExpenseForm })) {
+  const t = useCopy();
   const { hasProAccess, openPro } = usePro();
   const pro = useProSnapshot();
-  const language = useContext(AppLanguageContext);
+  const { language } = t;
   const paymentCopy = merchantPaymentCopy(language);
   const [activity, setActivity] = useState<ActivityDetail | null | undefined>(edit?.activity);
   const [initial] = useState(() => edit && hydrateExpenseEditor(edit.activity, edit.original));
@@ -152,8 +154,8 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
   const close = useCallback(() => {
     if (pending.current) return;
     if (!dirty) { onBack(); return; }
-    Alert.alert(isEditing ? "放棄更正？" : "放棄這筆費用？", "尚未儲存的輸入將會清除。", [
-      { text: "繼續編輯", style: "cancel" }, { text: "放棄", style: "destructive", onPress: onBack },
+    Alert.alert(isEditing ? t("放棄更正？") : t("放棄這筆費用？"), t("尚未儲存的輸入將會清除。"), [
+      { text: t("繼續編輯"), style: "cancel" }, { text: t("放棄"), style: "destructive", onPress: onBack },
     ]);
   }, [dirty, isEditing, onBack]);
 
@@ -216,7 +218,7 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
 
   function fieldError(field: EditorField, memberId?: string) {
     return attempted && error?.field === field && error.memberId === memberId
-      ? advancedEditorMessage(error, language, editor?.customKind === "percentage") ?? validationMessage(error)
+      ? advancedEditorMessage(error, language, editor?.customKind === "percentage") ?? validationMessage(t, error)
       : undefined;
   }
 
@@ -287,9 +289,9 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
       if (!mounted.current) return;
       if (result.ok) onSaved?.();
       else setSaveError(result.error.field === "merchantPayment" ? merchantPaymentError(result.error.code, paymentCopy)
-        : result.error.code === "PRO_REQUIRED" ? advancedSplitCopy(language).locked : storageMessage(result.error.code));
+        : result.error.code === "PRO_REQUIRED" ? advancedSplitCopy(language).locked : storageMessage(t, result.error.code));
     } catch {
-      if (mounted.current) setSaveError(edit ? "未能讀取更正預覽，請重試。" : storageMessage("FINANCE_STORAGE_ERROR"));
+      if (mounted.current) setSaveError(edit ? t("未能讀取更正預覽，請重試。") : storageMessage(t, "FINANCE_STORAGE_ERROR"));
     } finally {
       pending.current = false;
       if (mounted.current) setSaving(false);
@@ -312,23 +314,23 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
 
   const dateField = (
     <View style={styles.field}>
-      <Text style={styles.label}>費用日期</Text>
+      <Text style={styles.label}>{t("費用日期")}</Text>
       {dateEditing ? (
         <>
-          <TextInput accessibilityLabel="費用日期，年、月、日" value={date} autoFocus selectTextOnFocus
+          <TextInput accessibilityLabel={t("費用日期，年、月、日")} value={date} autoFocus selectTextOnFocus
             onChangeText={(value) => { setDate(value); markDirty(); }} onFocus={onInputFocus}
             onBlur={() => { if (occurredAt !== undefined) setDateEditing(false); }}
             keyboardType={Platform.OS === "ios" ? "numbers-and-punctuation" : "default"}
             returnKeyType="done" maxLength={10} placeholder="YYYY-MM-DD" style={styles.input} />
-          <Text style={styles.caption}>格式為 YYYY-MM-DD。</Text>
+          <Text style={styles.caption}>{t("格式為 YYYY-MM-DD。")}</Text>
         </>
       ) : (
-        <Pressable accessibilityRole="button" accessibilityLabel="更改費用日期" style={styles.picker} onPress={() => setDateEditing(true)}>
-          <Text style={[styles.inputText, styles.fill]}>{occurredAt === undefined ? date : dateFormat.format(occurredAt)}</Text>
+        <Pressable accessibilityRole="button" accessibilityLabel={t("更改費用日期")} style={styles.picker} onPress={() => setDateEditing(true)}>
+          <Text style={[styles.inputText, styles.fill]}>{occurredAt === undefined ? date : formatUiDate(t, occurredAt)}</Text>
           <Icon name="down" size={17} />
         </Pressable>
       )}
-      <ErrorText message={attempted && occurredAt === undefined ? "請輸入有效的費用日期。" : undefined} />
+      <ErrorText message={attempted && occurredAt === undefined ? t("請輸入有效的費用日期。") : undefined} />
     </View>
   );
 
@@ -336,80 +338,80 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
     <KeyboardAvoidingView style={hidden ? styles.hidden : styles.screen} behavior={Platform.OS === "ios" ? "padding" : undefined}
       keyboardVerticalOffset={top}>
       <View style={styles.header}>
-        <Pressable accessibilityRole="button" accessibilityLabel="返回活動詳情" disabled={saving} onPress={close} style={styles.headerSide}>
+        <Pressable accessibilityRole="button" accessibilityLabel={t("返回活動詳情")} disabled={saving} onPress={close} style={styles.headerSide}>
           <Icon name="back" size={23} />
         </Pressable>
-        <Text accessibilityRole="header" style={styles.title}>{edit ? "編輯費用" : "新增費用"}</Text>
+        <Text accessibilityRole="header" style={styles.title}>{edit ? t("編輯費用") : t("新增費用")}</Text>
         {edit ? <View style={styles.headerSide} /> : <Pressable accessibilityRole="button" disabled={saving} onPress={close} style={[styles.headerSide, styles.headerRight]}>
-          <Text style={styles.cancel}>取消</Text>
+          <Text style={styles.cancel}>{t("取消")}</Text>
         </Pressable>}
       </View>
       <ScrollView ref={scroll} style={styles.scroll} contentContainerStyle={styles.content}
         keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" pointerEvents={saving ? "none" : "auto"}>
         {loadError ? (
           <Card>
-            <ErrorText message="未能讀取活動，請重試。" />
+            <ErrorText message={t("未能讀取活動，請重試。")} />
             <Pressable accessibilityRole="button" onPress={() => { void load(); }} style={styles.picker}>
-              <Text style={styles.label}>重新讀取</Text>
+              <Text style={styles.label}>{t("重新讀取")}</Text>
             </Pressable>
           </Card>
-        ) : activity === undefined ? <ActivityIndicator accessibilityLabel="正在讀取活動" color={colors.ink} />
-          : !formReady ? <ErrorText message={activity ? storageMessage("ACTIVITY_COMPLETED") : storageMessage("ACTIVITY_NOT_FOUND")} /> : null}
+        ) : activity === undefined ? <ActivityIndicator accessibilityLabel={t("正在讀取活動")} color={colors.ink} />
+          : !formReady ? <ErrorText message={activity ? storageMessage(t, "ACTIVITY_COMPLETED") : storageMessage(t, "ACTIVITY_NOT_FOUND")} /> : null}
 
         {activity && editor && (
           <>
             {edit ? <View style={styles.notice}>
-              <Text style={styles.caption}>更正會另存新版本。提交前請核對這筆費用及整個活動的結算變化。</Text>
+              <Text style={styles.caption}>{t("更正會另存新版本。提交前請核對這筆費用及整個活動的結算變化。")}</Text>
               {!edit.original.splitInput && <Text style={styles.caption}>
-                舊記錄僅保留分攤結果。若要更改分帳，請按實際帳單核對及補填相關明細。
+                {t("舊記錄僅保留分攤結果。若要更改分帳，請按實際帳單核對及補填相關明細。") + "              "}
               </Text>}
             </View> : <View style={styles.context}>
-              <Text style={[styles.caption, styles.fill]}>活動　<Text style={styles.label}>{activity.name}</Text></Text>
-              <Text style={[styles.caption, styles.badge]}>進行中 · {activity.currency}</Text>
+              <Text style={[styles.caption, styles.fill]}>{t("活動 · {0}", activity.name)}</Text>
+              <Text style={[styles.caption, styles.badge]}>{t("進行中 ·") + " "}{activity.currency}</Text>
             </View>}
 
             <Card onLayout={offset("basic")} plain={isEditing}>
               <View style={styles.field}>
-                <Text style={styles.label}>費用名稱 *</Text>
-                <TextInput accessibilityLabel="費用名稱" value={name} onChangeText={(value) => { setName(value); markDirty(); }}
-                  placeholder="輸入費用名稱" placeholderTextColor={colors.muted} onFocus={onInputFocus} style={styles.input} />
-                <ErrorText message={attempted && !name.trim() ? "請輸入費用名稱。" : undefined} />
+                <Text style={styles.label}>{t("費用名稱 *")}</Text>
+                <TextInput accessibilityLabel={t("費用名稱")} value={name} onChangeText={(value) => { setName(value); markDirty(); }}
+                  placeholder={t("輸入費用名稱")} placeholderTextColor={colors.muted} onFocus={onInputFocus} style={styles.input} />
+                <ErrorText message={attempted && !name.trim() ? t("請輸入費用名稱。") : undefined} />
               </View>
               {!edit && dateField}
             </Card>
 
-            <Card title="實際帳單總額 *" onLayout={offset("total")} plain={isEditing}>
+            <Card title={t("實際帳單總額 *")} onLayout={offset("total")} plain={isEditing}>
               <View style={[styles.picker, styles.bill, edit && styles.editBill]}>
-                <View><Text style={styles.heading}>{activity.currency}</Text>{!edit && <Text style={styles.caption}>活動幣種</Text>}</View>
-                <TextInput accessibilityLabel="實際帳單總額" value={editor.finalTotal} onChangeText={(value) => setField("finalTotal", value)}
+                <View><Text style={styles.heading}>{activity.currency}</Text>{!edit && <Text style={styles.caption}>{t("活動幣種")}</Text>}</View>
+                <TextInput accessibilityLabel={t("實際帳單總額")} value={editor.finalTotal} onChangeText={(value) => setField("finalTotal", value)}
                   onFocus={onInputFocus} keyboardType="decimal-pad" placeholder={placeholder} placeholderTextColor={colors.muted}
                   style={[styles.billInput, edit && styles.editBillInput]} />
               </View>
-              <Text style={styles.caption}>{details ? "用作核對按明細計算的金額。" : "填寫已包含服務費及折扣的實付金額。"}</Text>
+              <Text style={styles.caption}>{details ? t("用作核對按明細計算的金額。") : t("填寫已包含服務費及折扣的實付金額。")}</Text>
               <ErrorText message={fieldError("finalTotal") ?? fieldError("currency")} />
             </Card>
 
-            <Card title="分帳方式" plain={isEditing}>
+            <Card title={t("分帳方式")} plain={isEditing}>
               <SplitModeSelector mode={editor.mode} onSelect={(mode) => setField("mode", mode)} />
-              <Text style={styles.caption}>單筆費用僅使用一種分帳方式。</Text>
+              <Text style={styles.caption}>{t("單筆費用僅使用一種分帳方式。")}</Text>
             </Card>
 
-            {edit && <Text accessibilityRole="header" style={styles.heading}>參與分攤 · {participants.length} 人</Text>}
-            <Card title={edit ? undefined : "參與成員"} onLayout={offset("members")}>
+            {edit && <Text accessibilityRole="header" style={styles.heading}>{formatUiCount(t, participants.length, "participants")}</Text>}
+            <Card title={edit ? undefined : t("參與成員")} onLayout={offset("members")}>
               {editor.members.map((member, index) => (
                 <View key={member.id} style={index > 0 && styles.divider}>
                   <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: member.included }}
-                    accessibilityLabel={`${member.displayName}參與分攤`}
+                    accessibilityLabel={t("{0}參與分攤", member.displayName)}
                     onPress={() => setMember(member, { included: !member.included })} style={styles.memberRow}>
                     <View style={[styles.checkbox, member.included && styles.checkedBox]}>
                       {member.included && <Icon name="check" size={14} color={colors.onPrimary} />}
                     </View>
                     <Text style={[styles.label, styles.fill]}>{member.displayName}</Text>
                     <Text style={styles.caption}>{edit && member.included && split
-                      ? money(shares.get(member.id) ?? 0) : member.included ? "參與分攤" : "不參與"}</Text>
+                      ? money(shares.get(member.id) ?? 0) : member.included ? t("參與分攤") : t("不參與")}</Text>
                   </Pressable>
                   {editor.mode === "individual" && !editor.itemized && member.included && (
-                    <AmountField label={`${member.displayName}的個人消費`} value={member.personalAmount}
+                    <AmountField label={t("{0}的個人消費", member.displayName)} value={member.personalAmount}
                       onChange={(personalAmount) => setMember(member, { personalAmount })} placeholder={placeholder}
                       error={fieldError("personalAmount", member.id)} onFocus={onInputFocus} />
                   )}
@@ -418,30 +420,30 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
               <ErrorText message={fieldError("members")} />
               {editor.mode === "treat" && (
                 <View style={styles.subsection}>
-                  <Text style={styles.label}>誰請客？</Text>
+                  <Text style={styles.label}>{t("誰請客？")}</Text>
                   <View accessibilityRole="radiogroup" style={styles.options}>
                     {participants.map(({ id, displayName }) => (
                       <Option key={id} label={displayName} selected={editor.hostId === id} onPress={() => setField("hostId", id)} />
                     ))}
                   </View>
                   <ErrorText message={fieldError("hostId")} />
-                  <Text style={styles.label}>請客者最終承擔</Text>
+                  <Text style={styles.label}>{t("請客者最終承擔")}</Text>
                   <View accessibilityRole="radiogroup" style={styles.options}>
-                    <Option label="固定金額" selected={editor.coverKind === "fixed"} onPress={() => setField("coverKind", "fixed")} />
-                    <Option label="總額百分比" selected={editor.coverKind === "percentage"} onPress={() => setField("coverKind", "percentage")} />
+                    <Option label={t("固定金額")} selected={editor.coverKind === "fixed"} onPress={() => setField("coverKind", "fixed")} />
+                    <Option label={t("總額百分比")} selected={editor.coverKind === "percentage"} onPress={() => setField("coverKind", "percentage")} />
                   </View>
-                  {editor.coverKind === "fixed" ? amountField("coverAmount", "固定金額") : amountField("coverPercentage", "總額百分比（%）")}
+                  {editor.coverKind === "fixed" ? amountField("coverAmount", t("固定金額")) : amountField("coverPercentage", t("總額百分比（%）"))}
                   <View style={styles.memberRow}>
-                    <Text style={[styles.label, styles.fill]}>請客者也分攤餘額</Text>
-                    <Switch accessibilityLabel="請客者也分攤餘額" value={editor.includeHostInRemainder}
+                    <Text style={[styles.label, styles.fill]}>{t("請客者也分攤餘額")}</Text>
+                    <Switch accessibilityLabel={t("請客者也分攤餘額")} value={editor.includeHostInRemainder}
                       trackColor={{ true: colors.ink }} onValueChange={(value) => setField("includeHostInRemainder", value)} />
                   </View>
                 </View>
               )}
               {editor.mode === "individual" && !editor.itemized && (
                 <View style={styles.subsection}>
-                  {amountField("sharedAmount", "公共消費總額")}
-                  <Text style={styles.label}>公共消費參與者</Text>
+                  {amountField("sharedAmount", t("公共消費總額"))}
+                  <Text style={styles.label}>{t("公共消費參與者")}</Text>
                   <View style={styles.options}>
                     {participants.map((member) => <Option key={member.id} label={member.displayName} selected={member.shareCommon}
                       multiple onPress={() => setMember(member, { shareCommon: !member.shareCommon })} />)}
@@ -530,32 +532,32 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
             <Card onLayout={offset("details")}>
               <Pressable accessibilityRole="button" accessibilityState={{ expanded: showDetails }}
                 onPress={() => setShowDetails(!showDetails)} style={styles.memberRow}>
-                <Text style={[styles.heading, styles.fill]}>費用明細（選填）</Text>
+                <Text style={[styles.heading, styles.fill]}>{t("費用明細（選填）")}</Text>
                 <Icon name={showDetails ? "minus" : "down"} size={17} />
               </Pressable>
-              <Text style={styles.caption}>{details ? "已啟用費用明細，實付金額只用來核對。" : "需要服務費或整單折扣時再展開，避免重複加費。"}</Text>
+              <Text style={styles.caption}>{details ? t("已啟用費用明細，實付金額只用來核對。") : t("需要服務費或整單折扣時再展開，避免重複加費。")}</Text>
               {showDetails && (
                 <>
                   <View style={styles.memberRow}>
-                    <Text style={[styles.label, styles.fill]}>按費用明細計算</Text>
-                    <Switch accessibilityLabel="按費用明細計算" value={details} trackColor={{ true: colors.ink }}
+                    <Text style={[styles.label, styles.fill]}>{t("按費用明細計算")}</Text>
+                    <Switch accessibilityLabel={t("按費用明細計算")} value={details} trackColor={{ true: colors.ink }}
                       onValueChange={(value) => setField("chargeMode", value ? "details" : "finalTotal")} />
                   </View>
                   {details && (
                     <>
-                      {amountField("subtotal", "商品小計")}
-                      {amountField("discount", "固定折扣（選填）")}
-                      <Text style={styles.label}>服務費</Text>
+                      {amountField("subtotal", t("商品小計"))}
+                      {amountField("discount", t("固定折扣（選填）"))}
+                      <Text style={styles.label}>{t("服務費")}</Text>
                       <View accessibilityRole="radiogroup" style={styles.options}>
-                        <Option label="無" selected={editor.serviceFeeMode === "none"} onPress={() => setField("serviceFeeMode", "none")} />
-                        <Option label="實際金額" selected={editor.serviceFeeMode === "manual"} onPress={() => setField("serviceFeeMode", "manual")} />
-                        <Option label="快捷 10%" selected={editor.serviceFeeMode === "quick10"} onPress={() => setField("serviceFeeMode", "quick10")} />
+                        <Option label={t("無")} selected={editor.serviceFeeMode === "none"} onPress={() => setField("serviceFeeMode", "none")} />
+                        <Option label={t("實際金額")} selected={editor.serviceFeeMode === "manual"} onPress={() => setField("serviceFeeMode", "manual")} />
+                        <Option label={t("快捷 10%")} selected={editor.serviceFeeMode === "quick10"} onPress={() => setField("serviceFeeMode", "quick10")} />
                       </View>
-                      {editor.serviceFeeMode === "manual" && amountField("serviceFee", "實際服務費")}
+                      {editor.serviceFeeMode === "manual" && amountField("serviceFee", t("實際服務費"))}
                       {editor.serviceFeeMode === "quick10" && (
                         <View accessibilityRole="radiogroup" style={styles.options}>
-                          <Option label="折扣前小計" selected={editor.serviceFeeBasis === "beforeDiscount"} onPress={() => setField("serviceFeeBasis", "beforeDiscount")} />
-                          <Option label="折扣後小計" selected={editor.serviceFeeBasis === "afterDiscount"} onPress={() => setField("serviceFeeBasis", "afterDiscount")} />
+                          <Option label={t("折扣前小計")} selected={editor.serviceFeeBasis === "beforeDiscount"} onPress={() => setField("serviceFeeBasis", "beforeDiscount")} />
+                          <Option label={t("折扣後小計")} selected={editor.serviceFeeBasis === "afterDiscount"} onPress={() => setField("serviceFeeBasis", "afterDiscount")} />
                         </View>
                       )}
                       {editor.serviceFeeMode !== "manual" && <ErrorText message={fieldError("serviceFee")} />}
@@ -566,30 +568,30 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
               )}
             </Card>
 
-            <Card title="分攤預覽">
+            <Card title={t("分攤預覽")}>
               {split ? (
                 <>
                   <View style={styles.previewRow}>
-                    <Text style={[styles.caption, styles.fill]}>實際帳單總額</Text><Text style={styles.amount}>{total}</Text>
+                    <Text style={[styles.caption, styles.fill]}>{t("實際帳單總額")}</Text><Text style={styles.amount}>{total}</Text>
                   </View>
                   <View style={styles.previewShares}>
                     {editor.members.map(({ id, displayName }, index) => (
                       <View key={id} style={[styles.previewRow, index > 0 && styles.divider]}>
-                        <Text style={[styles.label, styles.fill]}>{displayName} · 應承擔</Text>
+                        <Text style={[styles.label, styles.fill]}>{displayName}{" " + t("· 應承擔")}</Text>
                         <Text style={styles.amount}>{money(shares.get(id) ?? 0)}</Text>
                       </View>
                     ))}
                   </View>
                   <View style={[styles.previewRow, styles.divider]}>
-                    <Text style={[styles.label, styles.fill]}>分攤合計</Text><Text style={styles.amount}>{total}</Text>
+                    <Text style={[styles.label, styles.fill]}>{t("分攤合計")}</Text><Text style={styles.amount}>{total}</Text>
                   </View>
-                  <Text style={styles.caption}>分攤合計與實付總額一致。</Text>
+                  <Text style={styles.caption}>{t("分攤合計與實付總額一致。")}</Text>
                 </>
-              ) : <Text style={styles.caption}>填妥金額及分攤資料後，即可查看每位成員的承擔額。</Text>}
+              ) : <Text style={styles.caption}>{t("填妥金額及分攤資料後，即可查看每位成員的承擔額。")}</Text>}
             </Card>
             {!edit && <Card>
-              <Text style={styles.label}>儲存至活動「{activity.name}」</Text>
-              <Text style={styles.caption}>儲存後會更新活動帳本及結算建議。</Text>
+              <Text style={styles.label}>{t("儲存至活動「{0}」", activity.name)}</Text>
+              <Text style={styles.caption}>{t("儲存後會更新活動帳本及結算建議。")}</Text>
             </Card>}
           </>
         )}
@@ -600,7 +602,7 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
           <Pressable accessibilityRole="button" accessibilityState={{ disabled: !formReady || saving || multiBlocked, busy: saving }}
             disabled={!formReady || saving || multiBlocked} onPress={() => { void save(); }}
             style={({ pressed }) => [styles.saveButton, (pressed || !formReady || saving || multiBlocked) && styles.dimmed]}>
-            <Text style={styles.saveText}>{edit ? (saving ? "正在計算…" : "預覽更正影響") : (saving ? "正在儲存…" : "儲存費用")}</Text>
+            <Text style={styles.saveText}>{edit ? (saving ? t("正在計算…") : t("預覽更正影響")) : (saving ? t("正在儲存…") : t("儲存費用"))}</Text>
           </Pressable>
         </View>
       </View>
@@ -618,7 +620,7 @@ const styles = StyleSheet.create({
   },
   headerSide: { flex: 1, minHeight: 44, justifyContent: "center", alignItems: "flex-start" },
   headerRight: { alignItems: "flex-end" },
-  title: { color: colors.ink, fontWeight: "700", fontSize: 19, textAlign: "center" },
+  title: { color: colors.ink, fontWeight: "700", fontSize: 19, textAlign: "center", flexShrink: 1 },
   cancel: { color: colors.muted, fontSize: 15, fontWeight: "600" },
   scroll: { flex: 1 },
   content: { width: "100%", maxWidth: 620, alignSelf: "center", paddingHorizontal: 18, paddingTop: 8, paddingBottom: 16, gap: 12 },

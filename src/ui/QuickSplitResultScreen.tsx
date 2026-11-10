@@ -1,4 +1,6 @@
-import { useContext, useMemo, useRef, useState } from "react";
+import { formatUiCount, type Copy } from "../services/localizedCopy.ts";
+import { useCopy } from "./useCopy.ts";
+import { useMemo, useRef, useState } from "react";
 import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { usesAdvancedSplit } from "../domain/quickSplit.ts";
@@ -10,15 +12,14 @@ import { QuickSplitSharePreview } from "./QuickSplitSharePreview.tsx";
 import { useQuickHistorySave } from "./useQuickHistorySave.ts";
 import { useAdvancedSplitAction } from "./AdvancedSplitFields.tsx";
 import { advancedSplitCopy } from "./advancedSplitCopy.ts";
-import { AppLanguageContext } from "./AppLanguageContext.ts";
 import { colors, Icon } from "./visuals.tsx";
 
-const shareErrors: Record<Exclude<ShareOutcome, "closed">, string> = {
-  unavailable: "這部裝置暫時無法開啟系統分享。",
-  "capture-failed": "未能產生分帳圖片，請重試。",
-  "share-failed": "未能開啟系統分享，請重試。",
-  "too-large": "分帳明細過長，超出單張 PNG 的大小上限。",
-};
+const shareErrors = (t: Copy): Record<Exclude<ShareOutcome, "closed">, string> => ({
+  unavailable: t("這部裝置暫時無法開啟系統分享。"),
+  "capture-failed": t("未能產生分帳圖片，請重試。"),
+  "share-failed": t("未能開啟系統分享，請重試。"),
+  "too-large": t("分帳明細過長，超出單張 PNG 的大小上限。"),
+});
 
 function AmountLine({ label, amount, strong = false }: { label: string; amount: string; strong?: boolean }) {
   return (
@@ -30,17 +31,19 @@ function AmountLine({ label, amount, strong = false }: { label: string; amount: 
 }
 
 function Conservation({ result }: { result: QuickSplitResultView }) {
+  const t = useCopy();
   return (
     <View style={styles.conservation}>
-      <AmountLine label="分攤合計" amount={formatResultMoney(result.currency, result.allocatedMinor)} />
+      <AmountLine label={t("分攤合計")} amount={formatResultMoney(result.currency, result.allocatedMinor)} />
       <Text style={[styles.caption, !result.balanced && styles.error]}>
-        {result.balanced ? "與實際帳單總額一致" : "分攤合計與實際帳單總額不一致"}
+        {result.balanced ? t("與實際帳單總額一致") : t("分攤合計與實際帳單總額不一致")}
       </Text>
     </View>
   );
 }
 
 function DetailsSheet({ result, onClose }: { result: QuickSplitResultView; onClose: () => void }) {
+  const t = useCopy();
   const [expanded, setExpanded] = useState<string>();
   const { top, bottom, left, right } = useSafeAreaInsets();
   const money = (amountMinor: number) => formatResultMoney(result.currency, amountMinor);
@@ -54,18 +57,18 @@ function DetailsSheet({ result, onClose }: { result: QuickSplitResultView; onClo
           style={[styles.sheet, { paddingBottom: Math.max(bottom, 12) }]}
         >
           <View style={styles.sheetHeader}>
-            <Text accessibilityRole="header" style={styles.title}>分攤明細</Text>
+            <Text accessibilityRole="header" style={styles.title}>{t("分攤明細")}</Text>
             <Text style={styles.caption}>{result.modeLabel} · {result.currency}</Text>
           </View>
           <ScrollView style={styles.sheetScroll} contentContainerStyle={styles.sheetContent}>
             <View style={[styles.card, styles.summary]}>
-              <AmountLine label="實際帳單總額" amount={money(result.totalMinor)} strong />
+              <AmountLine label={t("實際帳單總額")} amount={money(result.totalMinor)} strong />
               {result.chargeBreakdown?.map(({ label, amountMinor, deduction }) => (
                 <AmountLine key={label} label={label} amount={`${deduction ? "− " : ""}${money(amountMinor)}`} />
               ))}
               <Conservation result={result} />
             </View>
-            <Text accessibilityRole="header" style={styles.sectionTitle}>各成員最終承擔</Text>
+            <Text accessibilityRole="header" style={styles.sectionTitle}>{t("各成員最終承擔")}</Text>
             <View style={styles.card}>
               {result.members.map((member, index) => {
                 const open = expanded === member.id;
@@ -88,7 +91,7 @@ function DetailsSheet({ result, onClose }: { result: QuickSplitResultView; onClo
                           <AmountLine key={label} label={label} amount={`${deduction ? "− " : ""}${money(amountMinor)}`} />
                         ))}
                         <View style={styles.conservation}>
-                          <AmountLine label="最終應承擔" amount={money(member.amountMinor)} strong />
+                          <AmountLine label={t("最終應承擔")} amount={money(member.amountMinor)} strong />
                         </View>
                       </View>
                     )}
@@ -100,7 +103,7 @@ function DetailsSheet({ result, onClose }: { result: QuickSplitResultView; onClo
           </ScrollView>
           <View style={styles.sheetFooter}>
             <Pressable accessibilityRole="button" onPress={onClose} style={({ pressed }) => [styles.primary, pressed && styles.pressed]}>
-              <Text style={styles.primaryText}>關閉明細</Text>
+              <Text style={styles.primaryText}>{t("關閉明細")}</Text>
             </Pressable>
           </View>
         </View>
@@ -112,7 +115,8 @@ function DetailsSheet({ result, onClose }: { result: QuickSplitResultView; onClo
 export function QuickSplitResultScreen({ preview, onBack, onAddPayer, onConvert }: {
   preview: QuickSplitPreview; onBack: () => void; onAddPayer: () => void; onConvert: (historyId: string) => void;
 }) {
-  const language = useContext(AppLanguageContext);
+  const t = useCopy();
+  const { language } = t;
   const copy = advancedSplitCopy(language);
   const authorize = useAdvancedSplitAction();
   const result = useMemo(() => describeQuickSplitResult(preview, language), [preview, language]);
@@ -128,7 +132,7 @@ export function QuickSplitResultScreen({ preview, onBack, onAddPayer, onConvert 
 
   function addToActivity() {
     if (state.status !== "saved") {
-      Alert.alert("請先儲存計算記錄", "儲存後即可選擇活動，再確認成員及實際付款人。");
+      Alert.alert(t("請先儲存計算記錄"), t("儲存後即可選擇活動，再確認成員及實際付款人。"));
       return;
     }
     const add = () => onConvert(state.historyId);
@@ -138,7 +142,7 @@ export function QuickSplitResultScreen({ preview, onBack, onAddPayer, onConvert 
 
   function startShare() {
     if (shareInProgress.current || !result.balanced) return;
-    const card = buildQuickSplitShareCard(result, new Date());
+    const card = buildQuickSplitShareCard(result, new Date(), language);
     shareInProgress.current = true;
     setShareError(undefined);
     setShareCard(card);
@@ -147,7 +151,7 @@ export function QuickSplitResultScreen({ preview, onBack, onAddPayer, onConvert 
   function finishShare(outcome: ShareOutcome) {
     shareInProgress.current = false;
     setShareCard(undefined);
-    setShareError(outcome === "closed" ? undefined : shareErrors[outcome]);
+    setShareError(outcome === "closed" ? undefined : shareErrors(t)[outcome]);
   }
 
   return (
@@ -158,28 +162,28 @@ export function QuickSplitResultScreen({ preview, onBack, onAddPayer, onConvert 
         importantForAccessibility={shareCard ? "no-hide-descendants" : "auto"}
       >
         <View style={styles.header}>
-          <Pressable accessibilityRole="button" accessibilityLabel="返回編輯" onPress={onBack} style={styles.back}>
+          <Pressable accessibilityRole="button" accessibilityLabel={t("返回編輯")} onPress={onBack} style={styles.back}>
             <Icon name="back" size={23} />
           </Pressable>
-          <Text accessibilityRole="header" style={styles.title}>分帳結果</Text>
+          <Text accessibilityRole="header" style={styles.title}>{t("分帳結果")}</Text>
           <View style={styles.headerSpace} />
         </View>
         <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
           <View style={[styles.card, styles.summary]}>
             <View style={styles.summaryHeading}>
-              <Text style={styles.sectionTitle}>實際帳單總額</Text>
+              <Text style={styles.sectionTitle}>{t("實際帳單總額")}</Text>
               <Text style={styles.badge}>{result.modeLabel}</Text>
             </View>
             <Text style={styles.total}>{money(result.totalMinor)}</Text>
-            <Text style={styles.caption}>{result.members.length} 位參與成員</Text>
+            <Text style={styles.caption}>{formatUiCount(t, result.members.length, "participants")}</Text>
             <Conservation result={result} />
           </View>
 
           <View style={styles.section}>
             <View style={styles.sectionHeading}>
-              <Text accessibilityRole="header" style={styles.sectionTitle}>每人應承擔</Text>
+              <Text accessibilityRole="header" style={styles.sectionTitle}>{t("每人應承擔")}</Text>
               <Pressable accessibilityRole="button" onPress={() => setDetails(true)} style={styles.textButton}>
-                <Text style={styles.link}>查看分攤明細</Text>
+                <Text style={styles.link}>{t("查看分攤明細")}</Text>
                 <Icon name="next" size={14} color={colors.accentText} />
               </Pressable>
             </View>
@@ -188,7 +192,7 @@ export function QuickSplitResultScreen({ preview, onBack, onAddPayer, onConvert 
                 <View key={member.id} style={[styles.memberRow, index > 0 && styles.divider]}>
                   <View style={styles.memberLabel}>
                     <Text style={styles.memberName}>{member.name}</Text>
-                    {member.id === preview.input.merchantPayerId && <Text style={styles.payerLabel}>商家付款人</Text>}
+                    {member.id === preview.input.merchantPayerId && <Text style={styles.payerLabel}>{t("商家付款人")}</Text>}
                   </View>
                   <Text style={styles.amount}>{money(member.amountMinor)}</Text>
                 </View>
@@ -197,27 +201,27 @@ export function QuickSplitResultScreen({ preview, onBack, onAddPayer, onConvert 
           </View>
 
           <View style={styles.section}>
-            <Text accessibilityRole="header" style={styles.sectionTitle}>轉帳建議</Text>
+            <Text accessibilityRole="header" style={styles.sectionTitle}>{t("轉帳建議")}</Text>
             <View style={[styles.card, styles.summary]}>
               {result.payerName === undefined ? (
                 <>
-                  <Text style={styles.caption}>尚未指定付款人，暫時只顯示各人分攤金額。</Text>
+                  <Text style={styles.caption}>{t("尚未指定付款人，暫時只顯示各人分攤金額。")}</Text>
                   <Pressable accessibilityRole="button" onPress={onAddPayer} style={({ pressed }) => [styles.secondary, pressed && styles.pressed]}>
-                    <Text style={styles.link}>補充付款人</Text>
+                    <Text style={styles.link}>{t("補充付款人")}</Text>
                     <Icon name="next" size={14} color={colors.accentText} />
                   </Pressable>
                 </>
               ) : (
                 <>
-                  <Text style={styles.caption}>商家付款人 · {result.payerName}</Text>
+                  <Text style={styles.caption}>{t("商家付款人 ·") + " "}{result.payerName}</Text>
                   {result.suggestions.length === 0
-                    ? <Text style={styles.lineLabel}>此試算沒有轉帳建議。</Text>
+                    ? <Text style={styles.lineLabel}>{t("此試算沒有轉帳建議。")}</Text>
                     : result.suggestions.map((suggestion, index) => (
                       <View key={`${suggestion.fromMemberId}:${suggestion.toMemberId}`} style={[styles.transfer, index > 0 && styles.divider]}>
                         <AmountLine label={`${suggestion.fromName} → ${suggestion.toName}`} amount={money(suggestion.amountMinor)} />
                       </View>
                     ))}
-                  <Text style={styles.caption}>僅供參考，尚未記錄任何實際還款。</Text>
+                  <Text style={styles.caption}>{t("僅供參考，尚未記錄任何實際還款。")}</Text>
                 </>
               )}
             </View>
@@ -233,13 +237,13 @@ export function QuickSplitResultScreen({ preview, onBack, onAddPayer, onConvert 
               onPress={startShare}
               style={({ pressed }) => [styles.primary, (pressed || !result.balanced) && styles.pressed]}
             >
-              <Text style={styles.primaryText}>分享結算</Text>
+              <Text style={styles.primaryText}>{t("分享結算")}</Text>
             </Pressable>
-            {saved && <Text accessibilityLiveRegion="polite" style={styles.caption}>已儲存至快速分帳記錄。</Text>}
+            {saved && <Text accessibilityLiveRegion="polite" style={styles.caption}>{t("已儲存至快速分帳記錄。")}</Text>}
             {state.status === "error" && (
               <Text accessibilityRole="alert" style={styles.error}>
                 {state.code === "PRO_REQUIRED" ? copy.locked : state.code === "QUICK_STORAGE_ERROR"
-                  ? "未能寫入本機記錄，請重試。" : `未能儲存計算記錄（${state.code}）。`}
+                  ? t("未能寫入本機記錄，請重試。") : t("未能儲存計算記錄，請核對資料後再試。")}
               </Text>
             )}
             <View style={styles.resultActions}>
@@ -250,12 +254,12 @@ export function QuickSplitResultScreen({ preview, onBack, onAddPayer, onConvert 
                 onPress={save}
                 style={({ pressed }) => [styles.saveButton, styles.actionCell, (pressed || !canSave) && styles.pressed]}
               >
-                <Text style={styles.saveText}>{saving ? "正在儲存…" : saved ? "已儲存計算記錄" : "儲存計算記錄"}</Text>
+                <Text style={styles.saveText}>{saving ? t("正在儲存…") : saved ? t("已儲存計算記錄") : t("儲存計算記錄")}</Text>
               </Pressable>
               <Pressable accessibilityRole="button" disabled={saving || !!shareCard || !result.balanced}
                 onPress={addToActivity}
                 style={({ pressed }) => [styles.saveButton, styles.actionCell, (pressed || saving || !result.balanced) && styles.pressed]}>
-                <Text style={styles.saveText}>加入活動</Text>
+                <Text style={styles.saveText}>{t("加入活動")}</Text>
               </Pressable>
             </View>
           </View>
@@ -275,7 +279,7 @@ const styles = StyleSheet.create({
   },
   back: { flex: 1, minHeight: 44, alignItems: "flex-start", justifyContent: "center", paddingLeft: 4 },
   headerSpace: { flex: 1 },
-  title: { color: colors.ink, fontSize: 19, fontWeight: "700", textAlign: "center" },
+  title: { color: colors.ink, fontSize: 19, fontWeight: "700", textAlign: "center", flexShrink: 1 },
   scroll: { flex: 1 },
   content: { width: "100%", maxWidth: 620, alignSelf: "center", paddingHorizontal: 18, paddingTop: 8, paddingBottom: 20, gap: 17 },
   card: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line, borderRadius: 15 },

@@ -1,3 +1,6 @@
+import { formatUiCount } from "../services/localizedCopy.ts";
+import type { Copy } from "../services/localizedCopy.ts";
+import { useCopy } from "./useCopy.ts";
 import { uuid } from "expo";
 import { useCallback, useEffect, useRef, useState, type ComponentRef } from "react";
 import {
@@ -17,24 +20,25 @@ type MembersData = NonNullable<Awaited<ReturnType<typeof loadActivityMembers>>>;
 type ManagedMember = MembersData["members"][number];
 type InputRow = { readonly key: number; readonly name: string };
 
-function memberError(error: unknown): string {
+function memberError(t: Copy, error: unknown): string {
   if (error instanceof MemberManagementError) {
     switch (error.code) {
-      case "ACTIVITY_COMPLETED": return "活動已完成，請先重新開啟再管理成員。";
-      case "ACTIVITY_NOT_FOUND": return "找不到這個活動，請返回活動列表重新讀取。";
-      case "MEMBER_NOT_FOUND": return "找不到這位成員，請重新讀取活動。";
-      case "INVALID_MEMBER_NAME": return `請輸入 1 至 ${memberNameMaxLength} 個字的成員名稱。`;
-      case "SHARED_MEMBER": return "這位成員與其他活動共用，目前無法只修改本活動的名稱。";
-      case "MEMBER_CONFLICT": return "成員資料與本次請求不符，請返回活動核對。";
-      case "INVALID_MEMBER_BATCH": return "請核對本次新增的成員名單。";
+      case "ACTIVITY_COMPLETED": return t("活動已完成，請先重新開啟再管理成員。");
+      case "ACTIVITY_NOT_FOUND": return t("找不到這個活動，請返回活動列表重新讀取。");
+      case "MEMBER_NOT_FOUND": return t("找不到這位成員，請重新讀取活動。");
+      case "INVALID_MEMBER_NAME": return t("請輸入 1 至 {0} 個字的成員名稱。", memberNameMaxLength);
+      case "SHARED_MEMBER": return t("這位成員與其他活動共用，目前無法只修改本活動的名稱。");
+      case "MEMBER_CONFLICT": return t("成員資料與本次請求不符，請返回活動核對。");
+      case "INVALID_MEMBER_BATCH": return t("請核對本次新增的成員名單。");
     }
   }
-  return "未能儲存成員，請重試。你亦可返回活動核對。";
+  return t("未能儲存成員，請重試。你亦可返回活動核對。");
 }
 
 function NameError({ name, visible }: { name: string; visible: boolean }) {
+  const t = useCopy();
   if (!visible || validMemberName(name)) return null;
-  return <Text accessibilityRole="alert" style={styles.error}>{name.trim() ? `名稱最多可用 ${memberNameMaxLength} 個字。` : "請輸入成員名稱。"}</Text>;
+  return <Text accessibilityRole="alert" style={styles.error}>{name.trim() ? t("名稱最多可用 {0} 個字。", memberNameMaxLength) : t("請輸入成員名稱。")}</Text>;
 }
 
 function SecondaryButton({ label, onPress, disabled = false }: { label: string; onPress: () => void; disabled?: boolean }) {
@@ -47,6 +51,7 @@ function SecondaryButton({ label, onPress, disabled = false }: { label: string; 
 }
 
 export function ActivityMembersScreen({ activityId, onBack }: { activityId: string; onBack: () => void }) {
+  const t = useCopy();
   const [data, setData] = useState<MembersData | null>();
   const [loading, setLoading] = useState(true);
   const [readError, setReadError] = useState(false);
@@ -89,21 +94,21 @@ export function ActivityMembersScreen({ activityId, onBack }: { activityId: stri
   const active = data?.status === "active";
   return (
     <>
-      <ConversionPage title="管理成員" onBack={onBack} footer={<ConversionButton label="返回活動詳情" onPress={onBack} />}>
-        {loading && <ActivityIndicator accessibilityLabel="正在讀取成員" color={colors.ink} />}
+      <ConversionPage title={t("管理成員")} onBack={onBack} footer={<ConversionButton label={t("返回活動詳情")} onPress={onBack} />}>
+        {loading && <ActivityIndicator accessibilityLabel={t("正在讀取成員")} color={colors.ink} />}
         {readError && <ConversionReadError retry={() => { void reload(); }} />}
-        {data === null && <Text style={styles.caption}>找不到這個活動。</Text>}
+        {data === null && <Text style={styles.caption}>{t("找不到這個活動。")}</Text>}
         {data && (
           <>
             <View style={styles.intro}>
-              <Text style={styles.caption}>活動 · {data.name}</Text>
-              <Text accessibilityRole="header" style={styles.mainTitle}>活動成員</Text>
-              <Text style={styles.caption}>管理活動內的參與者，既有費用不會重新分攤。</Text>
+              <Text style={styles.caption}>{t("活動 · {0}", data.name)}</Text>
+              <Text accessibilityRole="header" style={styles.mainTitle}>{t("活動成員")}</Text>
+              <Text style={styles.caption}>{t("管理活動內的參與者，既有費用不會重新分攤。")}</Text>
             </View>
             <View style={styles.section}>
               <View style={styles.headingRow}>
-                <Text accessibilityRole="header" style={styles.heading}>目前成員 ({data.members.length})</Text>
-                <Text style={styles.caption}>依加入順序</Text>
+                <Text accessibilityRole="header" style={styles.heading}>{t("目前成員（{0}）", data.members.length)}</Text>
+                <Text style={styles.caption}>{t("依加入順序")}</Text>
               </View>
               <View style={styles.card}>
                 {data.members.map((member, index) => (
@@ -111,24 +116,24 @@ export function ActivityMembersScreen({ activityId, onBack }: { activityId: stri
                     <View style={styles.avatar}><Icon name="member" size={18} /></View>
                     <View style={styles.memberCopy}>
                       <Text style={styles.memberName}>{member.displayName}</Text>
-                      <Text style={styles.minor}>{member.shared ? "與其他活動共用 · 暫不支援改名"
-                        : member.hasHistory ? "已有財務紀錄 · 不可移除" : "尚未參與財務紀錄"}</Text>
+                      <Text style={styles.minor}>{member.shared ? t("與其他活動共用 · 暫不支援改名")
+                        : member.hasHistory ? t("已有財務紀錄 · 不可移除") : t("尚未參與財務紀錄")}</Text>
                     </View>
                     {active && !member.shared
-                      ? <Pressable accessibilityRole="button" accessibilityLabel={`編輯${member.displayName}的名稱`}
+                      ? <Pressable accessibilityRole="button" accessibilityLabel={t("編輯{0}的名稱", member.displayName)}
                         onPress={() => setEditing(member)} style={styles.editButton}>
-                        <Text style={styles.editText}>編輯</Text><Icon name="next" size={13} color={colors.muted} />
+                        <Text style={styles.editText}>{t("編輯")}</Text><Icon name="next" size={13} color={colors.muted} />
                       </Pressable>
-                      : <Text style={styles.minor}>唯讀</Text>}
+                      : <Text style={styles.minor}>{t("唯讀")}</Text>}
                   </View>
                 ))}
               </View>
-              <SecondaryButton label="＋ 新增活動成員" disabled={!active || readError || loading} onPress={() => setAdding(true)} />
-              {!active && <Text style={styles.caption}>活動已完成，重新開啟後即可管理成員。</Text>}
+              <SecondaryButton label={t("＋ 新增活動成員")} disabled={!active || readError || loading} onPress={() => setAdding(true)} />
+              {!active && <Text style={styles.caption}>{t("活動已完成，重新開啟後即可管理成員。")}</Text>}
             </View>
             <View style={[styles.card, styles.tip]}>
-              <Text style={styles.tipTitle}>成員與歷史帳務</Text>
-              <Text style={styles.caption}>新增成員只影響之後的費用及成員對應，已儲存的付款、分攤及還款紀錄會保留。</Text>
+              <Text style={styles.tipTitle}>{t("成員與歷史帳務")}</Text>
+              <Text style={styles.caption}>{t("新增成員只影響之後的費用及成員對應，已儲存的付款、分攤及還款紀錄會保留。")}</Text>
             </View>
           </>
         )}
@@ -145,6 +150,7 @@ export function ActivityMembersScreen({ activityId, onBack }: { activityId: stri
 }
 
 function AddActivityMembers({ data, onBack, onSaved }: { data: MembersData; onBack: () => void; onSaved: () => void }) {
+  const t = useCopy();
   const [rows, setRows] = useState<readonly InputRow[]>([{ key: 1, name: "" }, { key: 2, name: "" }]);
   const nextKey = useRef(3);
   const [attempted, setAttempted] = useState(false);
@@ -166,8 +172,8 @@ function AddActivityMembers({ data, onBack, onSaved }: { data: MembersData; onBa
     if (pending.current) return;
     Keyboard.dismiss();
     if (!rows.some(({ name }) => name.trim() !== "")) { onBack(); return; }
-    Alert.alert("返回管理成員？", "本頁尚未儲存的輸入將會清除。", [
-      { text: "繼續編輯", style: "cancel" }, { text: "返回", onPress: onBack },
+    Alert.alert(t("返回管理成員？"), t("本頁尚未儲存的輸入將會清除。"), [
+      { text: t("繼續編輯"), style: "cancel" }, { text: t("返回"), onPress: onBack },
     ]);
   }, [onBack, rows]);
 
@@ -199,7 +205,7 @@ function AddActivityMembers({ data, onBack, onSaved }: { data: MembersData; onBa
       await repository.addMembers(data.id, request.current);
       if (mounted.current) onSaved();
     } catch (cause) {
-      if (mounted.current) setError(memberError(cause));
+      if (mounted.current) setError(memberError(t, cause));
     } finally {
       pending.current = false;
       if (mounted.current) setSaving(false);
@@ -207,30 +213,30 @@ function AddActivityMembers({ data, onBack, onSaved }: { data: MembersData; onBa
   }
 
   return (
-    <ConversionPage title="新增成員" endLabel="取消" onBack={close} busy={saving} scrollRef={scroll}
+    <ConversionPage title={t("新增成員")} endLabel={t("取消")} onBack={close} busy={saving} scrollRef={scroll}
       footer={<>
         {error && <Text accessibilityRole="alert" style={styles.error}>{error}</Text>}
-        <ConversionButton label={saving ? "正在儲存…" : request.current ? "重試儲存新增成員" : "儲存新增成員"}
+        <ConversionButton label={saving ? t("正在儲存…") : request.current ? t("重試儲存新增成員") : t("儲存新增成員")}
           disabled={saving || !active || rows.length === 0} onPress={() => { void save(); }} />
       </>}>
       <View style={styles.intro}>
-        <Text style={styles.caption}>加入至活動</Text>
+        <Text style={styles.caption}>{t("加入至活動")}</Text>
         <Text accessibilityRole="header" style={styles.mainTitle}>{data.name}</Text>
-        <Text style={styles.caption}>為活動新增成員，日後可用於分帳和快速記錄轉入。</Text>
+        <Text style={styles.caption}>{t("為活動新增成員，日後可用於分帳和快速記錄轉入。")}</Text>
       </View>
-      {!active && <Text accessibilityRole="alert" style={styles.error}>活動已完成，請返回並重新開啟後再新增成員。</Text>}
+      {!active && <Text accessibilityRole="alert" style={styles.error}>{t("活動已完成，請返回並重新開啟後再新增成員。")}</Text>}
       <View style={styles.section}>
-        <Text accessibilityRole="header" style={styles.heading}>新增名單 ({rows.length})</Text>
+        <Text accessibilityRole="header" style={styles.heading}>{t("新增名單（{0}）", rows.length)}</Text>
         {rows.map(({ key, name }, index) => (
           <View key={key} style={styles.field} onLayout={({ nativeEvent }) => { offsets.current.set(key, nativeEvent.layout.y); }}>
-            <Text style={styles.label}>成員名稱 *</Text>
+            <Text style={styles.label}>{t("成員名稱 *")}</Text>
             <View style={styles.inputRow}>
-              <TextInput accessibilityLabel={`新增成員 ${index + 1} 的名稱`} value={name} editable={editable && active}
-                placeholder="輸入成員名稱" placeholderTextColor={colors.muted}
+              <TextInput accessibilityLabel={t("新增成員 {0} 的名稱", index + 1)} value={name} editable={editable && active}
+                placeholder={t("輸入成員名稱")} placeholderTextColor={colors.muted}
                 onFocus={() => { if (Platform.OS === "ios" && Keyboard.isVisible()) requestAnimationFrame(revealInput); }}
                 onChangeText={(value) => setRows((current) => current.map((row) => row.key === key ? { ...row, name: value } : row))}
                 style={styles.input} />
-              <Pressable accessibilityRole="button" accessibilityLabel={`移除第 ${index + 1} 個輸入欄位`}
+              <Pressable accessibilityRole="button" accessibilityLabel={t("移除第 {0} 個輸入欄位", index + 1)}
                 disabled={!editable || rows.length === 1 || !active}
                 onPress={() => setRows((current) => current.filter((row) => row.key !== key))}
                 style={[styles.removeButton, (rows.length === 1 || !editable) && styles.dimmed]}>
@@ -240,33 +246,34 @@ function AddActivityMembers({ data, onBack, onSaved }: { data: MembersData; onBa
             <NameError name={name} visible={attempted} />
           </View>
         ))}
-        <SecondaryButton label="＋ 再新增一位" disabled={!editable || !active} onPress={() => {
+        <SecondaryButton label={t("＋ 再新增一位")} disabled={!editable || !active} onPress={() => {
           const key = nextKey.current++;
           setRows((current) => [...current, { key, name: "" }]);
         }} />
-        <Text style={styles.minor}>名稱最多 {memberNameMaxLength} 個字。同名成員會分別建立。</Text>
-        {request.current && !saving && <Text style={styles.caption}>本次名單已保留，重試會使用相同資料。返回管理成員可核對目前名單。</Text>}
+        <Text style={styles.minor}>{t("名稱最多 {0} 個字。同名成員會分別建立。", memberNameMaxLength)}</Text>
+        {request.current && !saving && <Text style={styles.caption}>{t("本次名單已保留，重試會使用相同資料。返回管理成員可核對目前名單。")}</Text>}
       </View>
       <View style={styles.section}>
-        <Text accessibilityRole="header" style={styles.heading}>新增後</Text>
+        <Text accessibilityRole="header" style={styles.heading}>{t("新增後")}</Text>
         <View style={styles.card}>
-          <CountRow label="目前活動成員" count={data.members.length} />
-          <CountRow label="本次新增" count={rows.length} divider />
-          <CountRow label="預計總人數" count={data.members.length + rows.length} divider strong />
+          <CountRow label={t("目前活動成員")} count={data.members.length} />
+          <CountRow label={t("本次新增")} count={rows.length} divider />
+          <CountRow label={t("預計總人數")} count={data.members.length + rows.length} divider strong />
         </View>
       </View>
       <View style={[styles.card, styles.tip]}>
-        <Text style={styles.caption}>歷史費用和每位成員已承擔的金額保持不變。</Text>
+        <Text style={styles.caption}>{t("歷史費用和每位成員已承擔的金額保持不變。")}</Text>
       </View>
     </ConversionPage>
   );
 }
 
 function CountRow({ label, count, divider, strong }: { label: string; count: number; divider?: boolean; strong?: boolean }) {
+  const t = useCopy();
   return (
     <View style={[styles.countRow, divider && styles.divider]}>
       <Text style={strong ? styles.label : styles.caption}>{label}</Text>
-      <Text style={[styles.memberName, strong && styles.totalCount]}>{count} 人</Text>
+      <Text style={[styles.memberName, strong && styles.totalCount]}>{formatUiCount(t, count, "members")}</Text>
     </View>
   );
 }
@@ -274,6 +281,7 @@ function CountRow({ label, count, divider, strong }: { label: string; count: num
 function EditMemberName({ activityId, member, onClose, onSaved }: {
   activityId: string; member: ManagedMember; onClose: () => void; onSaved: (name: string) => void;
 }) {
+  const t = useCopy();
   const [name, setName] = useState(member.displayName);
   const [attempted, setAttempted] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -300,7 +308,7 @@ function EditMemberName({ activityId, member, onClose, onSaved }: {
       const updated = await createActivityRepository(await getLocalDatabase()).renameMember(activityId, member.id, name);
       if (mounted.current) { Keyboard.dismiss(); onSaved(updated.displayName); }
     } catch (cause) {
-      if (mounted.current) setError(memberError(cause));
+      if (mounted.current) setError(memberError(t, cause));
     } finally {
       pending.current = false;
       if (mounted.current) setSaving(false);
@@ -312,15 +320,15 @@ function EditMemberName({ activityId, member, onClose, onSaved }: {
         style={[styles.overlay, { paddingTop: top + 16, paddingBottom: bottom + 16, paddingLeft: left + 18, paddingRight: right + 18 }]}>
         <View accessibilityViewIsModal onAccessibilityEscape={close} style={[styles.card, styles.editCard]}>
           <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.editContent}>
-            <Text accessibilityRole="header" style={styles.heading}>修改成員名稱</Text>
-            <Text style={styles.caption}>最多 {memberNameMaxLength} 個字。改名會保留原成員及所有帳務紀錄。</Text>
-            <TextInput accessibilityLabel="成員名稱" value={name} onChangeText={setName} editable={!saving}
+            <Text accessibilityRole="header" style={styles.heading}>{t("修改成員名稱")}</Text>
+            <Text style={styles.caption}>{t("最多 {0} 個字。改名會保留原成員及所有帳務紀錄。", memberNameMaxLength)}</Text>
+            <TextInput accessibilityLabel={t("成員名稱")} value={name} onChangeText={setName} editable={!saving}
               autoFocus selectTextOnFocus autoCorrect={false} style={styles.editInput} returnKeyType="done"
               submitBehavior="submit" onSubmitEditing={() => { void save(); }} />
             <NameError name={name} visible={attempted} />
             {error && <Text accessibilityRole="alert" style={styles.error}>{error}</Text>}
-            <ConversionButton label={saving ? "正在儲存…" : "儲存名稱"} disabled={saving} onPress={() => { void save(); }} />
-            <SecondaryButton label="取消" disabled={saving} onPress={close} />
+            <ConversionButton label={saving ? t("正在儲存…") : t("儲存名稱")} disabled={saving} onPress={() => { void save(); }} />
+            <SecondaryButton label={t("取消")} disabled={saving} onPress={close} />
           </ScrollView>
         </View>
       </KeyboardAvoidingView>

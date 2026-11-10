@@ -1,3 +1,5 @@
+import type { AppLanguage } from "./appPreferences.ts";
+import { copyFor } from "./localizedCopy.ts";
 import type { QuickDraftInput } from "../data/quickSplits.ts";
 import type { ChargeDistribution } from "../domain/charges.ts";
 import { isCurrency, parseAmount, wholeBasisPoints, type Currency } from "../domain/money.ts";
@@ -78,9 +80,9 @@ export function createQuickSplitEditor(currency: Currency = "HKD"): QuickSplitEd
   };
 }
 
-export function editorMemberName(member: EditorMember, index: number): string {
+export function editorMemberName(member: EditorMember, index: number, language: AppLanguage = "zh-HK"): string {
   const number = /^member-([1-9]\d*)$/.exec(member.id)?.[1];
-  return member.displayName.trim() || `成員 ${number ?? index + 1}`;
+  return member.displayName.trim() || copyFor(language)("成員 {0}", number ?? index + 1);
 }
 
 export function addEditorMember(state: QuickSplitEditorState): QuickSplitEditorState {
@@ -386,7 +388,7 @@ export function lockedAdvancedField(state: QuickSplitEditorState, hasProAccess: 
     && (state.feeDistribution || state.discountDistribution)) return "chargeDistribution";
 }
 
-export function calculateQuickSplitEditor(state: QuickSplitEditorState, hasProAccess = true): EditorResult<QuickSplitPreview> {
+export function calculateQuickSplitEditor(state: QuickSplitEditorState, hasProAccess = true, language: AppLanguage = "zh-HK"): EditorResult<QuickSplitPreview> {
   const locked = lockedAdvancedField(state, hasProAccess);
   if (locked) return editorFailure("PRO_REQUIRED", locked);
   if (!isCurrency(state.currency)) return editorFailure("UNSUPPORTED_CURRENCY", "currency");
@@ -395,7 +397,7 @@ export function calculateQuickSplitEditor(state: QuickSplitEditorState, hasProAc
   const method = editorMethod(state);
   if (!method.ok) return method;
   const input: QuickSplitInput = {
-    members: state.members.map((member, index) => ({ id: member.id, displayName: editorMemberName(member, index) })),
+    members: state.members.map((member, index) => ({ id: member.id, displayName: editorMemberName(member, index, language) })),
     charges: charges.value,
     method: method.value,
     ...(state.merchantPayerId !== undefined ? { merchantPayerId: state.merchantPayerId } : {}),

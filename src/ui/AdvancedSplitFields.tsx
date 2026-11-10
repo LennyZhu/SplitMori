@@ -2,7 +2,7 @@ import { uuid } from "expo";
 import { useContext, useState } from "react";
 import { Alert, Pressable, StyleSheet, Switch, Text, TextInput, View, type TextInputProps } from "react-native";
 import type { ChargeDistribution } from "../domain/charges.ts";
-import type { EditorField, EditorHost, EditorItem, EditorMember, QuickSplitEditorState } from "../services/quickSplitEditor.ts";
+import { editorMemberName, type EditorField, type EditorHost, type EditorItem, type EditorMember, type QuickSplitEditorState } from "../services/quickSplitEditor.ts";
 import { AppLanguageContext } from "./AppLanguageContext.ts";
 import { usePro, useProSnapshot } from "./ProContext.ts";
 import { advancedSplitCopy } from "./advancedSplitCopy.ts";
@@ -52,10 +52,11 @@ const toggled = (ids: readonly string[], id: string) => ids.includes(id) ? ids.f
 const newHost: EditorHost = { coverKind: "fixed", coverAmount: "", coverPercentage: "", includeHostInRemainder: false };
 
 export function AdvancedMethodFields({ editor, participants, update, error, onFocus }: FieldsProps) {
-  const copy = advancedSplitCopy(useContext(AppLanguageContext));
+  const language = useContext(AppLanguageContext);
+  const copy = advancedSplitCopy(language);
   const { hasProAccess } = useProSnapshot();
   const authorize = useAdvancedSplitAction();
-  const name = (member: EditorMember, index: number) => member.displayName.trim() || copy.member(index);
+  const name = (member: EditorMember, index: number) => editorMemberName(member, index, language);
   const eligible = new Set(participants.map(({ id }) => id));
   const people = (ids: readonly string[], choose: (id: string) => void, showExcluded = false) => (
     <View style={styles.choices}>{editor.members.map((member, index) => {
@@ -145,7 +146,8 @@ export function AdvancedMethodFields({ editor, participants, update, error, onFo
 }
 
 export function AdvancedChargeFields({ editor, participants, update, error }: Omit<FieldsProps, "onFocus">) {
-  const copy = advancedSplitCopy(useContext(AppLanguageContext));
+  const language = useContext(AppLanguageContext);
+  const copy = advancedSplitCopy(language);
   const { hasProAccess } = useProSnapshot();
   const authorize = useAdvancedSplitAction();
   const [expanded, setExpanded] = useState(false);
@@ -167,7 +169,7 @@ export function AdvancedChargeFields({ editor, participants, update, error }: Om
         const selected = rule.memberIds.includes(member.id);
         const available = eligible.has(member.id);
         if (!available && !selected) return null;
-        const name = member.displayName.trim() || copy.member(index);
+        const name = editorMemberName(member, index, language);
         return <Button key={member.id} label={available ? name : `${name} · ${copy.excluded}`} selected={selected}
           action={() => update({ [field]: { ...rule, memberIds: toggled(rule.memberIds, member.id) } })} />;
       })}</View>}

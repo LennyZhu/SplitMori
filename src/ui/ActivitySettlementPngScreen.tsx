@@ -13,6 +13,7 @@ import { ActivitySettlementPngReceipt, settlementReceiptWidth } from "./Activity
 import { ButtonPair, Notice } from "./FinanceReviewUi.tsx";
 import { usePro, useProSnapshot } from "./ProContext.ts";
 import { ConversionButton, ConversionPage } from "./QuickSplitConversionScreen.tsx";
+import { useSharePresentation } from "./useSharePresentation.ts";
 import { colors, Icon } from "./visuals.tsx";
 
 type Job = { snapshot: SettlementPngSnapshot; card: SettlementPngCard };
@@ -121,6 +122,7 @@ export function ActivitySettlementPngScreen({ activityId, appLocale, onBack }: {
   const [initialOutputLanguage] = useState(() => resolveSettlementPngLanguages({ appLocale }).outputLanguage);
   const [page, setPage] = useState<Page>("preview");
   const [busy, setBusy] = useState<Busy>();
+  const waitForSharePresentation = useSharePresentation(busy === "share");
   const [issue, setIssue] = useState<Issue>();
   const [documentOutcome, setDocumentOutcome] = useState<DocumentOutcome>();
   const [job, setJob] = useState<Job>();
@@ -204,6 +206,7 @@ export function ActivitySettlementPngScreen({ activityId, appLocale, onBack }: {
   async function usePreview(action: "save" | "share") {
     if (operation.current || !preview || issue === "imageMissing") return;
     operation.current = {};
+    const shareReady = action === "share" ? waitForSharePresentation() : undefined;
     setBusy(action);
     setIssue(undefined);
     setDocumentOutcome(undefined);
@@ -216,6 +219,7 @@ export function ActivitySettlementPngScreen({ activityId, appLocale, onBack }: {
         if (outcome === "saved") setPage("saved");
         else setIssue(({ unavailable: "photosUnavailable", cancelled: "saveCancelled", denied: "saveDenied", failed: "saveFailed" } as const)[outcome]);
       } else if (await canShareLocalPng()) {
+        await shareReady;
         if (active.current) await presentLocalSharePng(image, copy.share);
       } else if (active.current) {
         setIssue("shareUnavailable");
@@ -242,7 +246,11 @@ export function ActivitySettlementPngScreen({ activityId, appLocale, onBack }: {
     try {
       const outcome = await shareSettlementDocument(preview, format, settlementDocumentPlatform, {
         hasVerifiedProAccess, isActive: () => active.current, title: documents[format],
-        onPresenting: () => setBusy("share"),
+        onPresenting: () => {
+          const shareReady = waitForSharePresentation();
+          setBusy("share");
+          return shareReady;
+        },
       });
       if (active.current) setDocumentOutcome(outcome);
     } finally {

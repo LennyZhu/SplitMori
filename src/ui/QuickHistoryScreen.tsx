@@ -1,4 +1,6 @@
-import { useCallback, useContext } from "react";
+import { formatUiCount, formatUiDate } from "../services/localizedCopy.ts";
+import { useCopy } from "./useCopy.ts";
+import { useCallback } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { getLocalDatabase } from "../data/database.ts";
 import { createQuickSplitRepository } from "../data/quickSplits.ts";
@@ -11,11 +13,10 @@ import {
 import { colors, Icon } from "./visuals.tsx";
 import { useAdvancedSplitAction } from "./AdvancedSplitFields.tsx";
 import { advancedSplitCopy } from "./advancedSplitCopy.ts";
-import { AppLanguageContext } from "./AppLanguageContext.ts";
 
-const dateFormat = new Intl.DateTimeFormat("zh-HK", { year: "numeric", month: "short", day: "numeric" });
 
 export function QuickHistoryListScreen({ onRecord }: { onRecord: (id: string) => void }) {
+  const t = useCopy();
   const read = useCallback(async () => {
     const result = await createQuickSplitRepository(await getLocalDatabase()).listQuickHistory();
     if (!result.ok) throw new Error(result.error.code);
@@ -24,17 +25,17 @@ export function QuickHistoryListScreen({ onRecord }: { onRecord: (id: string) =>
   const { state, retry } = useConversionRead(read);
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.list}>
-      <Text accessibilityRole="header" style={styles.title}>記錄</Text>
-      <Text style={styles.label}>已儲存的快速分帳</Text>
-      {state.status === "loading" && <ActivityIndicator accessibilityLabel="正在讀取記錄" color={colors.ink} />}
+      <Text accessibilityRole="header" style={styles.title}>{t("記錄")}</Text>
+      <Text style={styles.label}>{t("已儲存的快速分帳")}</Text>
+      {state.status === "loading" && <ActivityIndicator accessibilityLabel={t("正在讀取記錄")} color={colors.ink} />}
       {state.status === "error" && <ConversionReadError retry={retry} />}
       {state.status === "loaded" && (state.value.length === 0
-        ? <View style={styles.card}><Text style={styles.caption}>尚未儲存快速分帳記錄。</Text></View>
+        ? <View style={styles.card}><Text style={styles.caption}>{t("尚未儲存快速分帳記錄。")}</Text></View>
         : state.value.map(({ id, createdAt, snapshot: { split: { total } }, input }) => (
           <Pressable key={id} accessibilityRole="button" onPress={() => onRecord(id)} style={[styles.card, styles.row]}>
             <View style={styles.fill}>
               <Text style={styles.label}>{formatResultMoney(total.currency, total.amountMinor)}</Text>
-              <Text style={styles.caption}>{dateFormat.format(createdAt)} · {input.members.length} 位成員</Text>
+              <Text style={styles.caption}>{formatUiDate(t, createdAt, "short")} · {formatUiCount(t, input.members.length, "members")}</Text>
             </View>
             <Icon name="next" size={16} color={colors.muted} />
           </Pressable>
@@ -46,7 +47,8 @@ export function QuickHistoryListScreen({ onRecord }: { onRecord: (id: string) =>
 export function QuickHistoryScreen({ historyId, onBack, onConvert, onViewActivity }: {
   historyId: string; onBack: () => void; onConvert: () => void; onViewActivity: (activityId: string) => void;
 }) {
-  const language = useContext(AppLanguageContext);
+  const t = useCopy();
+  const { language } = t;
   const authorize = useAdvancedSplitAction();
   const read = useCallback(async () => createQuickSplitConversionService(await getLocalDatabase()).getSource(historyId), [historyId]);
   const { state, retry } = useConversionRead(read);
@@ -56,19 +58,19 @@ export function QuickHistoryScreen({ historyId, onBack, onConvert, onViewActivit
   const allocations = new Map(split?.allocations.map(({ memberId, amountMinor }) => [memberId, amountMinor]));
 
   return (
-    <ConversionPage title="快速分帳記錄" onBack={onBack}
+    <ConversionPage title={t("快速分帳記錄")} onBack={onBack}
       footer={source && (destination
-        ? <ConversionButton label="查看活動" onPress={() => onViewActivity(destination.activityId)} />
-        : <ConversionButton label="加入活動" onPress={() => usesAdvancedSplit(source.history.input)
+        ? <ConversionButton label={t("查看活動")} onPress={() => onViewActivity(destination.activityId)} />
+        : <ConversionButton label={t("加入活動")} onPress={() => usesAdvancedSplit(source.history.input)
           ? authorize(advancedSplitCopy(language).addToActivity, onConvert) : onConvert()} />)}>
-      {state.status === "loading" && <ActivityIndicator accessibilityLabel="正在讀取記錄" color={colors.ink} />}
+      {state.status === "loading" && <ActivityIndicator accessibilityLabel={t("正在讀取記錄")} color={colors.ink} />}
       {state.status === "error" && <ConversionReadError retry={retry} />}
-      {source === null && <Text style={styles.caption}>找不到這筆快速分帳記錄。</Text>}
+      {source === null && <Text style={styles.caption}>{t("找不到這筆快速分帳記錄。")}</Text>}
       {source && split && (
         <>
           <QuickRecordSummary history={source.history} destination={destination} />
           <View style={styles.card}>
-            <Text accessibilityRole="header" style={styles.label}>每人應承擔</Text>
+            <Text accessibilityRole="header" style={styles.label}>{t("每人應承擔")}</Text>
             {source.history.input.members.map(({ id, displayName }) => (
               <View key={id} style={[styles.row, styles.divider]}>
                 <Text style={[styles.body, styles.fill]}>{displayName}</Text>
@@ -76,8 +78,8 @@ export function QuickHistoryScreen({ historyId, onBack, onConvert, onViewActivit
               </View>
             ))}
           </View>
-          <Text style={styles.caption}>{destination ? "此快速分帳記錄會繼續保留。"
-            : "這只是計算記錄，尚未加入活動帳本。"}</Text>
+          <Text style={styles.caption}>{destination ? t("此快速分帳記錄會繼續保留。")
+            : t("這只是計算記錄，尚未加入活動帳本。")}</Text>
         </>
       )}
     </ConversionPage>

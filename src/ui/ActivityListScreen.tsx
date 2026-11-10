@@ -1,32 +1,34 @@
+import { formatUiCount, formatUiDate } from "../services/localizedCopy.ts";
+import { useCopy } from "./useCopy.ts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, AppState, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { loadActivityList, type ActivitySummary } from "../services/activityList.ts";
 import { formatResultMoney } from "../services/quickSplitResult.ts";
 import { colors, Icon } from "./visuals.tsx";
 
-const dateFormat = new Intl.DateTimeFormat("zh-HK", { year: "numeric", month: "long", day: "numeric" });
 
 function ActivityCard({ activity, onPress }: { activity: ActivitySummary; onPress: () => void }) {
+  const t = useCopy();
   const active = activity.status === "active";
   const date = new Date(activity.createdAt);
-  const status = activity.hasOutstanding ? "尚未結清" : activity.expenseCount > 0 ? "已結清" : "尚無費用";
+  const status = activity.hasOutstanding ? t("尚未結清") : activity.expenseCount > 0 ? t("已結清") : t("尚無費用");
   const amount = formatResultMoney(activity.total.currency, activity.total.amountMinor);
   return (
     <Pressable accessibilityRole="button" onPress={onPress} style={({ pressed }) => [styles.card, pressed && styles.pressed]}>
       <View style={styles.cardTop}>
         <Text style={styles.cardName}>{activity.name}</Text>
-        {active && <Text style={styles.badge}>進行中</Text>}
+        {active && <Text style={styles.badge}>{t("進行中")}</Text>}
         {!active && <Text style={styles.historyAmount}>{amount}</Text>}
       </View>
       {active && <Text style={styles.activeAmount}>{amount}</Text>}
       <View style={styles.cardBottom}>
-        <Text style={styles.meta}>{activity.memberCount} 位成員 · {activity.expenseCount} 筆費用</Text>
+        <Text style={styles.meta}>{formatUiCount(t, activity.memberCount, "members")} · {formatUiCount(t, activity.expenseCount, "expenses")}</Text>
         <View style={styles.status}>
           <Text style={styles.meta}>{status}</Text>
           <Icon name="next" size={14} color={colors.muted} />
         </View>
       </View>
-      {!Number.isNaN(date.getTime()) && <Text style={styles.meta}>{dateFormat.format(date)}</Text>}
+      {!Number.isNaN(date.getTime()) && <Text style={styles.meta}>{formatUiDate(t, date)}</Text>}
     </Pressable>
   );
 }
@@ -34,6 +36,7 @@ function ActivityCard({ activity, onPress }: { activity: ActivitySummary; onPres
 export function ActivityListScreen({ onCreate, onActivity }: {
   onCreate: () => void; onActivity: (activity: ActivitySummary) => void;
 }) {
+  const t = useCopy();
   const [activities, setActivities] = useState<readonly ActivitySummary[]>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -73,25 +76,25 @@ export function ActivityListScreen({ onCreate, onActivity }: {
       refreshControl={<RefreshControl refreshing={loading && activities !== undefined} onRefresh={reload} tintColor={colors.ink} />}
     >
       <View style={styles.header}>
-        <Text accessibilityRole="header" style={styles.title}>活動</Text>
+        <Text accessibilityRole="header" style={styles.title}>{t("活動")}</Text>
         <Pressable accessibilityRole="button" onPress={onCreate} style={({ pressed }) => [styles.action, pressed && styles.pressed]}>
           <Icon name="plus" size={17} />
-          <Text style={styles.actionText}>建立活動</Text>
+          <Text style={styles.actionText}>{t("建立活動")}</Text>
         </Pressable>
       </View>
 
       {loading && activities === undefined && (
         <View style={styles.notice}>
           <ActivityIndicator color={colors.ink} />
-          <Text accessibilityLiveRegion="polite" style={styles.meta}>正在讀取活動…</Text>
+          <Text accessibilityLiveRegion="polite" style={styles.meta}>{t("正在讀取活動…")}</Text>
         </View>
       )}
       {error && (
         <View style={styles.notice}>
           <Text accessibilityRole="alert" style={styles.meta}>
-            {activities ? "未能更新活動，目前顯示上次讀取的資料。" : "未能讀取活動。"}
+            {activities ? t("未能更新活動，目前顯示上次讀取的資料。") : t("未能讀取活動。")}
           </Text>
-          <Pressable accessibilityRole="button" onPress={reload} style={styles.action}><Text style={styles.actionText}>重試</Text></Pressable>
+          <Pressable accessibilityRole="button" onPress={reload} style={styles.action}><Text style={styles.actionText}>{t("重試")}</Text></Pressable>
         </View>
       )}
       {activities && (["active", "completed"] as const).map((status) => {
@@ -101,13 +104,13 @@ export function ActivityListScreen({ onCreate, onActivity }: {
           <View key={status} style={styles.section}>
             <View style={styles.sectionHeader}>
               <Text accessibilityRole="header" style={styles.sectionTitle}>
-                {active ? "進行中" : "已完成"} <Text style={styles.count}>({rows.length})</Text>
+                {active ? t("進行中") : t("已完成")} <Text style={styles.count}>({rows.length})</Text>
               </Text>
-              <Text style={styles.meta}>{active ? "目前活動" : "歷史活動"}</Text>
+              <Text style={styles.meta}>{active ? t("目前活動") : t("歷史活動")}</Text>
             </View>
             {rows.length === 0 ? (
               <View style={[styles.card, styles.empty]}>
-                <Text style={styles.meta}>{active ? "暫時沒有進行中的活動。" : "暫時沒有已完成的活動。"}</Text>
+                <Text style={styles.meta}>{active ? t("暫時沒有進行中的活動。") : t("暫時沒有已完成的活動。")}</Text>
               </View>
             ) : rows.map((activity) => (
               <ActivityCard key={activity.id} activity={activity} onPress={() => onActivity(activity)} />
@@ -115,7 +118,7 @@ export function ActivityListScreen({ onCreate, onActivity }: {
           </View>
         );
       })}
-      {activities && <Text style={styles.meta}>活動可以包含多筆費用；已完成的活動仍可查看和記錄實際還款。</Text>}
+      {activities && <Text style={styles.meta}>{t("活動可以包含多筆費用；已完成的活動仍可查看和記錄實際還款。")}</Text>}
     </ScrollView>
   );
 }
@@ -124,9 +127,9 @@ const styles = StyleSheet.create({
   scroll: { flex: 1 },
   content: { width: "100%", maxWidth: 620, alignSelf: "center", paddingHorizontal: 22, paddingTop: 12, paddingBottom: 20, gap: 20 },
   header: { minHeight: 48, flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 },
-  title: { fontSize: 24, fontWeight: "700", color: colors.ink },
-  action: { minHeight: 44, minWidth: 44, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 3 },
-  actionText: { color: colors.ink, fontSize: 15, fontWeight: "600" },
+  title: { fontSize: 24, fontWeight: "700", color: colors.ink, flexShrink: 1 },
+  action: { minHeight: 44, minWidth: 44, flexShrink: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 3 },
+  actionText: { color: colors.ink, fontSize: 15, fontWeight: "600", flexShrink: 1 },
   section: { gap: 9 },
   sectionHeader: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", justifyContent: "space-between", gap: 6 },
   sectionTitle: { color: colors.ink, fontSize: 18, fontWeight: "700" },

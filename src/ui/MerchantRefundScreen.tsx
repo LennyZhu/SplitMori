@@ -1,5 +1,7 @@
+import { formatUiCount, formatUiDate, type Copy } from "../services/localizedCopy.ts";
+import { useCopy } from "./useCopy.ts";
 import { uuid } from "expo";
-import { useCallback, useContext, useEffect, useRef, useState, type ComponentRef } from "react";
+import { useCallback, useEffect, useRef, useState, type ComponentRef } from "react";
 import { ActivityIndicator, Keyboard, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import type { DomainErrorCode } from "../domain/result.ts";
 import { merchantPaymentsOf } from "../domain/balance.ts";
@@ -14,70 +16,68 @@ import { formatResultMoney } from "../services/quickSplitResult.ts";
 import { ButtonPair, Card, Compare, Heading, Notice, Row, financeReviewStyles as reviewStyles } from "./FinanceReviewUi.tsx";
 import { ConversionButton, ConversionPage, ConversionReadError, memberLabels, MemberPicker } from "./QuickSplitConversionScreen.tsx";
 import { colors, Icon } from "./visuals.tsx";
-import { AppLanguageContext } from "./AppLanguageContext.ts";
 import { merchantPaymentCopy } from "./merchantPaymentCopy.ts";
 
-export const merchantRefundCopy = {
-  title: "商家退款", register: "登記商家退款", registerAnother: "登記另一筆退款", history: "商家退款記錄",
-  historyHeading: "退款歷史", detail: "退款詳情", viewDetail: "查看退款詳情", viewHistory: "查看退款記錄",
-  noRecords: "尚未有商家退款記錄。", missing: "找不到這筆活動費用。", missingRefund: "找不到這筆退款記錄。",
-  activeOnly: "活動已完成。重新開啟活動後才可登記或作廢商家退款。", fullyRefunded: "這筆費用已全額退款。",
-  formHelp: "記錄商家實際退回的金額、收到退款的人，以及各成員應承擔費用的減免。",
-  amount: "實際退款金額", recipient: "實際退款接收人", selectRecipient: "選擇退款接收人",
-  date: "退款日期", dateHint: "格式為 YYYY-MM-DD。", note: "備註（選填）", notePlaceholder: "例如餐廳退回部分費用",
-  allocation: "成員減免分配", proportional: "按目前分攤比例", recordedAllocation: "已保存的減免分配",
-  default: "預設", allocationHelp: "按這筆費用各成員尚未退回的承擔額分配，尾差依費用分攤順序處理。",
-  reductionTotal: "減免合計", allocationPlaceholder: "輸入有效退款金額後即可查看減免。",
-  preview: "退款影響預覽", openPreview: "預覽退款影響", previewHelp: "請核對本筆退款及整個活動的結算變化，確認後才會寫入帳本。",
-  confirm: "確認登記退款", backToEdit: "返回修改", calculating: "正在計算…",
-  voidAction: "作廢此退款", voidTitle: "作廢退款確認", voidConfirm: "確認作廢退款", cancel: "取消",
-  voidHelp: "作廢會保留退款歷史並重新計算活動結算。此操作只會更正帳本。",
-  voidSubject: "即將作廢的真實商家退款", voidImpact: "作廢後的帳務影響", voidedAt: "作廢時間",
-  saved: "商家退款已登記，活動結算已更新。", voided: "退款已作廢，原記錄仍可查閱。",
-  saving: "正在儲存…", checking: "正在查詢…", verify: "查詢儲存結果", retry: "重試儲存",
-  unknown: "暫時無法確認儲存結果。請先查詢這次記錄。", notSaved: "已確認這次操作未入帳。可以重試儲存。",
-  backToExpense: "返回費用詳情", refresh: "重新讀取", loading: "正在讀取退款資料",
-  effectiveRefund: "有效商家退款", effectiveExpense: "有效費用", remaining: "目前可登記退款上限",
-  merchantPaid: "原始商家付款", merchantPayer: "實際商家付款人", validCount: "有效記錄", recordDate: "退款日期",
-  recordedAt: "登記時間", version: "退款發生時的費用版本",
-  active: "有效", voidedStatus: "已作廢", historyNote: "備註", unknownMember: "未知成員", unnamedExpense: "未命名費用",
-  beforeRefund: "退款前有效費用", afterRefund: "退款後有效費用",
-  activity: "整個活動", activityExpense: "活動有效費用", outstanding: "尚待結算", effectiveRepayment: "有效成員還款",
-  netBalances: "成員最新淨額", receive: "應收", pay: "應付", sharesBeforeAfter: "成員減免及承擔額",
-  transferSuggestions: "轉帳建議", before: "更改前", after: "更改後", noTransfers: "目前無需轉帳",
-  suggestionNote: "轉帳建議供核對。已登記的實際還款會保留。",
-  missingDate: "日期未能讀取", reduction: "減免", restored: "恢復承擔", amountSuffix: "筆",
-} as const;
-const copy = merchantRefundCopy;
-const dateFormat = new Intl.DateTimeFormat("zh-HK", { year: "numeric", month: "long", day: "numeric" });
-const dateTimeFormat = new Intl.DateTimeFormat("zh-HK", { dateStyle: "medium", timeStyle: "short" });
-const dateText = (timestamp: number, withTime = false) => Number.isFinite(new Date(timestamp).getTime())
-  ? (withTime ? dateTimeFormat : dateFormat).format(timestamp) : copy.missingDate;
-const expenseLabel = (data: ExpenseDetailData) => data.expense.name ?? copy.unnamedExpense;
+export const merchantRefundCopy = (t: Copy) => ({
+  title: t("商家退款"), register: t("登記商家退款"), registerAnother: t("登記另一筆退款"), history: t("商家退款記錄"),
+  historyHeading: t("退款歷史"), detail: t("退款詳情"), viewDetail: t("查看退款詳情"), viewHistory: t("查看退款記錄"),
+  noRecords: t("尚未有商家退款記錄。"), missing: t("找不到這筆活動費用。"), missingRefund: t("找不到這筆退款記錄。"),
+  activeOnly: t("活動已完成。重新開啟活動後才可登記或作廢商家退款。"), fullyRefunded: t("這筆費用已全額退款。"),
+  formHelp: t("記錄商家實際退回的金額、收到退款的人，以及各成員應承擔費用的減免。"),
+  amount: t("實際退款金額"), recipient: t("實際退款接收人"), selectRecipient: t("選擇退款接收人"),
+  date: t("退款日期"), dateHint: t("格式為 YYYY-MM-DD。"), note: t("備註（選填）"), notePlaceholder: t("例如餐廳退回部分費用"),
+  allocation: t("成員減免分配"), proportional: t("按目前分攤比例"), recordedAllocation: t("已保存的減免分配"),
+  default: t("預設"), allocationHelp: t("按這筆費用各成員尚未退回的承擔額分配，尾差依費用分攤順序處理。"),
+  reductionTotal: t("減免合計"), allocationPlaceholder: t("輸入有效退款金額後即可查看減免。"),
+  preview: t("退款影響預覽"), openPreview: t("預覽退款影響"), previewHelp: t("請核對本筆退款及整個活動的結算變化，確認後才會寫入帳本。"),
+  confirm: t("確認登記退款"), backToEdit: t("返回修改"), calculating: t("正在計算…"),
+  voidAction: t("作廢此退款"), voidTitle: t("作廢退款確認"), voidConfirm: t("確認作廢退款"), cancel: t("取消"),
+  voidHelp: t("作廢會保留退款歷史並重新計算活動結算。此操作只會更正帳本。"),
+  voidSubject: t("即將作廢的真實商家退款"), voidImpact: t("作廢後的帳務影響"), voidedAt: t("作廢時間"),
+  saved: t("商家退款已登記，活動結算已更新。"), voided: t("退款已作廢，原記錄仍可查閱。"),
+  saving: t("正在儲存…"), checking: t("正在查詢…"), verify: t("查詢儲存結果"), retry: t("重試儲存"),
+  unknown: t("暫時無法確認儲存結果。請先查詢這次記錄。"), notSaved: t("已確認這次操作未入帳。可以重試儲存。"),
+  backToExpense: t("返回費用詳情"), refresh: t("重新讀取"), loading: t("正在讀取退款資料"),
+  effectiveRefund: t("有效商家退款"), effectiveExpense: t("有效費用"), remaining: t("目前可登記退款上限"),
+  merchantPaid: t("原始商家付款"), merchantPayer: t("實際商家付款人"), validCount: t("有效記錄"), recordDate: t("退款日期"),
+  recordedAt: t("登記時間"), version: t("退款發生時的費用版本"),
+  active: t("有效"), voidedStatus: t("已作廢"), historyNote: t("備註"), unknownMember: t("未知成員"), unnamedExpense: t("未命名費用"),
+  beforeRefund: t("退款前有效費用"), afterRefund: t("退款後有效費用"),
+  activity: t("整個活動"), activityExpense: t("活動有效費用"), outstanding: t("尚待結算"), effectiveRepayment: t("有效成員還款"),
+  netBalances: t("成員最新淨額"), receive: t("應收"), pay: t("應付"), sharesBeforeAfter: t("成員減免及承擔額"),
+  transferSuggestions: t("轉帳建議"), before: t("更改前"), after: t("更改後"), noTransfers: t("目前無需轉帳"),
+  suggestionNote: t("轉帳建議供核對。已登記的實際還款會保留。"),
+  reduction: t("減免"), restored: t("恢復承擔"),
+} as const);
+const dateText = (t: Copy, timestamp: number, withTime = false) => formatUiDate(t, timestamp, withTime ? "dateTime" : "long");
+const expenseLabel = (t: Copy, data: ExpenseDetailData) => data.expense.name ?? t("未命名費用");
 
-const messages: Partial<Record<DomainErrorCode, string>> = {
-  ACTIVITY_COMPLETED: copy.activeOnly,
-  ACTIVITY_NOT_FOUND: copy.missing,
-  EXPENSE_NOT_FOUND: copy.missing,
-  INVALID_AMOUNT: "請輸入有效的退款金額。",
-  INVALID_AMOUNT_PRECISION: "小數位超出此幣種的上限。",
-  NEGATIVE_AMOUNT: "退款金額必須大於零。",
-  NON_POSITIVE_AMOUNT: "退款金額必須大於零。",
-  REFUND_EXCEEDS_EXPENSE: "退款金額超出這筆費用尚可退回的金額。",
-  REFUND_REDUCTION_EXCEEDS_ALLOCATION: "減免金額超出成員可減免的承擔額。",
-  INVALID_EVENT_TIME: "請輸入有效的退款日期，日期須為今天或更早。",
-  REFUND_DATE_CONFLICT: "這個退款日期與當時的費用版本或已登記帳務有衝突，請核對實際退款日期與記錄。",
-  MEMBER_NOT_PARTICIPATING: "請選擇實際收到商家退款的活動成員。",
-  REFUND_LEDGER_CHANGED: "帳本在預覽後已更新。請重新讀取並預覽。",
-  EVENT_ALREADY_VOIDED: "這筆退款已作廢。",
-  INVALID_VOID_TARGET: copy.missingRefund,
-  VOID_OUT_OF_ORDER: "帳本含日期較晚的事件，請先核對事件日期。",
-  VOID_LEDGER_CONFLICT: "作廢這筆退款會與既有帳務衝突，請先核對記錄。",
-  EVENT_ID_CONFLICT: "此請求與已保存的事件不符，請重新讀取記錄。",
-  AMOUNT_OVERFLOW: "金額超出帳本可處理的上限。",
-  CURRENCY_MISMATCH: "退款幣種須與活動一致。",
-};
-const message = (code: DomainErrorCode) => messages[code] ?? "暫時無法處理商家退款，請核對記錄後再試。";
+function message(t: Copy, code: DomainErrorCode) {
+  const copy = merchantRefundCopy(t);
+  const messages: Partial<Record<DomainErrorCode, string>> = {
+    ACTIVITY_COMPLETED: copy.activeOnly,
+    ACTIVITY_NOT_FOUND: copy.missing,
+    EXPENSE_NOT_FOUND: copy.missing,
+    INVALID_AMOUNT: t("請輸入有效的退款金額。"),
+    INVALID_AMOUNT_PRECISION: t("小數位超出此幣種的上限。"),
+    NEGATIVE_AMOUNT: t("退款金額必須大於零。"),
+    NON_POSITIVE_AMOUNT: t("退款金額必須大於零。"),
+    REFUND_EXCEEDS_EXPENSE: t("退款金額超出這筆費用尚可退回的金額。"),
+    REFUND_REDUCTION_EXCEEDS_ALLOCATION: t("減免金額超出成員可減免的承擔額。"),
+    INVALID_EVENT_TIME: t("請輸入有效的退款日期，日期須為今天或更早。"),
+    REFUND_DATE_CONFLICT: t("這個退款日期與當時的費用版本或已登記帳務有衝突，請核對實際退款日期與記錄。"),
+    MEMBER_NOT_PARTICIPATING: t("請選擇實際收到商家退款的活動成員。"),
+    REFUND_LEDGER_CHANGED: t("帳本在預覽後已更新。請重新讀取並預覽。"),
+    EVENT_ALREADY_VOIDED: t("這筆退款已作廢。"),
+    INVALID_VOID_TARGET: copy.missingRefund,
+    VOID_OUT_OF_ORDER: t("帳本含日期較晚的事件，請先核對事件日期。"),
+    VOID_LEDGER_CONFLICT: t("作廢這筆退款會與既有帳務衝突，請先核對記錄。"),
+    EVENT_ID_CONFLICT: t("此請求與已保存的事件不符，請重新讀取記錄。"),
+    AMOUNT_OVERFLOW: t("金額超出帳本可處理的上限。"),
+    CURRENCY_MISMATCH: t("退款幣種須與活動一致。"),
+  };
+  return messages[code] ?? t("暫時無法處理商家退款，請核對記錄後再試。");
+}
 
 type Entry = ExpenseDetailData["refundHistory"][number];
 type Preview = ReviewedRefund & { activity: ExpenseDetailData["activity"] };
@@ -85,19 +85,23 @@ type Money = (minor: number | bigint) => string;
 type NameFor = (id: string) => string;
 
 function Status({ voided }: { voided: boolean }) {
+  const t = useCopy();
+  const copy = merchantRefundCopy(t);
   return <Text style={[reviewStyles.badge, voided && styles.voided]}>{voided ? copy.voidedStatus : copy.active}</Text>;
 }
 
 function RefundHistoryCard({ entry, money, nameFor, onOpen }: {
   entry: Entry; money: Money; nameFor: NameFor; onOpen?: () => void;
 }) {
+  const t = useCopy();
+  const copy = merchantRefundCopy(t);
   const { refund, version, voidEvent } = entry;
   return <Card>
     <View style={reviewStyles.row}>
       <Text style={reviewStyles.compareLabel}>{copy.title} · {money(refund.amountMinor)}</Text>
       <Status voided={!!voidEvent} />
     </View>
-    <Text style={reviewStyles.caption}>{dateText(refund.occurredAt)}</Text>
+    <Text style={reviewStyles.caption}>{dateText(t, refund.occurredAt)}</Text>
     <Row title={copy.recipient} value={nameFor(refund.recipientId)} />
     <Row title={copy.allocation} value={refund.distribution === "proportional" ? copy.proportional : copy.recordedAllocation} />
     {version && <>
@@ -109,25 +113,29 @@ function RefundHistoryCard({ entry, money, nameFor, onOpen }: {
     </Pressable> : <>
       {refund.reductions.map(({ memberId, amountMinor }) => <Row key={memberId} title={nameFor(memberId)} value={money(amountMinor)} />)}
       {refund.note && <Row title={copy.historyNote} value={refund.note} />}
-      {refund.recordedAt !== undefined && <Row title={copy.recordedAt} value={dateText(refund.recordedAt, true)} />}
-      {voidEvent && <Row title={copy.voidedAt} value={dateText(voidEvent.occurredAt, true)} />}
+      {refund.recordedAt !== undefined && <Row title={copy.recordedAt} value={dateText(t, refund.recordedAt, true)} />}
+      {voidEvent && <Row title={copy.voidedAt} value={dateText(t, voidEvent.occurredAt, true)} />}
     </>}
   </Card>;
 }
 
 function Suggestions({ items, money, nameFor }: { items: readonly TransferSuggestion[]; money: Money; nameFor: NameFor }) {
+  const t = useCopy();
+  const copy = merchantRefundCopy(t);
   return items.length ? items.map(({ fromMemberId, toMemberId, amountMinor }) =>
     <Row key={JSON.stringify([fromMemberId, toMemberId])} title={`${nameFor(fromMemberId)} → ${nameFor(toMemberId)}`}
       value={money(amountMinor)} />) : <Text style={reviewStyles.caption}>{copy.noTransfers}</Text>;
 }
 
 function RefundImpact({ review }: { review: Preview }) {
+  const t = useCopy();
+  const copy = merchantRefundCopy(t);
   const { activity, preview } = review;
   const { expense, refund, before, after } = preview;
   const isVoid = review.kind === "void";
   const occurredAt = review.kind === "void" ? review.preview.refund.occurredAt : review.preview.occurredAt;
   const money: Money = (minor) => formatResultMoney(activity.currency, minor);
-  const names = memberLabels(activity.members);
+  const names = memberLabels(t, activity.members);
   const nameFor = (id: string) => names.get(id) ?? copy.unknownMember;
   const net = (minor: number) => minor === 0 ? money(0) : `${minor > 0 ? copy.receive : copy.pay} ${money(Math.abs(minor))}`;
   const old = summarizeCorrectionBalances(before);
@@ -160,7 +168,7 @@ function RefundImpact({ review }: { review: Preview }) {
         <Row title={copy.amount} value={money(refund.amountMinor)} />
       </>}
       <Row title={copy.recipient} value={nameFor(refund.recipientId)} />
-      <Row title={copy.recordDate} value={dateText(occurredAt)} />
+      <Row title={copy.recordDate} value={dateText(t, occurredAt)} />
     </Card>
     <Heading>{isVoid ? copy.voidImpact : copy.activity}</Heading>
     <Card>
@@ -181,7 +189,7 @@ function RefundImpact({ review }: { review: Preview }) {
         <Text style={reviewStyles.caption}>{isVoid ? copy.restored : copy.reduction} {money(reductions.get(memberId) ?? 0)}</Text>
       </View>)}
     </Card>
-    <Heading>{copy.transferSuggestions} · {preview.afterSuggestions.length} {copy.amountSuffix}</Heading>
+    <Heading>{copy.transferSuggestions} · {formatUiCount(t, preview.afterSuggestions.length, "transfers")}</Heading>
     <Card>
       <Text style={reviewStyles.compareLabel}>{copy.before}</Text>
       <Suggestions items={preview.beforeSuggestions} nameFor={nameFor} money={money} />
@@ -195,7 +203,9 @@ function RefundImpact({ review }: { review: Preview }) {
 export function MerchantRefundScreen({ activityId, expenseId, entryPoint, onBack }: {
   activityId: string; expenseId: string; entryPoint: "register" | "history"; onBack: () => void;
 }) {
-  const paymentCopy = merchantPaymentCopy(useContext(AppLanguageContext));
+  const t = useCopy();
+  const copy = merchantRefundCopy(t);
+  const paymentCopy = merchantPaymentCopy(t.language);
   const [page, setPage] = useState<"register" | "history" | "detail">(entryPoint);
   const [data, setData] = useState<ExpenseDetailData | null>();
   const [draft, setDraft] = useState<MerchantRefundDraft>(() => ({
@@ -252,7 +262,7 @@ export function MerchantRefundScreen({ activityId, expenseId, entryPoint, onBack
   const amounts = data && summarizeExpenseRefunds(data.refunds);
   const available = data && amounts ? data.expense.split.total.amountMinor - amounts.amountMinor : 0;
   const active = data?.activity.status === "active";
-  const names = memberLabels(data?.activity.members ?? []);
+  const names = memberLabels(t, data?.activity.members ?? []);
   const nameFor = (id: string) => names.get(id) ?? copy.unknownMember;
   const money: Money = (minor) => data ? formatResultMoney(data.activity.currency, minor) : "";
   const inspection = data && page === "register" ? inspectMerchantRefundDraft(draft, data, new Date()) : undefined;
@@ -294,16 +304,16 @@ export function MerchantRefundScreen({ activityId, expenseId, entryPoint, onBack
         const { occurredAt, refund } = prepared;
         const result = await loadMerchantRefundPreview(activityId, occurredAt, { ...refund, id: uuid.v4() });
         if (result.ok) setReview({ kind, preview: result.value, activity: result.value.activity });
-        else setError(message(result.error.code));
+        else setError(message(t, result.error.code));
       } else if (entry) {
         const result = await loadMerchantRefundVoidPreview(activityId, expenseId, {
           id: uuid.v4(), occurredAt: Date.now(), targetEventId: entry.refund.id,
         });
         if (result.ok) setReview({ kind: "void", preview: result.value, activity: result.value.activity });
-        else setError(message(result.error.code));
+        else setError(message(t, result.error.code));
       }
     } catch {
-      setError(message("FINANCE_STORAGE_ERROR"));
+      setError(message(t, "FINANCE_STORAGE_ERROR"));
     } finally {
       pending.current = false;
       setBusy(false);
@@ -328,7 +338,7 @@ export function MerchantRefundScreen({ activityId, expenseId, entryPoint, onBack
         void reload();
       } else if (result.status === "rejected") {
         setRetry("blocked");
-        setError(message(result.error.code));
+        setError(message(t, result.error.code));
       } else {
         setRetry(result.status === "unknown" ? "verify" : "write");
         setError(result.status === "unknown" ? copy.unknown : copy.notSaved);
@@ -369,7 +379,7 @@ export function MerchantRefundScreen({ activityId, expenseId, entryPoint, onBack
 
   const fieldError = (field: keyof MerchantRefundDraft) => {
     const code = attempted ? inspection?.errors[field] : undefined;
-    return code && <Text accessibilityRole="alert" style={styles.fieldError}>{message(code)}</Text>;
+    return code && <Text accessibilityRole="alert" style={styles.fieldError}>{message(t, code)}</Text>;
   };
   const onFocus = () => { if (Keyboard.isVisible()) requestAnimationFrame(revealInput); };
 
@@ -386,7 +396,7 @@ export function MerchantRefundScreen({ activityId, expenseId, entryPoint, onBack
           {page === "register" && <>
             <Notice>{copy.formHelp}</Notice>
             <Card>
-              <Text style={reviewStyles.caption}>{expenseLabel(data)} · v{data.currentVersion} · {data.activity.currency}</Text>
+              <Text style={reviewStyles.caption}>{expenseLabel(t, data)} · v{data.currentVersion} · {data.activity.currency}</Text>
               {data.expense.merchantPayment
                 ? <Row title={copy.merchantPayer} value={nameFor(data.expense.merchantPayment.memberId)} divider={false} />
                 : merchantPaymentsOf(data.expense).map(({ memberId, amountMinor }, index) =>
@@ -448,13 +458,13 @@ export function MerchantRefundScreen({ activityId, expenseId, entryPoint, onBack
           </>}
           {page === "history" && <>
             <View style={reviewStyles.row}>
-              <Text style={reviewStyles.caption}>{expenseLabel(data)} · {data.activity.currency}</Text>
+              <Text style={reviewStyles.caption}>{expenseLabel(t, data)} · {data.activity.currency}</Text>
               <Text style={reviewStyles.badge}>v{data.currentVersion}</Text>
             </View>
             <Card>
               <Text style={reviewStyles.caption}>{copy.effectiveRefund}</Text>
               <Text style={reviewStyles.total}>{money(amounts?.amountMinor ?? 0)}</Text>
-              <Row title={copy.validCount} value={`${data.refunds.length} / ${data.refundHistory.length} ${copy.amountSuffix}`} divider={false} />
+              <Row title={copy.validCount} value={`${data.refunds.length} / ${formatUiCount(t, data.refundHistory.length, "records")}`} divider={false} />
               <Row title={copy.effectiveExpense} value={money(available)} />
             </Card>
             <Heading>{copy.historyHeading}</Heading>
@@ -463,7 +473,7 @@ export function MerchantRefundScreen({ activityId, expenseId, entryPoint, onBack
               onOpen={() => { setSelected(record.refund.id); setSaved(undefined); setPage("detail"); }} />)}
           </>}
           {page === "detail" && (entry ? <>
-            <Text style={reviewStyles.caption}>{data.activity.name} · {expenseLabel(data)} · {data.activity.currency}</Text>
+            <Text style={reviewStyles.caption}>{data.activity.name} · {expenseLabel(t, data)} · {data.activity.currency}</Text>
             <RefundHistoryCard entry={entry} money={money} nameFor={nameFor} />
           </> : <Notice>{copy.missingRefund}</Notice>)}
         </>}

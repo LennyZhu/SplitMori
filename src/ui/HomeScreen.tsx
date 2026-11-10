@@ -1,3 +1,6 @@
+import { formatUiCount } from "../services/localizedCopy.ts";
+import type { Copy } from "../services/localizedCopy.ts";
+import { useCopy } from "./useCopy.ts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, AppState, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { formatAmount, type Currency, type Money } from "../domain/money.ts";
@@ -26,31 +29,32 @@ function displayAmount(money: Money) {
   return fraction === undefined ? grouped : `${grouped}.${fraction}`;
 }
 
-function displayDate(timestamp: number) {
+function displayDate(t: Copy, timestamp: number) {
   const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) return undefined;
   const today = new Date();
-  if (date.toDateString() === today.toDateString()) return "今日";
+  if (date.toDateString() === today.toDateString()) return t("今日");
   const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
-  if (date.toDateString() === yesterday.toDateString()) return "昨日";
-  return new Intl.DateTimeFormat("zh-HK", {
+  if (date.toDateString() === yesterday.toDateString()) return t("昨日");
+  return new Intl.DateTimeFormat(t.language === "en" ? "en-HK" : t.language, {
     year: date.getFullYear() === today.getFullYear() ? undefined : "numeric",
     month: "numeric", day: "numeric",
   }).format(date);
 }
 
 function SectionHeader({ title, onAll }: { title: string; onAll?: () => void }) {
+  const t = useCopy();
   return (
     <View style={styles.sectionHeader}>
       <Text accessibilityRole="header" style={styles.heading}>{title}</Text>
       {onAll && (
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={`查看全部${title}`}
+          accessibilityLabel={t("查看全部{0}", title)}
           onPress={onAll}
           style={({ pressed }) => [styles.sectionLink, pressed && styles.pressed]}
         >
-          <Text style={styles.linkText}>查看全部</Text>
+          <Text style={styles.linkText}>{t("查看全部")}</Text>
           <Icon name="next" color={colors.accentText} size={15} />
         </Pressable>
       )}
@@ -80,9 +84,10 @@ function IconTile({ name }: { name: IconName }) {
 }
 
 function ActivityCard({ activity, onPress }: { activity: HomeActivity; onPress: () => void }) {
+  const t = useCopy();
   const { name, total, memberCount, expenseCount, hasOutstanding } = activity;
   const amount = displayAmount(total);
-  const settlement = hasOutstanding ? "未結清" : expenseCount > 0 ? "已結清" : "尚無費用";
+  const settlement = hasOutstanding ? t("未結清") : expenseCount > 0 ? t("已結清") : t("尚無費用");
   return (
     <Pressable accessibilityRole="button" onPress={onPress} style={({ pressed }) => [styles.activityCard, pressed && styles.pressed]}>
       <View style={styles.activityMain}>
@@ -90,7 +95,7 @@ function ActivityCard({ activity, onPress }: { activity: HomeActivity; onPress: 
         <View style={styles.activityDetails}>
           <View style={styles.activityTitle}>
             <Text style={styles.activityName}>{name}</Text>
-            <View style={styles.badge}><Text style={styles.badgeText}>進行中</Text></View>
+            <View style={styles.badge}><Text style={styles.badgeText}>{t("進行中")}</Text></View>
           </View>
           <Text style={styles.activityAmount} accessibilityLabel={`${total.currency} ${amount}`}>
             <Text style={styles.activityCurrency}>{currencySymbols[total.currency]} </Text>
@@ -99,7 +104,7 @@ function ActivityCard({ activity, onPress }: { activity: HomeActivity; onPress: 
         </View>
       </View>
       <View style={styles.activityFooter}>
-        <Text style={styles.meta}>{memberCount} 位成員 · {expenseCount} 筆費用</Text>
+        <Text style={styles.meta}>{formatUiCount(t, memberCount, "members")} · {formatUiCount(t, expenseCount, "expenses")}</Text>
         <View style={styles.settlement}>
           {hasOutstanding && <View style={styles.dot} />}
           <Text style={hasOutstanding ? styles.outstanding : styles.meta}>{settlement}</Text>
@@ -110,18 +115,19 @@ function ActivityCard({ activity, onPress }: { activity: HomeActivity; onPress: 
 }
 
 function RecentRow({ record, onPress }: { record: HomeRecentRecord; onPress: () => void }) {
+  const t = useCopy();
   const quick = record.kind === "quick";
   const { total } = record;
   const amount = displayAmount(total);
-  const date = displayDate(record.timestamp);
-  const activityStatus = !quick && record.hasOutstanding ? "已完成活動 · 未結清" : "已完成活動";
+  const date = displayDate(t, record.timestamp);
+  const activityStatus = !quick && record.hasOutstanding ? t("已完成活動 · 未結清") : t("已完成活動");
   return (
     <Pressable accessibilityRole="button" onPress={onPress} style={({ pressed }) => [styles.recordRow, pressed && styles.pressed]}>
       <IconTile name={quick ? "receipt" : "activity"} />
       <View style={styles.recordBody}>
         <View style={styles.recordDetails}>
-          <Text style={styles.recordTitle}>{quick ? "快速分帳" : record.name}</Text>
-          <Text style={styles.meta}>{quick ? "快速計算" : activityStatus}{date ? ` · ${date}` : ""}</Text>
+          <Text style={styles.recordTitle}>{quick ? t("快速分帳") : record.name}</Text>
+          <Text style={styles.meta}>{quick ? t("快速計算") : activityStatus}{date ? ` · ${date}` : ""}</Text>
         </View>
         <Text style={styles.recordAmount} accessibilityLabel={`${total.currency} ${amount}`}>
           {currencySymbols[total.currency]} {amount}
@@ -133,6 +139,7 @@ function RecentRow({ record, onPress }: { record: HomeRecentRecord; onPress: () 
 }
 
 export function HomeScreen(actions: HomeActions) {
+  const t = useCopy();
   const [data, setData] = useState<HomeData>();
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
@@ -175,7 +182,7 @@ export function HomeScreen(actions: HomeActions) {
         <Text accessibilityRole="header" style={styles.wordmark}>SplitMori</Text>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="設定"
+          accessibilityLabel={t("設定")}
           onPress={actions.onSettings}
           style={({ pressed }) => [styles.settings, pressed && styles.pressed]}
         >
@@ -183,50 +190,50 @@ export function HomeScreen(actions: HomeActions) {
         </Pressable>
       </View>
       <View style={styles.actions}>
-        <ActionButton label="開始分帳" primary onPress={actions.onQuickSplit} />
-        <ActionButton label="建立活動" onPress={actions.onCreateActivity} />
+        <ActionButton label={t("開始分帳")} primary onPress={actions.onQuickSplit} />
+        <ActionButton label={t("建立活動")} onPress={actions.onCreateActivity} />
       </View>
 
       {failed && (
         <View style={styles.notice}>
           <Text accessibilityRole="alert" style={styles.noticeText}>
-            {data ? "未能更新本機資料，目前顯示上次讀取的內容。" : "未能讀取本機資料，請重試。"}
+            {data ? t("未能更新本機資料，目前顯示上次讀取的內容。") : t("未能讀取本機資料，請重試。")}
           </Text>
           <Pressable accessibilityRole="button" onPress={reload} style={({ pressed }) => [styles.sectionLink, pressed && styles.pressed]}>
-            <Text style={styles.linkText}>重試</Text>
+            <Text style={styles.linkText}>{t("重試")}</Text>
           </Pressable>
         </View>
       )}
       {!data && loading && (
         <View style={styles.notice}>
           <ActivityIndicator color={colors.accentText} />
-          <Text accessibilityLiveRegion="polite" style={styles.noticeText}>正在讀取本機資料…</Text>
+          <Text accessibilityLiveRegion="polite" style={styles.noticeText}>{t("正在讀取本機資料…")}</Text>
         </View>
       )}
       {data && (
         <>
           <View style={styles.section}>
-            <SectionHeader title="進行中活動" onAll={data.activeActivities.length ? actions.onActivities : undefined} />
+            <SectionHeader title={t("進行中活動")} onAll={data.activeActivities.length ? actions.onActivities : undefined} />
             <View style={styles.activityList}>
               {data.activeActivities.length > 0 ? data.activeActivities.map((activity) => (
                 <ActivityCard key={activity.id} activity={activity} onPress={() => actions.onActivity(activity)} />
               )) : (
                 <View style={styles.emptyActivity}>
                   <EmptyActivityMark />
-                  <Text style={styles.emptyTitle}>還沒有進行中的活動</Text>
-                  <Text style={styles.emptyCopy}>{"可以先快速分帳，\n也可以建立一個活動，\n記錄聚餐、旅行等共同費用。"}</Text>
+                  <Text style={styles.emptyTitle}>{t("還沒有進行中的活動")}</Text>
+                  <Text style={styles.emptyCopy}>{t("可以先快速分帳，\n也可以建立一個活動，\n記錄聚餐、旅行等共同費用。")}</Text>
                 </View>
               )}
             </View>
           </View>
           <View style={styles.section}>
-            <SectionHeader title="最近記錄" onAll={data.recentRecords.length ? actions.onRecords : undefined} />
+            <SectionHeader title={t("最近記錄")} onAll={data.recentRecords.length ? actions.onRecords : undefined} />
             {data.recentRecords.length > 0 ? data.recentRecords.map((record) => (
               <RecentRow key={`${record.kind}:${record.id}`} record={record} onPress={() => actions.onRecord(record)} />
             )) : (
               <View style={styles.emptyRecord}>
                 <Icon name="clock" color={colors.accentText} size={21} />
-                <Text style={[styles.meta, styles.emptyRecordText]}>還沒有分帳記錄。輸入金額，就可以開始。</Text>
+                <Text style={[styles.meta, styles.emptyRecordText]}>{t("還沒有分帳記錄。輸入金額，就可以開始。")}</Text>
               </View>
             )}
           </View>

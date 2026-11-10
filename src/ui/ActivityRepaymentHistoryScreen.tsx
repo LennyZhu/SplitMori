@@ -1,3 +1,6 @@
+import { formatUiCount, formatUiDate } from "../services/localizedCopy.ts";
+import type { Copy } from "../services/localizedCopy.ts";
+import { useCopy } from "./useCopy.ts";
 import { uuid } from "expo";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, AppState, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
@@ -11,9 +14,6 @@ import { formatResultMoney } from "../services/quickSplitResult.ts";
 import { ConversionButton, ConversionPage, ConversionReadError, memberLabels } from "./QuickSplitConversionScreen.tsx";
 import { colors, Icon } from "./visuals.tsx";
 
-const dateFormat = new Intl.DateTimeFormat("zh-HK", { year: "numeric", month: "long", day: "numeric" });
-const dateTimeFormat = new Intl.DateTimeFormat("zh-HK", { dateStyle: "medium", timeStyle: "short" });
-const voidNotice = "作廢只會更正 SplitMori 帳本，不會撤回或退回現實中的轉帳。";
 type Repayment = RepaymentHistoryEntry["transfer"];
 type Confirmation = {
   readonly request: FinancialVoidRequest;
@@ -25,27 +25,27 @@ type Confirmation = {
   readonly outstandingMinor: bigint;
 };
 
-function formatDate(timestamp: number, includeTime = false) {
-  const date = new Date(timestamp);
-  return Number.isNaN(date.getTime()) ? "日期未能讀取" : (includeTime ? dateTimeFormat : dateFormat).format(date);
+function formatDate(t: Copy, timestamp: number, includeTime = false) {
+  return formatUiDate(t, timestamp, includeTime ? "dateTime" : "long");
 }
 
-function voidError(code: DomainErrorCode) {
+function voidError(t: Copy, code: DomainErrorCode) {
   switch (code) {
-    case "EVENT_ALREADY_VOIDED": return "這筆還款已作廢。";
+    case "EVENT_ALREADY_VOIDED": return t("這筆還款已作廢。");
     case "VOID_LEDGER_CHANGED":
-    case "VOID_OUT_OF_ORDER": return "帳本已更新，請核對最新記錄後重新確認。";
-    case "INVALID_VOID_TARGET": return "找不到這個活動的原始還款記錄，請重新讀取。";
-    case "ACTIVITY_NOT_FOUND": return "找不到這個活動。";
-    case "EVENT_ID_CONFLICT": return "作廢請求與既有事件衝突，請重新確認。";
+    case "VOID_OUT_OF_ORDER": return t("帳本已更新，請核對最新記錄後重新確認。");
+    case "INVALID_VOID_TARGET": return t("找不到這個活動的原始還款記錄，請重新讀取。");
+    case "ACTIVITY_NOT_FOUND": return t("找不到這個活動。");
+    case "EVENT_ID_CONFLICT": return t("作廢請求與既有事件衝突，請重新確認。");
     case "VOID_LEDGER_CONFLICT":
-    case "AMOUNT_OVERFLOW": return "作廢會與其他帳務記錄衝突，未能更新帳本。";
-    default: return "未能作廢還款，請核對記錄後重試。";
+    case "AMOUNT_OVERFLOW": return t("作廢會與其他帳務記錄衝突，未能更新帳本。");
+    default: return t("未能作廢還款，請核對記錄後重試。");
   }
 }
 
 function StatusBadge({ voided }: { voided: boolean }) {
-  return <Text style={[styles.badge, voided && styles.voidedBadge]}>{voided ? "已作廢" : "有效"}</Text>;
+  const t = useCopy();
+  return <Text style={[styles.badge, voided && styles.voidedBadge]}>{voided ? t("已作廢") : t("有效")}</Text>;
 }
 
 function DetailRow({ label, value }: { label: string; value: string }) {
@@ -69,26 +69,27 @@ function OutlineButton({ label, onPress, disabled = false }: { label: string; on
 function HistoryList({ data, nameFor, onSelect }: {
   data: ActivitySettlementData; nameFor: (id: string) => string; onSelect: (id: string) => void;
 }) {
+  const t = useCopy();
   const { activity, repaymentHistory, repaymentMinor, repayments } = data;
   return (
     <>
       <View style={styles.activityHeading}>
         <Text accessibilityRole="header" style={styles.activityName}>{activity.name}</Text>
-        <Text style={styles.caption}>{activity.members.length} 位成員 · 活動{activity.status === "active" ? "進行中" : "已完成"}</Text>
+        <Text style={styles.caption}>{formatUiCount(t, activity.members.length, "members")} · {activity.status === "active" ? t("進行中") : t("已完成")}</Text>
       </View>
       <View style={[styles.card, styles.stack]}>
-        <Text style={styles.caption}>有效還款合計</Text>
+        <Text style={styles.caption}>{t("有效還款合計")}</Text>
         <Text style={styles.heroAmount}>{formatResultMoney(activity.currency, repaymentMinor)}</Text>
-        <Text style={styles.caption}>有效 {repayments.length} 筆 · 已作廢 {repaymentHistory.length - repayments.length} 筆</Text>
+        <Text style={styles.caption}>{t("有效：{0} · 已作廢：{1}", repayments.length, repaymentHistory.length - repayments.length)}</Text>
       </View>
       <View style={styles.stack}>
         <View style={styles.row}>
-          <Text accessibilityRole="header" style={styles.heading}>還款歷史</Text>
-          <Text style={styles.caption}>共 {repaymentHistory.length} 筆</Text>
+          <Text accessibilityRole="header" style={styles.heading}>{t("還款歷史")}</Text>
+          <Text style={styles.caption}>{t("共 {0}", formatUiCount(t, repaymentHistory.length, "records"))}</Text>
         </View>
         {repaymentHistory.length === 0 && <View style={[styles.card, styles.stack]}>
-          <Text style={styles.heading}>尚無還款記錄</Text>
-          <Text style={styles.caption}>透過「記錄還款」登記的成員轉帳會顯示在這裡。</Text>
+          <Text style={styles.heading}>{t("尚無還款記錄")}</Text>
+          <Text style={styles.caption}>{t("透過「記錄還款」登記的成員轉帳會顯示在這裡。")}</Text>
         </View>}
         {repaymentHistory.map(({ transfer, voidEvent }) => (
           <Pressable key={transfer.id} accessibilityRole="button" onPress={() => onSelect(transfer.id)}
@@ -98,14 +99,14 @@ function HistoryList({ data, nameFor, onSelect }: {
               <Text style={styles.amount}>{formatResultMoney(activity.currency, transfer.amountMinor)}</Text>
             </View>
             <View style={styles.recordMeta}>
-              <Text style={styles.caption}>{formatDate(transfer.occurredAt)}</Text>
+              <Text style={styles.caption}>{formatDate(t, transfer.occurredAt)}</Text>
               <StatusBadge voided={!!voidEvent} />
             </View>
-            {transfer.note && <Text numberOfLines={2} style={styles.caption}>備註：{transfer.note}</Text>}
+            {transfer.note && <Text numberOfLines={2} style={styles.caption}>{t("備註：{0}", transfer.note)}</Text>}
           </Pressable>
         ))}
         {repaymentHistory.length > 0 && <View style={styles.notice}>
-          <Text style={styles.caption}>點選記錄可查看詳情。作廢後原始記錄仍會保留，並標示為「已作廢」。</Text>
+          <Text style={styles.caption}>{t("點選記錄可查看詳情。作廢後原始記錄仍會保留，並標示為「已作廢」。")}</Text>
         </View>}
       </View>
     </>
@@ -115,31 +116,32 @@ function HistoryList({ data, nameFor, onSelect }: {
 function RepaymentDetail({ entry, nameFor, saved }: {
   entry: RepaymentHistoryEntry; nameFor: (id: string) => string; saved: boolean;
 }) {
+  const t = useCopy();
   const { transfer, voidEvent } = entry;
   const from = nameFor(transfer.fromMemberId);
   const to = nameFor(transfer.toMemberId);
   return (
     <>
       <View style={[styles.card, styles.stack]}>
-        <Text style={styles.caption}>成員實際還款</Text>
+        <Text style={styles.caption}>{t("成員實際還款")}</Text>
         <Text accessibilityRole="header" style={styles.heading}>{from} → {to}</Text>
         <Text style={styles.heroAmount}>{formatResultMoney(transfer.currency, transfer.amountMinor)}</Text>
       </View>
       <View style={[styles.card, styles.details]}>
-        <View style={styles.detailRow}><Text style={styles.caption}>記錄狀態</Text><StatusBadge voided={!!voidEvent} /></View>
-        <DetailRow label="付款人" value={from} />
-        <DetailRow label="收款人" value={to} />
-        <DetailRow label="轉帳日期" value={formatDate(transfer.occurredAt)} />
-        {transfer.note && <DetailRow label="原始備註" value={transfer.note} />}
-        {voidEvent && <DetailRow label="作廢時間" value={formatDate(voidEvent.occurredAt, true)} />}
-        {voidEvent?.reason && <DetailRow label="作廢原因" value={voidEvent.reason} />}
+        <View style={styles.detailRow}><Text style={styles.caption}>{t("記錄狀態")}</Text><StatusBadge voided={!!voidEvent} /></View>
+        <DetailRow label={t("付款人")} value={from} />
+        <DetailRow label={t("收款人")} value={to} />
+        <DetailRow label={t("轉帳日期")} value={formatDate(t, transfer.occurredAt)} />
+        {transfer.note && <DetailRow label={t("原始備註")} value={transfer.note} />}
+        {voidEvent && <DetailRow label={t("作廢時間")} value={formatDate(t, voidEvent.occurredAt, true)} />}
+        {voidEvent?.reason && <DetailRow label={t("作廢原因")} value={voidEvent.reason} />}
       </View>
       <View style={styles.notice}>
         <Text style={styles.heading} accessibilityLiveRegion="polite">
-          {saved ? "還款已作廢" : voidEvent ? "此筆還款已作廢" : "關於作廢"}
+          {saved ? t("還款已作廢") : voidEvent ? t("此筆還款已作廢") : t("關於作廢")}
         </Text>
-        <Text style={styles.caption}>{voidEvent ? "原始記錄仍保留，此筆還款已不計入結算。"
-          : "如有誤記，請作廢後重新登記正確的還款。原始記錄會保留。"}</Text>
+        <Text style={styles.caption}>{voidEvent ? t("原始記錄仍保留，此筆還款已不計入結算。")
+          : t("如有誤記，請作廢後重新登記正確的還款。原始記錄會保留。")}</Text>
       </View>
     </>
   );
@@ -148,6 +150,7 @@ function RepaymentDetail({ entry, nameFor, saved }: {
 function VoidConfirmation({ confirmation, busy, error, onClose, onConfirm }: {
   confirmation: Confirmation; busy: boolean; error?: string; onClose: () => void; onConfirm: () => void;
 }) {
+  const t = useCopy();
   const insets = useSafeAreaInsets();
   const { direction, transfer, repaymentMinor, outstandingMinor } = confirmation;
   const money = (minor: number | bigint) => formatResultMoney(transfer.currency, minor);
@@ -159,22 +162,22 @@ function VoidConfirmation({ confirmation, busy, error, onClose, onConfirm }: {
       }]}>
         <View accessibilityViewIsModal onAccessibilityEscape={onClose} style={[styles.card, styles.dialog]}>
           <ScrollView style={styles.dialogScroll} contentContainerStyle={styles.dialogContent}>
-            <Text accessibilityRole="header" style={styles.dialogTitle}>確認作廢還款？</Text>
-            <Text style={[styles.caption, styles.center]}>{voidNotice} 原始記錄仍會保留，此筆還款將不再計入結算。</Text>
+            <Text accessibilityRole="header" style={styles.dialogTitle}>{t("確認作廢還款？")}</Text>
+            <Text style={[styles.caption, styles.center]}>{t("作廢只會更正 SplitMori 帳本，不會撤回或退回現實中的轉帳。")}{" " + t("原始記錄仍會保留，此筆還款將不再計入結算。")}</Text>
             <View style={[styles.card, styles.details]}>
-              <DetailRow label="還款方向" value={direction} />
-              <DetailRow label="原始金額" value={money(transfer.amountMinor)} />
-              <DetailRow label="轉帳日期" value={formatDate(transfer.occurredAt)} />
-              {transfer.note && <DetailRow label="原始備註" value={transfer.note} />}
-              <DetailRow label="作廢後有效還款" value={money(repaymentMinor)} />
-              <DetailRow label="作廢後尚待結算" value={money(outstandingMinor)} />
+              <DetailRow label={t("還款方向")} value={direction} />
+              <DetailRow label={t("原始金額")} value={money(transfer.amountMinor)} />
+              <DetailRow label={t("轉帳日期")} value={formatDate(t, transfer.occurredAt)} />
+              {transfer.note && <DetailRow label={t("原始備註")} value={transfer.note} />}
+              <DetailRow label={t("作廢後有效還款")} value={money(repaymentMinor)} />
+              <DetailRow label={t("作廢後尚待結算")} value={money(outstandingMinor)} />
             </View>
             {error && <Text accessibilityRole="alert" style={styles.body}>{error}</Text>}
           </ScrollView>
           <View style={styles.actions}>
-            <View style={styles.action}><OutlineButton label="取消" disabled={busy} onPress={onClose} /></View>
+            <View style={styles.action}><OutlineButton label={t("取消")} disabled={busy} onPress={onClose} /></View>
             <View style={styles.action}>
-              <ConversionButton label={busy ? "正在作廢…" : error ? "重試作廢" : "確認作廢"} disabled={busy} onPress={onConfirm} />
+              <ConversionButton label={busy ? t("正在作廢…") : error ? t("重試作廢") : t("確認作廢")} disabled={busy} onPress={onConfirm} />
             </View>
           </View>
         </View>
@@ -186,6 +189,7 @@ function VoidConfirmation({ confirmation, busy, error, onClose, onConfirm }: {
 export function ActivityRepaymentHistoryScreen({ activityId, onBack, onReturnToSettlement }: {
   activityId: string; onBack: () => void; onReturnToSettlement: () => void;
 }) {
+  const t = useCopy();
   const [data, setData] = useState<ActivitySettlementData | null>();
   const [selectedId, setSelectedId] = useState<string>();
   const [loading, setLoading] = useState(true);
@@ -225,8 +229,8 @@ export function ActivityRepaymentHistoryScreen({ activityId, onBack, onReturnToS
   const entry = data?.repaymentHistory.find(({ transfer }) => transfer.id === selectedId);
   const saved = savedVoid !== undefined && savedVoid.targetEventId === selectedId;
   const detail = entry && saved ? { ...entry, voidEvent: savedVoid } : entry;
-  const names = memberLabels(data?.activity.members ?? []);
-  const nameFor = (id: string) => names.get(id) ?? "未知成員";
+  const names = memberLabels(t, data?.activity.members ?? []);
+  const nameFor = (id: string) => names.get(id) ?? t("未知成員");
 
   function back() {
     if (busy.current) return;
@@ -249,7 +253,7 @@ export function ActivityRepaymentHistoryScreen({ activityId, onBack, onReturnToS
       const repository = createFinanceRepository(await getLocalDatabase());
       const result = await repository.previewMemberTransferVoid(activityId, request);
       if (!result.ok) {
-        setActionError(voidError(result.error.code));
+        setActionError(voidError(t, result.error.code));
         void reload();
         return;
       }
@@ -262,7 +266,7 @@ export function ActivityRepaymentHistoryScreen({ activityId, onBack, onReturnToS
       }
       setConfirmation({ request, expectedSequence, transfer, direction, repaymentMinor, outstandingMinor });
     } catch {
-      setActionError("未能讀取作廢預覽，請重試。");
+      setActionError(t("未能讀取作廢預覽，請重試。"));
     } finally {
       busy.current = false;
       setOperation(undefined);
@@ -287,16 +291,16 @@ export function ActivityRepaymentHistoryScreen({ activityId, onBack, onReturnToS
       const request = { ...confirmation.request, occurredAt: submittedAt };
       const result = await repository.voidMemberTransfer(activityId, request, confirmation.expectedSequence);
       if (!result.ok && result.error.code === "FINANCE_STORAGE_ERROR") {
-        setSheetError("未能寫入作廢記錄，請重試。");
+        setSheetError(t("未能寫入作廢記錄，請重試。"));
         void reload();
         return;
       }
       setConfirmation(undefined);
       if (result.ok) setSavedVoid(result.value);
-      else setActionError(voidError(result.error.code));
+      else setActionError(voidError(t, result.error.code));
       void reload();
     } catch {
-      setSheetError("未能確認作廢結果，請重試。");
+      setSheetError(t("未能確認作廢結果，請重試。"));
       void reload();
     } finally {
       busy.current = false;
@@ -307,19 +311,19 @@ export function ActivityRepaymentHistoryScreen({ activityId, onBack, onReturnToS
   const canShowList = !selectedId && data && !readError && (!savedVoid || !loading);
   return (
     <>
-      <ConversionPage key={selectedId ? "detail" : "history"} title={selectedId ? "還款詳情" : "還款記錄"}
+      <ConversionPage key={selectedId ? "detail" : "history"} title={selectedId ? t("還款詳情") : t("還款記錄")}
         onBack={back} busy={operation !== undefined}
         footer={detail && (saved
-          ? <ConversionButton label="返回活動結算" onPress={onReturnToSettlement} />
-          : !detail.voidEvent && <OutlineButton label={operation === "preview" ? "正在讀取預覽…" : "作廢此筆還款"}
+          ? <ConversionButton label={t("返回活動結算")} onPress={onReturnToSettlement} />
+          : !detail.voidEvent && <OutlineButton label={operation === "preview" ? t("正在讀取預覽…") : t("作廢此筆還款")}
             disabled={loading || readError || operation !== undefined} onPress={() => { void previewVoid(); }} />)}>
-        {loading && (!data || (!selectedId && !canShowList)) && <ActivityIndicator accessibilityLabel="正在讀取還款記錄" color={colors.ink} />}
+        {loading && (!data || (!selectedId && !canShowList)) && <ActivityIndicator accessibilityLabel={t("正在讀取還款記錄")} color={colors.ink} />}
         {readError && <ConversionReadError retry={() => { void reload(); }} />}
         {actionError && <Text accessibilityRole="alert" style={styles.body}>{actionError}</Text>}
         {canShowList && <HistoryList data={data} nameFor={nameFor} onSelect={setSelectedId} />}
         {detail && <RepaymentDetail entry={detail} nameFor={nameFor} saved={saved} />}
-        {!loading && data === null && <Text style={styles.caption}>找不到這個活動。</Text>}
-        {!loading && !readError && selectedId && data && !detail && <Text style={styles.caption}>找不到這筆還款記錄。</Text>}
+        {!loading && data === null && <Text style={styles.caption}>{t("找不到這個活動。")}</Text>}
+        {!loading && !readError && selectedId && data && !detail && <Text style={styles.caption}>{t("找不到這筆還款記錄。")}</Text>}
       </ConversionPage>
       {confirmation && <VoidConfirmation confirmation={confirmation} busy={operation === "saving"} error={sheetError}
         onClose={cancelVoid} onConfirm={() => { void confirmVoid(); }} />}

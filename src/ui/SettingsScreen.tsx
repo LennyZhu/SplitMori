@@ -85,7 +85,7 @@ export function SettingsScreen({ preferences, systemLanguage, saving, preference
         <SettingsGroup title={copy.displayLanguage}>
           {languageOptions.map((option, index) => <SettingsRow key={option} title={languageLabel(option)}
             detail={option === "system" ? `${copy.systemLanguage} · ${languageNames[systemLanguage]}`
-              : option === "zh-HK" ? "Traditional Chinese" : "英文"} divider={index > 0} selected={preferences.language === option}
+              : undefined} divider={index > 0} selected={preferences.language === option}
             disabled={saving} onPress={() => { if (option !== preferences.language) void onSave({ ...preferences, language: option }); }} />)}
         </SettingsGroup>
         <SettingsNote>{copy.languageNote}</SettingsNote>

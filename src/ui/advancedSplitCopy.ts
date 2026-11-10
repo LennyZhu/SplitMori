@@ -4,7 +4,7 @@ import type { EditorError } from "../services/quickSplitEditor.ts";
 const messages = {
   "zh-HK": {
     custom: "自訂分攤", fixed: "固定金額", percentage: "百分比（%）", shares: "份數",
-    member: (index: number) => `成員 ${index + 1}`, addHost: "新增請客者", host: "請客者",
+    addHost: "新增請客者", host: "請客者",
     remainder: "亦參與餘額分攤", remove: "移除", oneHost: "改用單人請客",
     itemize: "按項目分帳", byPerson: "改用各人消費總額", addItem: "新增項目", item: "項目",
     itemName: "項目名稱", quantity: "數量", itemTotal: "項目總金額",
@@ -32,7 +32,7 @@ const messages = {
   },
   en: {
     custom: "Custom split", fixed: "Fixed amount", percentage: "Percentage (%)", shares: "Shares",
-    member: (index: number) => `Member ${index + 1}`, addHost: "Add a host", host: "Host",
+    addHost: "Add a host", host: "Host",
     remainder: "Also split the remainder", remove: "Remove", oneHost: "Use one host",
     itemize: "Split by item", byPerson: "Use totals by person", addItem: "Add an item", item: "Item",
     itemName: "Item name", quantity: "Quantity", itemTotal: "Total for this item",

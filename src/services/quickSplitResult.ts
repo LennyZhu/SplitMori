@@ -1,3 +1,4 @@
+import { copyFor, splitModeLabel, type Copy } from "./localizedCopy.ts";
 import { calculateCharges, type CalculatedChargeDetails } from "../domain/charges.ts";
 import { formatAmount, wholeBasisPoints, type Currency } from "../domain/money.ts";
 import type { QuickSplitPreview } from "./quickSplitEditor.ts";
@@ -40,13 +41,6 @@ export type QuickSplitResultView = {
 type Split = QuickSplitPreview["snapshot"]["split"];
 type Allocation = Split["allocations"][number];
 
-const modeLabels: Record<Split["explanation"]["kind"], string> = {
-  equal: "平均分攤",
-  treat: "請客",
-  individual: "各自消費",
-  custom: "自訂分攤",
-};
-
 export function formatResultAmount(currency: Currency, amountMinor: number | bigint): string {
   let amount: string;
   if (typeof amountMinor === "bigint" && amountMinor > BigInt(Number.MAX_SAFE_INTEGER)) {
@@ -74,16 +68,16 @@ export function formatResultMoney(currency: Currency, amountMinor: number | bigi
 }
 
 function memberBreakdown(
-  allocation: Allocation, explanation: Split["explanation"], personalSpending: ReadonlyMap<string, number>, language: AppLanguage,
+  allocation: Allocation, explanation: Split["explanation"], personalSpending: ReadonlyMap<string, number>, t: Copy,
 ): BreakdownLine[] {
   const { memberId, amountMinor } = allocation;
   const breakdown: BreakdownLine[] = [];
   const originalMinor = "baseMinor" in allocation ? allocation.baseMinor : amountMinor;
   switch (explanation.kind) {
     case "equal":
-      breakdown.push({ label: "均分基準", amountMinor: explanation.baseMinor });
+      breakdown.push({ label: t("均分基準"), amountMinor: explanation.baseMinor });
       if (originalMinor > explanation.baseMinor) {
-        breakdown.push({ label: "尾差", amountMinor: originalMinor - explanation.baseMinor });
+        breakdown.push({ label: t("尾差"), amountMinor: originalMinor - explanation.baseMinor });
       }
       break;
     case "individual": {
@@ -96,50 +90,50 @@ function memberBreakdown(
       }
       const personalMinor = "personalMinor" in allocation ? allocation.personalMinor : personalSpending.get(memberId);
       if (personalMinor === undefined) {
-        breakdown.push({ label: "原始分攤", amountMinor: originalMinor });
+        breakdown.push({ label: t("原始分攤"), amountMinor: originalMinor });
         break;
       }
       const sharedMinor = "sharedMinor" in allocation ? allocation.sharedMinor : originalMinor - personalMinor;
-      breakdown.push({ label: "個人消費", amountMinor: personalMinor });
+      breakdown.push({ label: t("個人消費"), amountMinor: personalMinor });
       if (explanation.sharedTotalMinor > 0 && explanation.sharedMemberIds.includes(memberId)) {
-        breakdown.push({ label: "公共消費分攤", amountMinor: sharedMinor });
+        breakdown.push({ label: t("公共消費分攤"), amountMinor: sharedMinor });
       }
       break;
     }
     case "treat": {
       if ("hosts" in explanation) {
         const host = explanation.hosts.find(({ hostId }) => hostId === memberId);
-        if (host) breakdown.push({ label: language === "en" ? "Host commitment" : "請客承擔", amountMinor: host.coveredMinor });
+        if (host) breakdown.push({ label: t("請客承擔"), amountMinor: host.coveredMinor });
         if (!host || host.includeHostInRemainder) breakdown.push({
-          label: language === "en" ? "Share of remainder" : "剩餘均分", amountMinor: amountMinor - (host?.coveredMinor ?? 0),
+          label: t("剩餘均分"), amountMinor: amountMinor - (host?.coveredMinor ?? 0),
         });
         break;
       }
       const isHost = memberId === explanation.hostId;
-      if (isHost) breakdown.push({ label: "請客承擔", amountMinor: explanation.coveredMinor });
+      if (isHost) breakdown.push({ label: t("請客承擔"), amountMinor: explanation.coveredMinor });
       if (!isHost || explanation.includeHostInRemainder) {
         breakdown.push({
-          label: "剩餘均分", amountMinor: isHost ? amountMinor - explanation.coveredMinor : amountMinor,
+          label: t("剩餘均分"), amountMinor: isHost ? amountMinor - explanation.coveredMinor : amountMinor,
         });
       }
       break;
     }
     case "custom":
-      breakdown.push({ label: language === "en" ? "Custom split" : "自訂分攤", amountMinor });
+      breakdown.push({ label: t("自訂分攤"), amountMinor });
       break;
   }
 
   if ("serviceFeeMinor" in allocation && allocation.serviceFeeMinor > 0) {
-    breakdown.push({ label: "分配服務費", amountMinor: allocation.serviceFeeMinor });
+    breakdown.push({ label: t("分配服務費"), amountMinor: allocation.serviceFeeMinor });
   }
   if ("discountMinor" in allocation && allocation.discountMinor > 0) {
-    breakdown.push({ label: "分配折扣", amountMinor: allocation.discountMinor, deduction: true });
+    breakdown.push({ label: t("分配折扣"), amountMinor: allocation.discountMinor, deduction: true });
   }
   return breakdown;
 }
 
 function getRoundingNote(
-  { input, snapshot: { split } }: QuickSplitPreview, charges: CalculatedChargeDetails | undefined,
+  { input, snapshot: { split } }: QuickSplitPreview, charges: CalculatedChargeDetails | undefined, t: Copy,
 ) {
   const { explanation, total } = split;
   const notes: string[] = [];
@@ -147,17 +141,17 @@ function getRoundingNote(
     : explanation.kind === "individual" && "sharedSplit" in explanation ? explanation.sharedSplit.extraMinorUnits
       : explanation.kind === "treat" ? explanation.remainderSplit.extraMinorUnits : 0;
   if (equalRemainder > 0) {
-    const subject = explanation.kind === "individual" ? "公共消費" : explanation.kind === "treat" ? "請客後餘額" : "分攤金額";
-    notes.push(`${subject}未能整除。尾差按試算時的成員順序分配，獲分配尾差的成員在這一步各多分配 ${formatResultMoney(total.currency, 1)}。`);
+    const subject = explanation.kind === "individual" ? t("公共消費") : explanation.kind === "treat" ? t("請客後餘額") : t("分攤金額");
+    notes.push(t("{0}未能整除。尾差按試算時的成員順序分配，獲分配尾差的成員在這一步各多分配 {1}。", subject, formatResultMoney(total.currency, 1)));
   }
   if (explanation.kind === "treat" && "cover" in explanation && explanation.cover.kind === "percentage"
     && BigInt(total.amountMinor) * BigInt(explanation.cover.basisPoints) % BigInt(wholeBasisPoints) !== 0n) {
-    notes.push("按百分比計算的請客金額，已按幣種的最小貨幣單位四捨五入。");
+    notes.push(t("按百分比計算的請客金額，已按幣種的最小貨幣單位四捨五入。"));
   }
   if (charges && input.charges.kind === "details" && input.charges.serviceFee?.kind === "quick10") {
     const basis = input.charges.serviceFee.basis === "afterDiscount"
       ? charges.subtotal.amountMinor - charges.discountMinor : charges.subtotal.amountMinor;
-    if (basis % 10 !== 0) notes.push("快捷服務費已按幣種的最小貨幣單位四捨五入。");
+    if (basis % 10 !== 0) notes.push(t("快捷服務費已按幣種的最小貨幣單位四捨五入。"));
   }
   if (charges && charges.subtotal.amountMinor > 0 && input.charges.kind === "details" && !input.charges.distribution) {
     const subtotal = BigInt(charges.subtotal.amountMinor);
@@ -165,17 +159,18 @@ function getRoundingNote(
       "baseMinor" in allocation && BigInt(amountMinor) * BigInt(allocation.baseMinor) % subtotal !== 0n,
     );
     const parts = [
-      hasChargeRemainder(charges.serviceFeeMinor) ? "服務費" : "",
-      hasChargeRemainder(charges.discountMinor) ? "折扣" : "",
+      hasChargeRemainder(charges.serviceFeeMinor) ? t("服務費") : "",
+      hasChargeRemainder(charges.discountMinor) ? t("折扣") : "",
     ].filter(Boolean);
     if (parts.length > 0) {
-      notes.push(`${parts.join("及")}按原始分攤比例分配。尾差先分給小數餘額較大的成員，餘額相同時按試算順序分配。`);
+      notes.push(t("{0}按原始分攤比例分配。尾差先分給小數餘額較大的成員，餘額相同時按試算順序分配。", parts.join(t("及"))));
     }
   }
   return notes.length ? notes.join(" ") : undefined;
 }
 
 export function describeQuickSplitResult(preview: QuickSplitPreview, language: AppLanguage = "zh-HK"): QuickSplitResultView {
+  const t = copyFor(language);
   const { input, snapshot: { split, suggestions } } = preview;
   const { currency, amountMinor: totalMinor } = split.total;
   const names = new Map(input.members.map(({ id, displayName }) => [id, displayName]));
@@ -185,7 +180,7 @@ export function describeQuickSplitResult(preview: QuickSplitPreview, language: A
     ? input.method.personalSpending.map(({ memberId, personalMinor }) => [memberId, personalMinor]) : []);
   const members = split.allocations.map((allocation) => ({
     id: allocation.memberId, name: memberName(allocation.memberId), amountMinor: allocation.amountMinor,
-    breakdown: memberBreakdown(allocation, split.explanation, personalSpending, language),
+    breakdown: memberBreakdown(allocation, split.explanation, personalSpending, t),
   }));
   const allocatedMinor = members.reduce((sum, member) => sum + BigInt(member.amountMinor), 0n);
 
@@ -195,19 +190,19 @@ export function describeQuickSplitResult(preview: QuickSplitPreview, language: A
     const calculated = calculateCharges(input.charges);
     if (calculated.ok && calculated.value.kind === "details") {
       charges = calculated.value;
-      chargeBreakdown = [{ label: "商品小計", amountMinor: charges.subtotal.amountMinor }];
-      if (charges.serviceFeeMinor > 0) chargeBreakdown.push({ label: "服務費", amountMinor: charges.serviceFeeMinor });
-      if (charges.discountMinor > 0) chargeBreakdown.push({ label: "折扣", amountMinor: charges.discountMinor, deduction: true });
+      chargeBreakdown = [{ label: t("商品小計"), amountMinor: charges.subtotal.amountMinor }];
+      if (charges.serviceFeeMinor > 0) chargeBreakdown.push({ label: t("服務費"), amountMinor: charges.serviceFeeMinor });
+      if (charges.discountMinor > 0) chargeBreakdown.push({ label: t("折扣"), amountMinor: charges.discountMinor, deduction: true });
     }
   }
 
   return {
     currency, totalMinor, allocatedMinor, balanced: allocatedMinor === BigInt(totalMinor),
-    modeLabel: language === "en" && split.explanation.kind === "custom" ? "Custom split" : modeLabels[split.explanation.kind],
+    modeLabel: splitModeLabel(t, split.explanation.kind),
     payerName, members, chargeBreakdown,
     suggestions: payerName === undefined ? [] : suggestions.map(({ fromMemberId, toMemberId, amountMinor }) => ({
       fromMemberId, toMemberId, fromName: memberName(fromMemberId), toName: memberName(toMemberId), amountMinor,
     })),
-    roundingNote: getRoundingNote(preview, charges),
+    roundingNote: getRoundingNote(preview, charges, t),
   };
 }

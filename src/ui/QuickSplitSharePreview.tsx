@@ -1,7 +1,10 @@
+import { useCopy } from "./useCopy.ts";
 import { useLayoutEffect, useRef, useState, type ComponentRef } from "react";
 import { ActivityIndicator, PixelRatio, ScrollView, StyleSheet, Text, View, type LayoutChangeEvent } from "react-native";
+import { formatUiCount, copyFor } from "../services/localizedCopy.ts";
 import type { QuickSplitShareCard } from "../services/quickSplitShare.ts";
 import { shareQuickSplitPng, type ShareOutcome } from "../services/shareQuickSplitPng.ts";
+import { useSharePresentation } from "./useSharePresentation.ts";
 import { colors } from "./visuals.tsx";
 
 function ShareLine({ label, amount }: { label: string; amount: string }) {
@@ -16,29 +19,22 @@ function ShareLine({ label, amount }: { label: string; amount: string }) {
 export function QuickSplitSharePreview({ card, onFinish }: {
   card: QuickSplitShareCard; onFinish: (outcome: ShareOutcome) => void;
 }) {
+  const ui = useCopy();
+  const t = copyFor(card.language);
   const target = useRef<ComponentRef<typeof View>>(null);
   const active = useRef(false);
   const started = useRef(false);
   const frame = useRef<number>(undefined);
   const [phase, setPhase] = useState<"generating" | "sharing">("generating");
-  const previewReady = useRef<() => void>(undefined);
+  const waitForPreview = useSharePresentation(phase === "sharing");
 
   useLayoutEffect(() => {
     active.current = true;
     return () => {
       active.current = false;
       if (frame.current !== undefined) cancelAnimationFrame(frame.current);
-      previewReady.current?.();
     };
   }, []);
-
-  useLayoutEffect(() => {
-    if (phase === "sharing") {
-      // Commit the static preview before asking iOS to present its share sheet.
-      previewReady.current?.();
-      previewReady.current = undefined;
-    }
-  }, [phase]);
 
   function onCardLayout({ nativeEvent: { layout } }: LayoutChangeEvent) {
     if (started.current || layout.width <= 0 || layout.height <= 0) return;
@@ -57,10 +53,11 @@ export function QuickSplitSharePreview({ card, onFinish }: {
         onFinish("capture-failed");
         return;
       }
-      void shareQuickSplitPng(view, () => active.current, () => new Promise<void>((resolve) => {
-        previewReady.current = resolve;
+      void shareQuickSplitPng(view, ui("分享結算"), () => active.current, () => {
+        const previewReady = waitForPreview();
         setPhase("sharing");
-      })).then((outcome) => {
+        return previewReady;
+      }).then((outcome) => {
         if (active.current) onFinish(outcome);
       });
     });
@@ -71,40 +68,40 @@ export function QuickSplitSharePreview({ card, onFinish }: {
       {phase === "generating" && (
         <View style={styles.loading}>
           <ActivityIndicator color={colors.ink} />
-          <Text accessibilityLiveRegion="polite" style={styles.caption}>正在準備分享圖片…</Text>
+          <Text accessibilityLiveRegion="polite" style={styles.caption}>{ui("正在準備分享圖片…")}</Text>
         </View>
       )}
       <ScrollView style={styles.scroll} removeClippedSubviews={false}>
         <View ref={target} onLayout={onCardLayout} collapsable={false} style={styles.card}>
           <View style={styles.summary}>
             <Text allowFontScaling={false} style={styles.brand}>SplitMori</Text>
-            <Text allowFontScaling={false} style={styles.caption}>實際帳單總額</Text>
+            <Text allowFontScaling={false} style={styles.caption}>{t("實際帳單總額")}</Text>
             <Text allowFontScaling={false} style={styles.total}>{card.total}</Text>
-            <Text allowFontScaling={false} style={styles.caption}>{card.mode} · {card.memberCount} 位參與成員</Text>
+            <Text allowFontScaling={false} style={styles.caption}>{card.mode} · {formatUiCount(t, card.memberCount, "participants")}</Text>
           </View>
 
           <View style={styles.section}>
-            <Text allowFontScaling={false} style={styles.heading}>每人應承擔</Text>
+            <Text allowFontScaling={false} style={styles.heading}>{t("每人應承擔")}</Text>
             {card.members.map(({ id, name, amount }) => <ShareLine key={id} label={name} amount={amount} />)}
           </View>
 
           {card.payment && (
             <View style={styles.section}>
-              <Text allowFontScaling={false} style={styles.heading}>轉帳建議</Text>
-              <Text allowFontScaling={false} style={styles.caption}>商家付款人 · {card.payment.payerName}</Text>
+              <Text allowFontScaling={false} style={styles.heading}>{t("轉帳建議")}</Text>
+              <Text allowFontScaling={false} style={styles.caption}>{t("商家付款人 ·") + " "}{card.payment.payerName}</Text>
               {card.payment.transfers.length === 0 && (
-                <Text allowFontScaling={false} style={styles.caption}>此試算沒有轉帳建議。</Text>
+                <Text allowFontScaling={false} style={styles.caption}>{t("此試算沒有轉帳建議。")}</Text>
               )}
               {card.payment.transfers.map(({ fromMemberId, toMemberId, fromName, toName, amount }) => (
                 <ShareLine key={`${fromMemberId}:${toMemberId}`} label={`${fromName} → ${toName}`} amount={amount} />
               ))}
-              <Text allowFontScaling={false} style={styles.caption}>轉帳建議僅供參考，並不代表實際付款。</Text>
+              <Text allowFontScaling={false} style={styles.caption}>{t("轉帳建議僅供參考，並不代表實際付款。")}</Text>
             </View>
           )}
 
           <View style={styles.section}>
             {card.roundingNote && <Text allowFontScaling={false} style={styles.caption}>{card.roundingNote}</Text>}
-            <Text allowFontScaling={false} style={styles.caption}>圖片生成時間 · {card.generatedAt}</Text>
+            <Text allowFontScaling={false} style={styles.caption}>{t("圖片生成時間 ·") + " "}{card.generatedAt}</Text>
           </View>
         </View>
       </ScrollView>

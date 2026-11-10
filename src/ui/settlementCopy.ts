@@ -31,7 +31,7 @@ const copy = {
     currentOutstanding: "Currently outstanding", pendingTransfers: "Transfers outstanding", autoCalculated: "Calculated from current balances",
     history: "History", viewHistory: "View repayment history", voided: "Voided", paidMerchant: "Paid to merchants",
     receivedRefund: "Merchant refunds received", allocated: "Expense share", sentRepayment: "Repayments sent", receivedRepayment: "Repayments received",
-    currentNet: "Current net balance", recordedPayment: "Recorded repayment", suggestionOnly: "This is a suggestion. Payment and repayment have yet to be recorded.",
+    currentNet: "Current net balance", recordedPayment: "Recorded repayment", suggestionOnly: "A suggestion does not confirm a payment or record a repayment.",
     note: "Note", direction: "Suggested payment direction", selectSuggestion: "Select a suggestion to record an actual repayment.", recorded: "Recorded repayments",
     memberDetails: "Member balance details", eachMember: "Each member", memberNote: "Payments and shares are calculated separately. Valid refunds and recorded repayments are included.",
     shareHint: "Preview and share the current settlement", important: "Important", actualTransfer: "Suggestions are based on current balances. Record an actual repayment to update the ledger after transferring.",

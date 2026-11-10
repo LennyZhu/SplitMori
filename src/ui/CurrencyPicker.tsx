@@ -1,3 +1,5 @@
+import { currencyLabels, type AppLanguage } from "../services/appPreferences.ts";
+import { useCopy } from "./useCopy.ts";
 import { useState } from "react";
 import {
   Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
@@ -15,18 +17,19 @@ const currencies: readonly { code: Currency; name: string; aliases?: readonly st
   { code: "JPY", name: "日圓", aliases: ["日元", "日幣"] },
 ];
 
-export function currencyName(code: Currency): string {
-  return currencies.find((currency) => currency.code === code)?.name ?? code;
+export function currencyName(code: Currency, language: AppLanguage): string {
+  return language === "en" ? currencyLabels[code].en : currencies.find((currency) => currency.code === code)?.name ?? code;
 }
 
 export function CurrencyPicker({ selected, onSelect, onClose }: {
   selected: Currency; onSelect: (currency: Currency) => void; onClose: () => void;
 }) {
+  const t = useCopy();
   const [query, setQuery] = useState("");
   const { top, bottom, left, right } = useSafeAreaInsets();
   const term = query.trim().toUpperCase();
   const options = currencies.filter(({ code, name, aliases }) =>
-    code.includes(term) || name.includes(term) || aliases?.some((alias) => alias.includes(term)),
+    code.includes(term) || currencyLabels[code].en.toUpperCase().includes(term) || name.includes(term) || aliases?.some((alias) => alias.includes(term)),
   );
 
   function cancel() {
@@ -47,16 +50,16 @@ export function CurrencyPicker({ selected, onSelect, onClose }: {
           style={[styles.sheet, { paddingBottom: Math.max(12, bottom) }]}
         >
           <View style={styles.header}>
-            <Text accessibilityRole="header" style={styles.title}>選擇幣種</Text>
+            <Text accessibilityRole="header" style={styles.title}>{t("選擇幣種")}</Text>
             <Pressable accessibilityRole="button" onPress={cancel} style={styles.cancel}>
-              <Text style={styles.cancelText}>取消</Text>
+              <Text style={styles.cancelText}>{t("取消")}</Text>
             </Pressable>
           </View>
           <TextInput
-            accessibilityLabel="搜尋幣種"
+            accessibilityLabel={t("搜尋幣種")}
             value={query}
             onChangeText={setQuery}
-            placeholder="搜尋幣種代碼或名稱"
+            placeholder={t("搜尋幣種代碼或名稱")}
             placeholderTextColor={colors.muted}
             autoCapitalize="none"
             autoCorrect={false}
@@ -70,7 +73,8 @@ export function CurrencyPicker({ selected, onSelect, onClose }: {
             keyboardDismissMode="on-drag"
           >
             <View accessibilityRole="radiogroup">
-              {options.map(({ code, name }) => {
+              {options.map(({ code }) => {
+                const name = currencyName(code, t.language);
                 const checked = code === selected;
                 return (
                   <Pressable
@@ -91,7 +95,7 @@ export function CurrencyPicker({ selected, onSelect, onClose }: {
                 );
               })}
               {options.length === 0 && (
-                <Text accessibilityLiveRegion="polite" style={styles.empty}>找不到符合的幣種。</Text>
+                <Text accessibilityLiveRegion="polite" style={styles.empty}>{t("找不到符合的幣種。")}</Text>
               )}
             </View>
           </ScrollView>

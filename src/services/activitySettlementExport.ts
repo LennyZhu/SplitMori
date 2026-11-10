@@ -121,7 +121,7 @@ export type SettlementDocumentPlatform = {
 export async function shareSettlementDocument(preview: SettlementPreview, format: SettlementDocumentFormat, platform: SettlementDocumentPlatform, options: {
   hasVerifiedProAccess(): boolean;
   isActive(): boolean;
-  onPresenting(): void;
+  onPresenting(): void | Promise<void>;
   title: string;
 }) {
   if (!options.hasVerifiedProAccess()) return "proRequired";
@@ -135,7 +135,9 @@ export async function shareSettlementDocument(preview: SettlementPreview, format
   try {
     if (!options.isActive()) return "cancelled";
     if (!options.hasVerifiedProAccess()) return "proRequired";
-    options.onPresenting();
+    await options.onPresenting();
+    if (!options.isActive()) return "cancelled";
+    if (!options.hasVerifiedProAccess()) return "proRequired";
     return await platform.present(file.uri, options.title);
   } catch {
     return "shareFailed";

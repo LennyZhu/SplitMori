@@ -1,3 +1,6 @@
+import { formatUiDate } from "../services/localizedCopy.ts";
+import type { Copy } from "../services/localizedCopy.ts";
+import { useCopy } from "./useCopy.ts";
 import { uuid } from "expo";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ComponentRef, type ReactNode } from "react";
 import {
@@ -16,37 +19,35 @@ import { formatResultMoney } from "../services/quickSplitResult.ts";
 import { ConversionButton, ConversionPage, ConversionReadError, memberLabels, MemberPicker } from "./QuickSplitConversionScreen.tsx";
 import { colors, Icon } from "./visuals.tsx";
 
-const dateFormat = new Intl.DateTimeFormat("zh-HK", { year: "numeric", month: "long", day: "numeric" });
-const confirmationNotice = "此操作只會記錄轉帳，不會代你轉帳。";
 type MemberField = "fromMemberId" | "toMemberId";
 type Confirmation = PreparedRepayment & { id: string };
 type SavedRepayment = { event: StoredFinanceEvent<FinanceMemberTransfer>; fromName: string; toName: string };
 
-function formMessage(field: keyof RepaymentDraft, code?: DomainErrorCode): string | undefined {
+function formMessage(t: Copy, field: keyof RepaymentDraft, code?: DomainErrorCode): string | undefined {
   if (!code) return;
-  if (field === "fromMemberId") return "請選擇目前有應付金額的活動成員。";
-  if (field === "toMemberId") return code === "SELF_TRANSFER" ? "付款人與收款人必須是不同成員。" : "請選擇目前有應收金額的活動成員。";
+  if (field === "fromMemberId") return t("請選擇目前有應付金額的活動成員。");
+  if (field === "toMemberId") return code === "SELF_TRANSFER" ? t("付款人與收款人必須是不同成員。") : t("請選擇目前有應收金額的活動成員。");
   if (field === "date") {
-    return code === "TRANSFER_DATE_CONFLICT" ? "所選日期與還款當時或之後的帳本紀錄不符，請核對實際轉帳日期。"
-      : "請輸入有效的 YYYY-MM-DD 日期，日期須為今天或更早。";
+    return code === "TRANSFER_DATE_CONFLICT" ? t("所選日期與還款當時或之後的帳本紀錄不符，請核對實際轉帳日期。")
+      : t("請輸入有效的 YYYY-MM-DD 日期，日期須為今天或更早。");
   }
   if (field === "amount") {
-    if (code === "TRANSFER_EXCEEDS_BALANCE") return "金額不可超過付款人的應付額或收款人的應收額。";
-    if (code === "INVALID_AMOUNT_PRECISION") return "金額的小數位數超出此幣種的上限。";
-    if (code === "AMOUNT_OVERFLOW") return "金額超出上限。";
-    return "請輸入大於零的有效還款金額。";
+    if (code === "TRANSFER_EXCEEDS_BALANCE") return t("金額不可超過付款人的應付額或收款人的應收額。");
+    if (code === "INVALID_AMOUNT_PRECISION") return t("金額的小數位數超出此幣種的上限。");
+    if (code === "AMOUNT_OVERFLOW") return t("金額超出上限。");
+    return t("請輸入大於零的有效還款金額。");
   }
 }
 
-function submissionMessage(code: DomainErrorCode): string {
+function submissionMessage(t: Copy, code: DomainErrorCode): string {
   switch (code) {
     case "TRANSFER_BALANCES_CHANGED":
     case "TRANSFER_EXCEEDS_BALANCE":
     case "MEMBER_NOT_PARTICIPATING":
-      return "帳本已更新，請核對最新餘額和還款資料後重新確認。";
-    case "EVENT_ID_CONFLICT": return "這筆記錄與已有事件衝突，請返回活動結算核對。";
-    case "ACTIVITY_NOT_FOUND": return "找不到這個活動，請返回活動結算。";
-    default: return "未能記錄還款，請核對後重試。";
+      return t("帳本已更新，請核對最新餘額和還款資料後重新確認。");
+    case "EVENT_ID_CONFLICT": return t("這筆記錄與已有事件衝突，請返回活動結算核對。");
+    case "ACTIVITY_NOT_FOUND": return t("找不到這個活動，請返回活動結算。");
+    default: return t("未能記錄還款，請核對後重試。");
   }
 }
 
@@ -65,10 +66,11 @@ function Field({ label, children, error }: { label: string; children: ReactNode;
 }
 
 function SelectMember({ label, name, onPress }: { label: string; name?: string; onPress: () => void }) {
+  const t = useCopy();
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel={`${label}，${name ?? "尚未選擇"}`}
+    <Pressable accessibilityRole="button" accessibilityLabel={`${label}，${name ?? t("尚未選擇")}`}
       onPress={onPress} style={[styles.control, styles.picker]}>
-      <Text style={[name ? styles.value : styles.caption, styles.fill]}>{name ?? "選擇成員"}</Text>
+      <Text style={[name ? styles.value : styles.caption, styles.fill]}>{name ?? t("選擇成員")}</Text>
       <Icon name="down" size={18} />
     </Pressable>
   );
@@ -81,6 +83,7 @@ function ConfirmRow({ label, value }: { label: string; value: string }) {
 function ConfirmationSheet({ repayment, busy, error, onClose, onConfirm }: {
   repayment: Confirmation; busy: boolean; error?: string; onClose: () => void; onConfirm: () => void;
 }) {
+  const t = useCopy();
   const insets = useSafeAreaInsets();
   const { transfer } = repayment;
   return (
@@ -90,23 +93,23 @@ function ConfirmationSheet({ repayment, busy, error, onClose, onConfirm }: {
       }]}>
         <View accessibilityViewIsModal onAccessibilityEscape={onClose} style={[styles.card, styles.dialog]}>
           <ScrollView style={styles.dialogScroll} contentContainerStyle={styles.dialogContent} keyboardShouldPersistTaps="handled">
-            <Text accessibilityRole="header" style={styles.dialogTitle}>確認記錄還款</Text>
-            <ConfirmRow label="付款人" value={repayment.fromName} />
-            <ConfirmRow label="收款人" value={repayment.toName} />
-            <ConfirmRow label="還款金額" value={formatResultMoney(transfer.currency, transfer.amountMinor)} />
-            <ConfirmRow label="轉帳日期" value={dateFormat.format(repayment.occurredAt)} />
-            {transfer.note && <ConfirmRow label="備註" value={transfer.note} />}
-            <Text style={styles.confirmNotice}>{confirmationNotice}</Text>
+            <Text accessibilityRole="header" style={styles.dialogTitle}>{t("確認記錄還款")}</Text>
+            <ConfirmRow label={t("付款人")} value={repayment.fromName} />
+            <ConfirmRow label={t("收款人")} value={repayment.toName} />
+            <ConfirmRow label={t("還款金額")} value={formatResultMoney(transfer.currency, transfer.amountMinor)} />
+            <ConfirmRow label={t("轉帳日期")} value={formatUiDate(t, repayment.occurredAt)} />
+            {transfer.note && <ConfirmRow label={t("備註")} value={transfer.note} />}
+            <Text style={styles.confirmNotice}>{t("此操作只會記錄轉帳，不會代你轉帳。")}</Text>
             <FieldError text={error} />
           </ScrollView>
           <View style={styles.dialogActions}>
             <Pressable accessibilityRole="button" accessibilityState={{ disabled: busy }} disabled={busy} onPress={onClose}
               style={({ pressed }) => [styles.dialogButton, (pressed || busy) && styles.dimmed]}>
-              <Text style={styles.dialogButtonText}>取消</Text>
+              <Text style={styles.dialogButtonText}>{t("取消")}</Text>
             </Pressable>
             <Pressable accessibilityRole="button" accessibilityState={{ busy, disabled: busy }} disabled={busy} onPress={onConfirm}
               style={({ pressed }) => [styles.dialogButton, styles.dialogPrimary, (pressed || busy) && styles.dimmed]}>
-              <Text style={[styles.dialogButtonText, styles.dialogPrimaryText]}>{busy ? "正在記錄…" : error ? "重試記錄" : "確認記錄"}</Text>
+              <Text style={[styles.dialogButtonText, styles.dialogPrimaryText]}>{busy ? t("正在記錄…") : error ? t("重試記錄") : t("確認記錄")}</Text>
             </Pressable>
           </View>
         </View>
@@ -116,21 +119,22 @@ function ConfirmationSheet({ repayment, busy, error, onClose, onConfirm }: {
 }
 
 function Success({ saved, onBack }: { saved: SavedRepayment; onBack: () => void }) {
+  const t = useCopy();
   const { event, fromName, toName } = saved;
   return (
-    <ConversionPage title="" onBack={onBack} footer={<ConversionButton label="返回活動結算" onPress={onBack} />}>
+    <ConversionPage title="" onBack={onBack} footer={<ConversionButton label={t("返回活動結算")} onPress={onBack} />}>
       <View style={styles.success}>
         <View style={styles.check}><Icon name="check" size={36} /></View>
-        <Text accessibilityRole="header" style={styles.successTitle}>還款已記錄</Text>
-        <Text style={[styles.caption, styles.center]}>已成功記錄一筆成員還款，活動結算已更新。</Text>
+        <Text accessibilityRole="header" style={styles.successTitle}>{t("還款已記錄")}</Text>
+        <Text style={[styles.caption, styles.center]}>{t("已成功記錄一筆成員還款，活動結算已更新。")}</Text>
       </View>
       <View style={[styles.card, styles.receipt]}>
         <View style={styles.receiptLine}>
           <Text style={styles.receiptTitle}>{fromName} → {toName}</Text>
           <Text style={styles.receiptTitle}>{formatResultMoney(event.currency, event.amountMinor)}</Text>
         </View>
-        <Text style={styles.caption}>轉帳日期：{dateFormat.format(event.occurredAt)}</Text>
-        {event.note && <Text style={styles.caption}>備註：{event.note}</Text>}
+        <Text style={styles.caption}>{t("轉帳日期：{0}", formatUiDate(t, event.occurredAt))}</Text>
+        {event.note && <Text style={styles.caption}>{t("備註：{0}", event.note)}</Text>}
       </View>
     </ConversionPage>
   );
@@ -139,6 +143,7 @@ function Success({ saved, onBack }: { saved: SavedRepayment; onBack: () => void 
 export function ActivityRepaymentScreen({ activityId, suggestion, onBack }: {
   activityId: string; suggestion: TransferSuggestion; onBack: () => void;
 }) {
+  const t = useCopy();
   const [draft, setDraft] = useState<RepaymentDraft>(() => {
     const initialAmount = formatAmount(suggestion);
     return {
@@ -206,7 +211,7 @@ export function ActivityRepaymentScreen({ activityId, suggestion, onBack }: {
   }
 
   const inspection = data && inspectRepaymentDraft(draft, data, new Date());
-  const names = memberLabels(data?.activity.members ?? []);
+  const names = memberLabels(t, data?.activity.members ?? []);
   const canRecord = data?.status === "unsettled" && data.suggestions.length > 0;
   const pickerMembers = picker && data ? data.activity.members.filter(({ id }) => {
     const balance = data.members.find(({ memberId }) => memberId === id)?.netBalanceMinor ?? 0;
@@ -270,10 +275,10 @@ export function ActivityRepaymentScreen({ activityId, suggestion, onBack }: {
         if (result.error.code === "TRANSFER_BALANCES_CHANGED" || result.error.code === "TRANSFER_EXCEEDS_BALANCE"
           || result.error.code === "MEMBER_NOT_PARTICIPATING" || result.error.code === "ACTIVITY_NOT_FOUND") void reload();
       } else {
-        setSheetError("未能寫入還款記錄，請重試。");
+        setSheetError(t("未能寫入還款記錄，請重試。"));
       }
     } catch {
-      if (mounted.current) setSheetError("未能寫入還款記錄，請重試。");
+      if (mounted.current) setSheetError(t("未能寫入還款記錄，請重試。"));
     } finally {
       pending.current = false;
       if (mounted.current) setSaving(false);
@@ -282,70 +287,70 @@ export function ActivityRepaymentScreen({ activityId, suggestion, onBack }: {
 
   if (saved) return <Success saved={saved} onBack={onBack} />;
   const dateError = error === "TRANSFER_DATE_CONFLICT" || error === "INVALID_EVENT_TIME" ? error : undefined;
-  const footerError = error && !dateError ? submissionMessage(error) : undefined;
+  const footerError = error && !dateError ? submissionMessage(t, error) : undefined;
   const limit = inspection?.limit ?? 0;
 
   return (
     <>
-      <ConversionPage title="記錄還款" onBack={close} busy={saving} scrollRef={scroll}
+      <ConversionPage title={t("記錄還款")} onBack={close} busy={saving} scrollRef={scroll}
         footer={<>
           <FieldError text={footerError} />
-          <ConversionButton label="儲存還款" disabled={!canRecord || loading || readError || saving} onPress={review} />
+          <ConversionButton label={t("儲存還款")} disabled={!canRecord || loading || readError || saving} onPress={review} />
         </>}>
-        {loading && !data && <ActivityIndicator accessibilityLabel="正在讀取帳本" color={colors.ink} />}
+        {loading && !data && <ActivityIndicator accessibilityLabel={t("正在讀取帳本")} color={colors.ink} />}
         {readError && <ConversionReadError retry={() => { void reload(); }} />}
-        {data === null && <Text style={styles.caption}>找不到這個活動。</Text>}
+        {data === null && <Text style={styles.caption}>{t("找不到這個活動。")}</Text>}
         {data && !canRecord && <View style={[styles.card, styles.empty]}>
-          <Text style={styles.label}>{data.status === "empty" ? "暫無財務紀錄" : "目前沒有可記錄的還款"}</Text>
-          <Text style={styles.caption}>請返回活動結算查看目前帳務。</Text>
+          <Text style={styles.label}>{data.status === "empty" ? t("暫無財務紀錄") : t("目前沒有可記錄的還款")}</Text>
+          <Text style={styles.caption}>{t("請返回活動結算查看目前帳務。")}</Text>
         </View>}
         {data && (canRecord || attempted) && (
           <>
             <View style={styles.info}>
               <View style={styles.infoIcon}><Text style={styles.infoMark}>i</Text></View>
-              <Text style={[styles.caption, styles.fill]}>請記錄已實際發生的成員之間轉帳。{confirmationNotice}</Text>
+              <Text style={[styles.caption, styles.fill]}>{t("請記錄已實際發生的成員之間轉帳。")}{t("此操作只會記錄轉帳，不會代你轉帳。")}</Text>
             </View>
-            <Field label="付款人 *" error={attempted ? formMessage("fromMemberId", inspection?.errors.fromMemberId) : undefined}>
-              <SelectMember label="付款人" name={names.get(draft.fromMemberId)} onPress={() => openPicker("fromMemberId")} />
+            <Field label={t("付款人 *")} error={attempted ? formMessage(t, "fromMemberId", inspection?.errors.fromMemberId) : undefined}>
+              <SelectMember label={t("付款人")} name={names.get(draft.fromMemberId)} onPress={() => openPicker("fromMemberId")} />
             </Field>
-            <Field label="收款人 *" error={attempted ? formMessage("toMemberId", inspection?.errors.toMemberId) : undefined}>
-              <SelectMember label="收款人" name={names.get(draft.toMemberId)} onPress={() => openPicker("toMemberId")} />
+            <Field label={t("收款人 *")} error={attempted ? formMessage(t, "toMemberId", inspection?.errors.toMemberId) : undefined}>
+              <SelectMember label={t("收款人")} name={names.get(draft.toMemberId)} onPress={() => openPicker("toMemberId")} />
             </Field>
-            <Field label={`還款金額 (${data.activity.currency}) *`} error={attempted ? formMessage("amount", inspection?.errors.amount) : undefined}>
-              <TextInput accessibilityLabel={`還款金額，${data.activity.currency}`} keyboardType="decimal-pad" onFocus={onFocus}
+            <Field label={t("還款金額 ({0}) *", data.activity.currency)} error={attempted ? formMessage(t, "amount", inspection?.errors.amount) : undefined}>
+              <TextInput accessibilityLabel={t("還款金額，{0}", data.activity.currency)} keyboardType="decimal-pad" onFocus={onFocus}
                 value={draft.amount} onChangeText={(value) => change("amount", value)} editable={!saving}
                 style={[styles.control, styles.input, styles.moneyInput]} />
-              <Text style={styles.caption}>最高可記錄 {formatResultMoney(data.activity.currency, limit)}（依雙方目前餘額）</Text>
+              <Text style={styles.caption}>{t("最高可記錄 {0}（依雙方目前餘額）", formatResultMoney(data.activity.currency, limit))}</Text>
             </Field>
-            <Field label="轉帳日期 *" error={formMessage("date", dateError ?? (attempted ? inspection?.errors.date : undefined))}>
+            <Field label={t("轉帳日期 *")} error={formMessage(t, "date", dateError ?? (attempted ? inspection?.errors.date : undefined))}>
               {dateEditing ? (
                 <>
-                  <TextInput accessibilityLabel="轉帳日期，年、月、日" value={draft.date} autoFocus selectTextOnFocus
+                  <TextInput accessibilityLabel={t("轉帳日期，年、月、日")} value={draft.date} autoFocus selectTextOnFocus
                     onChangeText={(value) => change("date", value)} onFocus={onFocus}
                     onBlur={() => { if (inspection?.occurredAt !== undefined) setDateEditing(false); }}
                     keyboardType={Platform.OS === "ios" ? "numbers-and-punctuation" : "default"}
                     returnKeyType="done" maxLength={10} placeholder="YYYY-MM-DD" placeholderTextColor={colors.muted}
                     style={[styles.control, styles.input]} />
-                  <Text style={styles.caption}>格式為 YYYY-MM-DD。</Text>
+                  <Text style={styles.caption}>{t("格式為 YYYY-MM-DD。")}</Text>
                 </>
               ) : (
-                <Pressable accessibilityRole="button" accessibilityLabel="更改轉帳日期" onPress={() => setDateEditing(true)}
+                <Pressable accessibilityRole="button" accessibilityLabel={t("更改轉帳日期")} onPress={() => setDateEditing(true)}
                   style={[styles.control, styles.picker]}>
                   <Icon name="calendar" size={20} />
-                  <Text style={[styles.value, styles.fill]}>{inspection?.occurredAt === undefined ? draft.date : dateFormat.format(inspection.occurredAt)}</Text>
+                  <Text style={[styles.value, styles.fill]}>{inspection?.occurredAt === undefined ? draft.date : formatUiDate(t, inspection.occurredAt)}</Text>
                 </Pressable>
               )}
             </Field>
-            <Field label="備註（選填）">
-              <TextInput accessibilityLabel="備註" value={draft.note} onChangeText={(value) => change("note", value)} onFocus={onFocus}
-                editable={!saving} multiline placeholder="例如 FPS 或現金" placeholderTextColor={colors.muted}
+            <Field label={t("備註（選填）")}>
+              <TextInput accessibilityLabel={t("備註")} value={draft.note} onChangeText={(value) => change("note", value)} onFocus={onFocus}
+                editable={!saving} multiline placeholder={t("例如 FPS 或現金")} placeholderTextColor={colors.muted}
                 style={[styles.control, styles.input, styles.noteInput]} />
             </Field>
           </>
         )}
       </ConversionPage>
-      {picker && <MemberPicker title={picker === "fromMemberId" ? "選擇付款人" : "選擇收款人"}
-        members={pickerMembers} labels={names} selected={draft[picker]} emptyText="目前沒有可選的還款成員。"
+      {picker && <MemberPicker title={picker === "fromMemberId" ? t("選擇付款人") : t("選擇收款人")}
+        members={pickerMembers} labels={names} selected={draft[picker]} emptyText={t("目前沒有可選的還款成員。")}
         onClose={() => setPicker(undefined)}
         onSelect={(id) => { change(picker, id); setPicker(undefined); }} />}
       {confirmation && <ConfirmationSheet repayment={confirmation} busy={saving} error={sheetError}

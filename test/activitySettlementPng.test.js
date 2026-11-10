@@ -205,3 +205,46 @@ test("S11 projects all long member and transfer rows and fits a long receipt wit
     assert.ok(frame.height * frame.width * ratio ** 2 <= 18_016_000);
   }
 });
+
+test("S11 waits for the non-loading presentation before PDF/CSV sharing and can retry after cancellation", async () => {
+  const preview = { snapshot, card: buildSettlementPngCard(snapshot, "en") };
+  for (const format of ["pdf", "csv"]) {
+    let phase = "generating";
+    let release;
+    let onReady;
+    let cleaned = 0;
+    const painted = new Promise((resolve) => { release = resolve; });
+    const ready = new Promise((resolve) => { onReady = resolve; });
+    const platform = {
+      supports: () => true,
+      async prepare() {
+        assert.equal(phase, "generating");
+        return { uri: "file:///receipt", discard: () => { cleaned += 1; } };
+      },
+      async present() {
+        assert.equal(phase, "painted");
+        return "cancelled";
+      },
+    };
+    const options = {
+      hasVerifiedProAccess: () => true, isActive: () => true, title: "Export",
+      async onPresenting() {
+        phase = "sharing";
+        onReady();
+        await painted;
+        phase = "painted";
+      },
+    };
+    const share = shareSettlementDocument(preview, format, platform, options);
+    await ready;
+    assert.equal(phase, "sharing");
+    assert.equal(cleaned, 0);
+    release();
+    assert.equal(await share, "cancelled");
+    assert.equal(cleaned, 1);
+
+    phase = "generating";
+    assert.equal(await shareSettlementDocument(preview, format, platform, options), "cancelled");
+    assert.equal(cleaned, 2);
+  }
+});

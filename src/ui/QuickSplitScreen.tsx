@@ -1,4 +1,5 @@
-import { useCallback, useContext, useEffect, useRef, useState, type ComponentRef, type ReactNode } from "react";
+import { useCopy } from "./useCopy.ts";
+import { useCallback, useEffect, useRef, useState, type ComponentRef, type ReactNode } from "react";
 import {
   ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Switch,
   Text, TextInput, View,
@@ -12,7 +13,6 @@ import {
 import { CurrencyPicker } from "./CurrencyPicker.tsx";
 import { AdvancedChargeFields, AdvancedMethodFields } from "./AdvancedSplitFields.tsx";
 import { advancedEditorMessage } from "./advancedSplitCopy.ts";
-import { AppLanguageContext } from "./AppLanguageContext.ts";
 import { usePro } from "./ProContext.ts";
 import { SplitModeSelector } from "./SplitModeSelector.tsx";
 import { validationMessage } from "./splitEditorMessages.ts";
@@ -88,7 +88,8 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
   onResult: (result: QuickSplitPreview) => void;
   focusPayer?: boolean; defaultCurrency: Currency;
 }) {
-  const language = useContext(AppLanguageContext);
+  const t = useCopy();
+  const { language } = t;
   const { hasProAccess } = usePro();
   const { editor, updateEditor, loading, error: draftError, retry, discard, discarding } = useQuickSplitDraft(defaultCurrency);
   const [validation, setValidation] = useState<EditorError>();
@@ -143,7 +144,7 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
 
   function fieldError(field: EditorField, memberId?: string) {
     return validation?.field === field && validation.memberId === memberId
-      ? advancedEditorMessage(validation, language, editor.customKind === "percentage") ?? validationMessage(validation)
+      ? advancedEditorMessage(validation, language, editor.customKind === "percentage") ?? validationMessage(t, validation)
       : undefined;
   }
 
@@ -152,7 +153,7 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
     if (text !== "") {
       const parsed = parseAmount(text, editor.currency);
       if (!parsed.ok && parsed.error.code === "INVALID_AMOUNT_PRECISION") {
-        return validationMessage({ code: parsed.error.code, field, memberId });
+        return validationMessage(t, { code: parsed.error.code, field, memberId });
       }
     }
     return fieldError(field, memberId);
@@ -162,22 +163,22 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
 
   function confirmChargeMode() {
     if (details) {
-      Alert.alert("改用實付總額？", "只按實際帳單總額分帳，商品小計、服務費和折扣不會套用。", [
-        { text: "取消", style: "cancel" },
-        { text: "改用實付總額", onPress: () => setField("chargeMode", "finalTotal") },
+      Alert.alert(t("改用實付總額？"), t("只按實際帳單總額分帳，商品小計、服務費和折扣不會套用。"), [
+        { text: t("取消"), style: "cancel" },
+        { text: t("改用實付總額"), onPress: () => setField("chargeMode", "finalTotal") },
       ]);
     } else {
-      Alert.alert("改按費用明細計算？", "實際帳單總額會用作核對。請另填未計服務費及折扣的商品小計。", [
-        { text: "取消", style: "cancel" },
-        { text: "按明細計算", onPress: () => setField("chargeMode", "details") },
+      Alert.alert(t("改按費用明細計算？"), t("實際帳單總額會用作核對。請另填未計服務費及折扣的商品小計。"), [
+        { text: t("取消"), style: "cancel" },
+        { text: t("按明細計算"), onPress: () => setField("chargeMode", "details") },
       ]);
     }
   }
 
   function confirmDiscard() {
-    Alert.alert("放棄草稿？", "目前的輸入會清除，你可以重新開始。", [
-      { text: "取消", style: "cancel" },
-      { text: "放棄草稿", style: "destructive", onPress: () => {
+    Alert.alert(t("放棄草稿？"), t("目前的輸入會清除，你可以重新開始。"), [
+      { text: t("取消"), style: "cancel" },
+      { text: t("放棄草稿"), style: "destructive", onPress: () => {
         setValidation(undefined);
         setShowCurrencies(false);
         discard();
@@ -187,7 +188,7 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
 
   function viewResult() {
     Keyboard.dismiss();
-    const result = calculateQuickSplitEditor(editor, hasProAccess());
+    const result = calculateQuickSplitEditor(editor, hasProAccess(), language);
     if (result.ok) {
       setValidation(undefined);
       onResult(result.value);
@@ -200,19 +201,19 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
 
   const memberChoices = (selectedId: string | undefined, select: (id: string) => void) =>
     editor.members.map((member, index) => (
-      <Choice key={member.id} label={editorMemberName(member, index)} selected={selectedId === member.id} onPress={() => select(member.id)} />
+      <Choice key={member.id} label={editorMemberName(member, index, language)} selected={selectedId === member.id} onPress={() => select(member.id)} />
     ));
 
   return (
     <KeyboardAvoidingView style={styles.screen} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={top}>
       <View style={styles.header} onLayout={({ nativeEvent }) => { chrome.current.header = nativeEvent.layout.height; }}>
-        <Pressable accessibilityRole="button" accessibilityLabel="返回首頁" onPress={onBack} style={styles.back}>
+        <Pressable accessibilityRole="button" accessibilityLabel={t("返回首頁")} onPress={onBack} style={styles.back}>
           <Icon name="back" size={23} />
         </Pressable>
-        <Text accessibilityRole="header" style={styles.title}>快速分帳</Text>
+        <Text accessibilityRole="header" style={styles.title}>{t("快速分帳")}</Text>
         {editable ? (
           <Pressable accessibilityRole="button" onPress={confirmDiscard} style={styles.headerAction}>
-            <Text style={styles.actionText}>放棄草稿</Text>
+            <Text style={[styles.actionText, styles.headerActionText]}>{t("放棄草稿")}</Text>
           </Pressable>
         ) : <View style={styles.headerSpacer} />}
       </View>
@@ -226,27 +227,27 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
         {busy && (
           <View style={styles.notice}>
             <ActivityIndicator color={colors.accentText} />
-            <Text accessibilityLiveRegion="polite" style={styles.caption}>{loading ? "正在讀取草稿…" : "正在清除草稿…"}</Text>
+            <Text accessibilityLiveRegion="polite" style={styles.caption}>{loading ? t("正在讀取草稿…") : t("正在清除草稿…")}</Text>
           </View>
         )}
         {draftError && (
           <View style={styles.notice}>
-            <InlineError message={draftError === "load" ? "未能讀取草稿，請重試。"
-              : draftError === "discard" ? "未能清除草稿，請重試。" : "未能儲存草稿。輸入仍在此頁，你可以重試。"} />
+            <InlineError message={draftError === "load" ? t("未能讀取草稿，請重試。")
+              : draftError === "discard" ? t("未能清除草稿，請重試。") : t("未能儲存草稿。輸入仍在此頁，你可以重試。")} />
             <Pressable accessibilityRole="button" onPress={retry} style={styles.textButton}>
-              <Text style={styles.actionText}>重試</Text>
+              <Text style={styles.actionText}>{t("重試")}</Text>
             </Pressable>
           </View>
         )}
         {editable && (
           <View style={styles.form}>
             <View onLayout={({ nativeEvent }) => { offsets.current.total = nativeEvent.layout.y; }}>
-              <Section title="實際帳單總額">
-                <Text style={styles.caption}>{details ? "用作核對按明細計算的結果。" : "輸入已包含服務費及折扣的最終實付金額。"}</Text>
+              <Section title={t("實際帳單總額")}>
+                <Text style={styles.caption}>{details ? t("用作核對按明細計算的結果。") : t("輸入已包含服務費及折扣的最終實付金額。")}</Text>
                 <View style={styles.amountRow}>
                   <Pressable
                     accessibilityRole="button"
-                    accessibilityLabel={`幣種 ${editor.currency}`}
+                    accessibilityLabel={t("幣種 {0}", editor.currency)}
                     accessibilityState={{ expanded: showCurrencies }}
                     onPress={() => {
                       Keyboard.dismiss();
@@ -258,7 +259,7 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
                     <Icon name="down" size={15} color={colors.muted} />
                   </Pressable>
                   <TextInput
-                    accessibilityLabel="實際帳單總額"
+                    accessibilityLabel={t("實際帳單總額")}
                     inputMode="decimal"
                     placeholder={amountPlaceholder}
                     placeholderTextColor={colors.muted}
@@ -272,25 +273,25 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
               </Section>
             </View>
 
-            <Section title="分帳方式">
+            <Section title={t("分帳方式")}>
               <SplitModeSelector mode={editor.mode} onSelect={(mode) => setField("mode", mode)} />
             </Section>
 
             <View onLayout={({ nativeEvent }) => { offsets.current.members = nativeEvent.layout.y; }}>
-              <Section title="參與成員">
+              <Section title={t("參與成員")}>
                 <Text style={styles.caption}>
-                  {editor.mode === "equal" ? "勾選要平均分攤的人。未填姓名時會使用臨時名稱。" : "未填姓名時會使用臨時名稱。"}
+                  {editor.mode === "equal" ? t("勾選要平均分攤的人。未填姓名時會使用臨時名稱。") : t("未填姓名時會使用臨時名稱。")}
                 </Text>
                 {editor.members.map((member, index) => {
-                  const name = editorMemberName(member, index);
+                  const name = editorMemberName(member, index, language);
                   return (
                     <View key={member.id} style={styles.member}>
                       <View style={styles.memberRow}>
                         {(editor.mode === "equal" || editor.mode === "custom") && (
                           <Pressable
                             accessibilityRole="checkbox"
-                            accessibilityLabel={editor.mode === "equal" ? `${name}參與平均分攤`
-                              : language === "en" ? `Include ${name}` : `${name}參與分攤`}
+                            accessibilityLabel={editor.mode === "equal" ? t("{0}參與平均分攤", name)
+                              : language === "en" ? `Include ${name}` : t("{0}參與分攤", name)}
                             accessibilityState={{ checked: member.included }}
                             onPress={() => setMember(member.id, { included: !member.included })}
                             style={styles.iconButton}
@@ -301,7 +302,7 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
                           </Pressable>
                         )}
                         <TextInput
-                          accessibilityLabel={`成員 ${index + 1} 姓名`}
+                          accessibilityLabel={t("成員 {0} 姓名", index + 1)}
                           value={member.displayName}
                           onFocus={onInputFocus}
                           onChangeText={(displayName) => setMember(member.id, { displayName })}
@@ -310,14 +311,14 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
                           style={[styles.input, styles.nameInput]}
                         />
                         {editor.members.length > 1 && (
-                          <Pressable accessibilityRole="button" accessibilityLabel={`移除${name}`}
+                          <Pressable accessibilityRole="button" accessibilityLabel={t("移除{0}", name)}
                             onPress={() => apply((current) => removeEditorMember(current, member.id))} style={styles.iconButton}>
                             <Icon name="minus" size={19} color={colors.muted} />
                           </Pressable>
                         )}
                       </View>
                       {editor.mode === "individual" && !editor.itemized && (
-                        <Field label={`${name}的個人消費`} value={member.personalAmount}
+                        <Field label={t("{0}的個人消費", name)} value={member.personalAmount}
                           onChangeText={(personalAmount) => setMember(member.id, { personalAmount })}
                           placeholder={amountPlaceholder} error={amountError("personalAmount", member.personalAmount, member.id)} onFocus={onInputFocus} />
                       )}
@@ -326,43 +327,43 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
                 })}
                 <Pressable accessibilityRole="button" onPress={() => apply(addEditorMember)} style={styles.textButton}>
                   <Icon name="plus" size={19} color={colors.accentText} />
-                  <Text style={styles.actionText}>新增成員</Text>
+                  <Text style={styles.actionText}>{t("新增成員")}</Text>
                 </Pressable>
                 <InlineError message={fieldError("members")} />
 
                 {editor.mode === "treat" && (
                   <View style={styles.subsection}>
-                    <Text style={styles.label}>請客者</Text>
+                    <Text style={styles.label}>{t("請客者")}</Text>
                     <View accessibilityRole="radiogroup" style={styles.choices}>
                       {memberChoices(editor.hostId, (id) => setField("hostId", id))}
                     </View>
                     <InlineError message={fieldError("hostId")} />
                     <View accessibilityRole="radiogroup" style={styles.choices}>
-                      <Choice label="固定金額" selected={editor.coverKind === "fixed"} onPress={() => setField("coverKind", "fixed")} />
-                      <Choice label="按百分比" selected={editor.coverKind === "percentage"} onPress={() => setField("coverKind", "percentage")} />
+                      <Choice label={t("固定金額")} selected={editor.coverKind === "fixed"} onPress={() => setField("coverKind", "fixed")} />
+                      <Choice label={t("按百分比")} selected={editor.coverKind === "percentage"} onPress={() => setField("coverKind", "percentage")} />
                     </View>
                     {editor.coverKind === "fixed"
-                      ? <Field label="請客金額" value={editor.coverAmount} onChangeText={(value) => setField("coverAmount", value)}
+                      ? <Field label={t("請客金額")} value={editor.coverAmount} onChangeText={(value) => setField("coverAmount", value)}
                           placeholder={amountPlaceholder} error={amountError("coverAmount", editor.coverAmount)} onFocus={onInputFocus} />
-                      : <Field label="請客百分比（%）" value={editor.coverPercentage} onChangeText={(value) => setField("coverPercentage", value)}
+                      : <Field label={t("請客百分比（%）")} value={editor.coverPercentage} onChangeText={(value) => setField("coverPercentage", value)}
                           placeholder="0–100" error={fieldError("coverPercentage")} onFocus={onInputFocus} />}
                     <View style={styles.switchRow}>
-                      <Text style={[styles.label, styles.flex]}>請客者也分攤餘額</Text>
-                      <Switch accessibilityLabel="請客者也分攤餘額" value={editor.includeHostInRemainder}
+                      <Text style={[styles.label, styles.flex]}>{t("請客者也分攤餘額")}</Text>
+                      <Switch accessibilityLabel={t("請客者也分攤餘額")} value={editor.includeHostInRemainder}
                         trackColor={{ true: colors.accent }} onValueChange={(value) => setField("includeHostInRemainder", value)} />
                     </View>
-                    <Text style={styles.caption}>餘額由其他成員平均分攤，亦可讓請客者一起分攤。</Text>
+                    <Text style={styles.caption}>{t("餘額由其他成員平均分攤，亦可讓請客者一起分攤。")}</Text>
                   </View>
                 )}
 
                 {editor.mode === "individual" && !editor.itemized && (
                   <View style={styles.subsection}>
-                    <Field label="公共消費總額" value={editor.sharedAmount} onChangeText={(value) => setField("sharedAmount", value)}
+                    <Field label={t("公共消費總額")} value={editor.sharedAmount} onChangeText={(value) => setField("sharedAmount", value)}
                       placeholder={amountPlaceholder} error={amountError("sharedAmount", editor.sharedAmount)} onFocus={onInputFocus} />
-                    <Text style={styles.label}>公共消費參與者</Text>
+                    <Text style={styles.label}>{t("公共消費參與者")}</Text>
                     <View style={styles.choices}>
                       {editor.members.map((member, index) => (
-                        <Choice key={member.id} label={editorMemberName(member, index)} multiple
+                        <Choice key={member.id} label={editorMemberName(member, index, language)} multiple
                           selected={member.shareCommon} onPress={() => setMember(member.id, { shareCommon: !member.shareCommon })} />
                       ))}
                     </View>
@@ -377,34 +378,34 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
             </View>
 
             <View onLayout={({ nativeEvent }) => { offsets.current.details = nativeEvent.layout.y; }}>
-              <Section title="費用明細（選填）">
+              <Section title={t("費用明細（選填）")}>
                 <Pressable accessibilityRole="button" onPress={confirmChargeMode} style={styles.textButton}>
                   <Icon name={details ? "receipt" : "plus"} size={19} color={colors.accentText} />
-                  <Text style={styles.actionText}>{details ? "改用實付總額" : "按明細計算"}</Text>
+                  <Text style={styles.actionText}>{details ? t("改用實付總額") : t("按明細計算")}</Text>
                 </Pressable>
                 {details ? (
                   <>
-                    <Field label="商品小計" value={editor.subtotal} onChangeText={(value) => setField("subtotal", value)}
+                    <Field label={t("商品小計")} value={editor.subtotal} onChangeText={(value) => setField("subtotal", value)}
                       placeholder={amountPlaceholder} error={amountError("subtotal", editor.subtotal)} onFocus={onInputFocus} />
-                    <Field label="固定折扣（選填）" value={editor.discount} onChangeText={(value) => setField("discount", value)}
+                    <Field label={t("固定折扣（選填）")} value={editor.discount} onChangeText={(value) => setField("discount", value)}
                       placeholder={amountPlaceholder} error={amountError("discount", editor.discount)} onFocus={onInputFocus} />
-                    <Text style={styles.label}>服務費</Text>
+                    <Text style={styles.label}>{t("服務費")}</Text>
                     <View accessibilityRole="radiogroup" style={styles.choices}>
-                      <Choice label="無" selected={editor.serviceFeeMode === "none"} onPress={() => setField("serviceFeeMode", "none")} />
-                      <Choice label="實際金額" selected={editor.serviceFeeMode === "manual"} onPress={() => setField("serviceFeeMode", "manual")} />
-                      <Choice label="快捷 10%" selected={editor.serviceFeeMode === "quick10"} onPress={() => setField("serviceFeeMode", "quick10")} />
+                      <Choice label={t("無")} selected={editor.serviceFeeMode === "none"} onPress={() => setField("serviceFeeMode", "none")} />
+                      <Choice label={t("實際金額")} selected={editor.serviceFeeMode === "manual"} onPress={() => setField("serviceFeeMode", "manual")} />
+                      <Choice label={t("快捷 10%")} selected={editor.serviceFeeMode === "quick10"} onPress={() => setField("serviceFeeMode", "quick10")} />
                     </View>
                     {editor.serviceFeeMode === "manual" && (
-                      <Field label="實際服務費" value={editor.serviceFee} onChangeText={(value) => setField("serviceFee", value)}
+                      <Field label={t("實際服務費")} value={editor.serviceFee} onChangeText={(value) => setField("serviceFee", value)}
                         placeholder={amountPlaceholder} error={amountError("serviceFee", editor.serviceFee)} onFocus={onInputFocus} />
                     )}
                     {editor.serviceFeeMode === "quick10" && (
                       <>
-                        <Text style={styles.label}>服務費計算基準</Text>
+                        <Text style={styles.label}>{t("服務費計算基準")}</Text>
                         <View accessibilityRole="radiogroup" style={styles.choices}>
-                          <Choice label="折扣前小計" selected={editor.serviceFeeBasis === "beforeDiscount"}
+                          <Choice label={t("折扣前小計")} selected={editor.serviceFeeBasis === "beforeDiscount"}
                             onPress={() => setField("serviceFeeBasis", "beforeDiscount")} />
-                          <Choice label="折扣後小計" selected={editor.serviceFeeBasis === "afterDiscount"}
+                          <Choice label={t("折扣後小計")} selected={editor.serviceFeeBasis === "afterDiscount"}
                             onPress={() => setField("serviceFeeBasis", "afterDiscount")} />
                         </View>
                       </>
@@ -414,15 +415,15 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
                       ? editor.members.filter(({ included }) => included) : editor.members}
                       update={(patch) => apply((current) => ({ ...current, ...patch }))} error={fieldError} />
                   </>
-                ) : <Text style={styles.caption}>目前按實付總額分帳。</Text>}
+                ) : <Text style={styles.caption}>{t("目前按實付總額分帳。")}</Text>}
               </Section>
             </View>
 
             <View onLayout={({ nativeEvent }) => { offsets.current.payer = nativeEvent.layout.y; }}>
-              <Section title="誰先付款？（選填）">
-                <Text style={styles.caption}>可指定一位實際向商家付款的成員。未指定仍可試算。</Text>
+              <Section title={t("誰先付款？（選填）")}>
+                <Text style={styles.caption}>{t("可指定一位實際向商家付款的成員。未指定仍可試算。")}</Text>
                 <View accessibilityRole="radiogroup" style={styles.choices}>
-                  <Choice label="未指定" selected={editor.merchantPayerId === undefined} onPress={() => setField("merchantPayerId", undefined)} />
+                  <Choice label={t("未指定")} selected={editor.merchantPayerId === undefined} onPress={() => setField("merchantPayerId", undefined)} />
                   {memberChoices(editor.merchantPayerId, (id) => setField("merchantPayerId", id))}
                 </View>
                 <InlineError message={fieldError("merchantPayerId")} />
@@ -439,7 +440,7 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
           onPress={viewResult}
           style={({ pressed }) => [styles.resultButton, (pressed || !editable) && styles.pressed]}
         >
-          <Text style={styles.resultText}>查看結果</Text>
+          <Text style={styles.resultText}>{t("查看結果")}</Text>
         </Pressable>
       </View>
       {showCurrencies && (
@@ -463,8 +464,9 @@ const styles = StyleSheet.create({
     alignItems: "center", paddingHorizontal: 12, gap: 8,
   },
   back: { flex: 1, minHeight: 44, alignItems: "flex-start", justifyContent: "center", paddingLeft: 4 },
-  title: { color: colors.ink, fontWeight: "700", fontSize: 19, textAlign: "center" },
+  title: { color: colors.ink, fontWeight: "700", fontSize: 19, textAlign: "center", flexShrink: 1 },
   headerAction: { flex: 1, minHeight: 44, justifyContent: "center", alignItems: "flex-end", paddingRight: 4 },
+  headerActionText: { maxWidth: "100%", textAlign: "right" },
   headerSpacer: { flex: 1 },
   scroll: { flex: 1 },
   content: { width: "100%", maxWidth: 620, alignSelf: "center", paddingHorizontal: 18, paddingTop: 8, paddingBottom: 20, gap: 14 },
@@ -516,6 +518,6 @@ const styles = StyleSheet.create({
     width: "100%", maxWidth: 584, alignSelf: "center", minHeight: 52, borderRadius: 14, backgroundColor: colors.primary,
     alignItems: "center", justifyContent: "center", paddingHorizontal: 12, paddingVertical: 9,
   },
-  resultText: { color: colors.onPrimary, fontSize: 17, fontWeight: "700" },
+  resultText: { color: colors.onPrimary, fontSize: 17, fontWeight: "700", textAlign: "center" },
   pressed: { opacity: 0.65 },
 });

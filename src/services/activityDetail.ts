@@ -1,3 +1,5 @@
+import type { AppLanguage } from "./appPreferences.ts";
+import { copyFor } from "./localizedCopy.ts";
 import { createActivityRepository, type ActivityDetail } from "../data/activities.ts";
 import type { LocalDatabase } from "../data/database.ts";
 import { createFinanceRepository, projectCurrentExpenses, type FinanceExpense } from "../data/finance.ts";
@@ -36,7 +38,8 @@ export type ActivityDetailData = {
   readonly outstandingMinor: bigint;
 };
 
-export function loadActivityDetail(activityId: string, database?: LocalDatabase): Promise<ActivityDetailData | null> {
+export function loadActivityDetail(activityId: string, database?: LocalDatabase, language: AppLanguage = "zh-HK"): Promise<ActivityDetailData | null> {
+  const t = copyFor(language);
   return withActivityReadSnapshot(database, async (snapshot) => {
     const activity = await createActivityRepository(snapshot).getActivity(activityId);
     if (!activity) return null;
@@ -45,15 +48,15 @@ export function loadActivityDetail(activityId: string, database?: LocalDatabase)
 
     const { events, revisions, balanceSnapshot } = result.value;
     const memberNames = new Map(activity.members.map(({ id, displayName }) => [id, displayName]));
-    const memberName = (id: string) => memberNames.get(id) ?? "未知成員";
+    const memberName = (id: string) => memberNames.get(id) ?? t("未知成員");
     const effectiveByExpense = new Map(balanceSnapshot.effectiveExpenses.map((expense) => [expense.expenseId, expense.effectiveTotalMinor]));
     const expenses = projectCurrentExpenses(events, revisions).map(({ expense, occurredAt }, index): ActivityExpenseRow => {
       const grossMinor = expense.split.total.amountMinor;
       const effectiveMinor = effectiveByExpense.get(expense.id);
       if (effectiveMinor === undefined) throw new Error("Missing effective expense in the activity ledger");
       return {
-        id: expense.id, name: expense.name ?? `費用 ${index + 1}`, occurredAt: expense.expenseDate ?? occurredAt, splitMode: expense.splitMode,
-        payerName: merchantPaymentsOf(expense).map(({ memberId }) => memberName(memberId)).join("、"), grossMinor, effectiveMinor,
+        id: expense.id, name: expense.name ?? t("費用 {0}", index + 1), occurredAt: expense.expenseDate ?? occurredAt, splitMode: expense.splitMode,
+        payerName: merchantPaymentsOf(expense).map(({ memberId }) => memberName(memberId)).join(language === "en" ? ", " : "、"), grossMinor, effectiveMinor,
         refundMinor: grossMinor - effectiveMinor,
       };
     });
@@ -64,25 +67,25 @@ export function loadActivityDetail(activityId: string, database?: LocalDatabase)
       const { occurredAt, sequence } = event;
       if (event.kind === "merchantRefund") {
         history.push({
-          id: `refund:${event.id}`, label: "商家退款", description: `${expenseNames.get(event.expenseId) ?? "費用"} · ${memberName(event.recipientId)}收取`,
+          id: `refund:${event.id}`, label: t("商家退款"), description: t("{0} · {1}收取", expenseNames.get(event.expenseId) ?? t("費用"), memberName(event.recipientId)),
           occurredAt, sequence, amountMinor: event.amountMinor, voided: voided.has(event.id),
         });
       } else if (event.kind === "memberTransfer") {
         history.push({
-          id: `transfer:${event.id}`, label: "成員還款",
+          id: `transfer:${event.id}`, label: t("成員還款"),
           description: `${memberName(event.fromMemberId)} → ${memberName(event.toMemberId)}${event.note ? ` · ${event.note}` : ""}`,
           occurredAt, sequence, amountMinor: event.amountMinor, voided: voided.has(event.id),
         });
       } else if (event.kind === "financialVoid") {
         history.push({
-          id: `void:${event.id}`, label: event.targetKind === "merchantRefund" ? "作廢商家退款" : "作廢成員還款",
+          id: `void:${event.id}`, label: event.targetKind === "merchantRefund" ? t("作廢商家退款") : t("作廢成員還款"),
           description: event.reason ?? "", occurredAt, sequence,
         });
       }
     }
     for (const revision of revisions) {
       history.push({
-        id: `revision:${revision.id}`, label: "費用修訂", description: expenseNames.get(revision.expense.id) ?? "費用",
+        id: `revision:${revision.id}`, label: t("費用修訂"), description: expenseNames.get(revision.expense.id) ?? t("費用"),
         occurredAt: revision.occurredAt, sequence: revision.sequence, amountMinor: revision.expense.split.total.amountMinor,
       });
     }

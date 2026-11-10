@@ -1,3 +1,6 @@
+import { formatUiDate, splitModeLabel } from "../services/localizedCopy.ts";
+import type { Copy } from "../services/localizedCopy.ts";
+import { useCopy } from "./useCopy.ts";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import {
   ActivityIndicator, Alert, AppState, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View,
@@ -10,12 +13,9 @@ import { ActivityQuotaSheet } from "./ActivityQuotaSheet.tsx";
 import { usePro } from "./ProContext.ts";
 import { colors, EmptyActivityMark, Icon, type IconName } from "./visuals.tsx";
 
-const dateFormatter = new Intl.DateTimeFormat("zh-HK", { year: "numeric", month: "long", day: "numeric" });
-const splitLabels = { equal: "平均分攤", treat: "請客", individual: "各自消費", custom: "自訂分攤" } as const;
 
-function displayDate(timestamp: number) {
-  const date = new Date(timestamp);
-  return Number.isNaN(date.getTime()) ? "日期未能讀取" : dateFormatter.format(date);
+function displayDate(t: Copy, timestamp: number) {
+  return formatUiDate(t, timestamp);
 }
 
 function Action({ title, onPress, icon, primary, disabled }: {
@@ -60,6 +60,7 @@ export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAdd
   onManageMembers: () => void;
   onViewSettlement: (tab?: "transfers") => void;
 }) {
+  const t = useCopy();
   const { hasProAccess } = usePro();
   const [data, setData] = useState<ActivityDetailData | null>();
   const [loading, setLoading] = useState(true);
@@ -77,14 +78,14 @@ export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAdd
     setLoading(true);
     setLoadError(false);
     try {
-      const next = await loadActivityDetail(activityId);
+      const next = await loadActivityDetail(activityId, undefined, t.language);
       if (latest.current === request) setData(next);
     } catch {
       if (latest.current === request) setLoadError(true);
     } finally {
       if (latest.current === request) setLoading(false);
     }
-  }, [activityId]);
+  }, [activityId, t]);
 
   useLayoutEffect(() => {
     mounted.current = true;
@@ -115,7 +116,7 @@ export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAdd
     } catch (error) {
       if (mounted.current) {
         if (error instanceof ActiveActivityLimitError) setBlocker(error.blocker);
-        else setActionError(completing ? "未能完成活動，請重新讀取後再試。" : "未能重新開啟活動，請重新讀取後再試。");
+        else setActionError(completing ? t("未能完成活動，請重新讀取後再試。") : t("未能重新開啟活動，請重新讀取後再試。"));
       }
     } finally {
       pending.current = false;
@@ -125,9 +126,9 @@ export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAdd
 
   function confirmCompletion() {
     if (pending.current) return;
-    Alert.alert("將活動標記為已完成？", "活動完成後仍可查看帳務及記錄還款。現有費用、還款及結算餘額會保留。", [
-      { text: "取消", style: "cancel" },
-      { text: "完成活動", onPress: () => { void changeStatus(true); } },
+    Alert.alert(t("將活動標記為已完成？"), t("活動完成後仍可查看帳務及記錄還款。現有費用、還款及結算餘額會保留。"), [
+      { text: t("取消"), style: "cancel" },
+      { text: t("完成活動"), onPress: () => { void changeStatus(true); } },
     ]);
   }
 
@@ -139,12 +140,12 @@ export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAdd
   return (
     <View style={styles.screen}>
       <View style={styles.header}>
-        <Pressable accessibilityRole="button" accessibilityLabel="返回" onPress={onBack} style={styles.headerLeft}>
+        <Pressable accessibilityRole="button" accessibilityLabel={t("返回")} onPress={onBack} style={styles.headerLeft}>
           <Icon name="back" size={23} />
         </Pressable>
-        <Text accessibilityRole="header" style={styles.headerTitle}>活動詳情</Text>
+        <Text accessibilityRole="header" style={styles.headerTitle}>{t("活動詳情")}</Text>
         <View style={styles.headerRight}>
-          {active && <Pressable accessibilityRole="button" accessibilityLabel="完成活動" disabled={working}
+          {active && <Pressable accessibilityRole="button" accessibilityLabel={t("完成活動")} disabled={working}
             onPress={confirmCompletion} style={styles.iconButton}><Icon name="more" size={24} /></Pressable>}
         </View>
       </View>
@@ -152,59 +153,59 @@ export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAdd
         style={styles.screen} contentContainerStyle={styles.content}
         refreshControl={<RefreshControl refreshing={loading && data != null} onRefresh={reload} tintColor={colors.ink} />}
       >
-        {loading && data == null && <View style={styles.inline}><ActivityIndicator color={colors.ink} /><Text style={styles.caption}>正在讀取活動…</Text></View>}
+        {loading && data == null && <View style={styles.inline}><ActivityIndicator color={colors.ink} /><Text style={styles.caption}>{t("正在讀取活動…")}</Text></View>}
         {(loadError || actionError) && (
           <View style={[styles.card, styles.inset]}>
-            <Text accessibilityRole="alert" style={styles.error}>{actionError ?? (data ? "未能更新活動，目前顯示上次讀取的資料。" : "未能讀取活動。")}</Text>
+            <Text accessibilityRole="alert" style={styles.error}>{actionError ?? (data ? t("未能更新活動，目前顯示上次讀取的資料。") : t("未能讀取活動。"))}</Text>
             <Pressable accessibilityRole="button" style={styles.textButton} onPress={() => { setActionError(undefined); void reload(); }}>
-              <Text style={styles.link}>重新讀取</Text>
+              <Text style={styles.link}>{t("重新讀取")}</Text>
             </Pressable>
           </View>
         )}
-        {data === null && !loading && !loadError && <Text style={styles.caption}>找不到這個活動。</Text>}
+        {data === null && !loading && !loadError && <Text style={styles.caption}>{t("找不到這個活動。")}</Text>}
         {data && (
           <>
             <View style={styles.hero}>
               <View style={styles.amountRow}>
                 <Text style={styles.activityName}>{data.activity.name}</Text>
-                <Text style={styles.badge}>{active ? "進行中" : "已完成"}</Text>
+                <Text style={styles.badge}>{active ? t("進行中") : t("已完成")}</Text>
               </View>
               <View style={styles.inline}>
                 <Icon name="calendar" size={16} />
-                <Text style={styles.caption}>{displayDate(data.activity.createdAt)} · {data.activity.currency}</Text>
+                <Text style={styles.caption}>{displayDate(t, data.activity.createdAt)} · {data.activity.currency}</Text>
               </View>
             </View>
             <View style={[styles.card, styles.metrics]}>
-              <View style={styles.metric}><Text style={styles.metricValue}>{data.activity.members.length}</Text><Text style={styles.caption}>成員</Text></View>
-              <View style={[styles.metric, styles.metricDivider]}><Text style={styles.metricValue}>{data.expenses.length}</Text><Text style={styles.caption}>費用</Text></View>
+              <View style={styles.metric}><Text style={styles.metricValue}>{data.activity.members.length}</Text><Text style={styles.caption}>{t("成員")}</Text></View>
+              <View style={[styles.metric, styles.metricDivider]}><Text style={styles.metricValue}>{data.expenses.length}</Text><Text style={styles.caption}>{t("費用")}</Text></View>
               <View style={[styles.metric, styles.metricAmount, styles.metricDivider]}>
-                <Text style={[styles.metricValue, styles.number]}>{money(data.effectiveMinor)}</Text><Text style={styles.caption}>有效總額</Text>
+                <Text style={[styles.metricValue, styles.number]}>{money(data.effectiveMinor)}</Text><Text style={styles.caption}>{t("有效總額")}</Text>
               </View>
             </View>
             <View style={[styles.summary, styles.inset]}>
-              <AmountLine title="原始支出（退款前）" value={money(data.grossMinor)} />
-              <AmountLine title="有效商家退款" value={`${data.refundMinor > 0n ? "− " : ""}${money(data.refundMinor)}`} />
-              <AmountLine title="有效總額" value={money(data.effectiveMinor)} strong />
+              <AmountLine title={t("原始支出（退款前）")} value={money(data.grossMinor)} />
+              <AmountLine title={t("有效商家退款")} value={`${data.refundMinor > 0n ? "− " : ""}${money(data.refundMinor)}`} />
+              <AmountLine title={t("有效總額")} value={money(data.effectiveMinor)} strong />
             </View>
 
             <View style={[styles.summary, styles.inset]}>
               <View style={styles.amountRow}>
                 <View style={styles.stateCopy}>
-                  <Text style={styles.strong}>{!hasExpenses ? "暫無財務紀錄"
-                    : hasOutstanding ? (active ? "款項尚未結清" : "活動已完成 · 款項尚未結清") : "已結清"}</Text>
-                  <Text style={styles.caption}>{!hasExpenses ? "新增費用後會更新結算資料。"
-                    : hasOutstanding ? `待結算 ${money(data.outstandingMinor)}` : "各成員目前淨額為零。"}</Text>
+                  <Text style={styles.strong}>{!hasExpenses ? t("暫無財務紀錄")
+                    : hasOutstanding ? (active ? t("款項尚未結清") : t("活動已完成 · 款項尚未結清")) : t("已結清")}</Text>
+                  <Text style={styles.caption}>{!hasExpenses ? t("新增費用後會更新結算資料。")
+                    : hasOutstanding ? t("待結算 {0}", money(data.outstandingMinor)) : t("各成員目前淨額為零。")}</Text>
                 </View>
                 <Pressable accessibilityRole="button" style={styles.textButton} onPress={() => onViewSettlement()}>
-                  <Text style={styles.link}>查看結算</Text><Icon name="next" size={14} />
+                  <Text style={styles.link}>{t("查看結算")}</Text><Icon name="next" size={14} />
                 </Pressable>
               </View>
             </View>
 
-            <Section title={`成員（${data.activity.members.length}）`} action={
-              <Pressable accessibilityRole="button" accessibilityLabel="管理活動成員" disabled={working}
+            <Section title={t("成員（{0}）", data.activity.members.length)} action={
+              <Pressable accessibilityRole="button" accessibilityLabel={t("管理活動成員")} disabled={working}
                 onPress={onManageMembers} hitSlop={8} style={styles.manageButton}>
-                <Text style={styles.link}>管理</Text><Icon name="next" size={14} />
+                <Text style={styles.link}>{t("管理")}</Text><Icon name="next" size={14} />
               </Pressable>
             }>
               <View style={styles.card}>
@@ -215,33 +216,33 @@ export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAdd
                       <View style={styles.tile}><Icon name="member" size={17} /></View>
                       <Text style={[styles.strong, styles.fill]}>{displayName}</Text>
                       {hasExpenses && net !== undefined && <Text style={[styles.caption, styles.number]}>
-                        {net === 0 ? "淨額 " : net > 0 ? "應收 " : "應付 "}{money(Math.abs(net))}
+                        {net === 0 ? t("淨額 ") : net > 0 ? t("應收 ") : t("應付 ")}{money(Math.abs(net))}
                       </Text>}
                     </View>
                   );
                 })}
               </View>
             </Section>
-            <Section title={`費用（${data.expenses.length}）`}>
+            <Section title={t("費用（{0}）", data.expenses.length)}>
               {hasExpenses ? (
                 <>
                   <View style={styles.card}>
                     {data.expenses.map((expense, index) => (
-                      <Pressable key={expense.id} accessibilityRole="button" accessibilityHint="開啟費用詳情"
+                      <Pressable key={expense.id} accessibilityRole="button" accessibilityHint={t("開啟費用詳情")}
                         onPress={() => onViewExpense(expense.id)}
                         style={({ pressed }) => [styles.row, index > 0 && styles.divider, pressed && styles.pressed]}>
                         <View style={styles.tile}><Icon name="receipt" size={17} /></View>
                         <View style={styles.fill}>
                           <View style={styles.expenseTitle}>
                             <Text style={styles.strong}>{expense.name}</Text>
-                            {expense.refundMinor > 0 && <Text style={styles.refundBadge}>有退款</Text>}
+                            {expense.refundMinor > 0 && <Text style={styles.refundBadge}>{t("有退款")}</Text>}
                           </View>
-                          <Text style={styles.caption}>{expense.payerName} 付款 · {splitLabels[expense.splitMode]}</Text>
-                          <Text style={styles.caption}>{displayDate(expense.occurredAt)}</Text>
+                          <Text style={styles.caption}>{expense.payerName}{" " + t("付款 ·") + " "}{splitModeLabel(t, expense.splitMode)}</Text>
+                          <Text style={styles.caption}>{displayDate(t, expense.occurredAt)}</Text>
                         </View>
                         <View style={styles.expenseMoney}>
                           <Text style={[styles.strong, styles.number]}>{money(expense.effectiveMinor)}</Text>
-                          <Text style={styles.caption}>有效金額</Text>
+                          <Text style={styles.caption}>{t("有效金額")}</Text>
                         </View>
                         <Icon name="next" size={16} color={colors.muted} />
                       </Pressable>
@@ -251,8 +252,8 @@ export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAdd
               ) : (
                 <View style={[styles.card, styles.empty]}>
                   <EmptyActivityMark />
-                  <Text style={styles.strong}>尚未新增任何費用</Text>
-                  <Text style={styles.caption}>{active ? "開始記錄本次活動的共同費用。" : "這個活動沒有費用紀錄。"}</Text>
+                  <Text style={styles.strong}>{t("尚未新增任何費用")}</Text>
+                  <Text style={styles.caption}>{active ? t("開始記錄本次活動的共同費用。") : t("這個活動沒有費用紀錄。")}</Text>
                 </View>
               )}
             </Section>
@@ -261,15 +262,15 @@ export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAdd
               <View style={styles.section}>
                 <Pressable accessibilityRole="button" accessibilityState={{ expanded: showHistory }} onPress={() => setShowHistory(!showHistory)}
                   style={styles.textButton}>
-                  <Text style={styles.sectionTitle}>財務紀錄（{data.history.length}）</Text>
+                  <Text style={styles.sectionTitle}>{t("財務紀錄（{0}）", data.history.length)}</Text>
                   <Icon name={showHistory ? "down" : "next"} size={16} />
                 </Pressable>
                 {showHistory && <View style={styles.card}>
                   {data.history.map((event, index) => (
                     <View key={event.id} style={[styles.row, index > 0 && styles.divider]}>
                       <View style={styles.fill}>
-                        <Text style={styles.strong}>{event.label}{event.voided ? " · 已作廢" : ""}</Text>
-                        <Text style={styles.caption}>{displayDate(event.occurredAt)}{event.description ? ` · ${event.description}` : ""}</Text>
+                        <Text style={styles.strong}>{event.label}{event.voided ? t(" · 已作廢") : ""}</Text>
+                        <Text style={styles.caption}>{displayDate(t, event.occurredAt)}{event.description ? ` · ${event.description}` : ""}</Text>
                       </View>
                       {event.amountMinor !== undefined && <Text style={[styles.text, styles.number]}>{money(event.amountMinor)}</Text>}
                     </View>
@@ -285,13 +286,13 @@ export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAdd
           <View style={styles.footerActions}>
             {active ? (
               <>
-                {hasExpenses && <Action title="查看結算" onPress={() => onViewSettlement()} />}
-                <Action title="新增費用" icon="plus" primary onPress={onAddExpense} disabled={working} />
+                {hasExpenses && <Action title={t("查看結算")} onPress={() => onViewSettlement()} />}
+                <Action title={t("新增費用")} icon="plus" primary onPress={onAddExpense} disabled={working} />
               </>
             ) : (
               <>
-                <Action title={working ? "正在處理…" : "重新開啟"} disabled={working} onPress={() => { void changeStatus(false); }} />
-                {hasExpenses && <Action title={hasOutstanding ? "記錄還款" : "查看結算"} primary
+                <Action title={working ? t("正在處理…") : t("重新開啟")} disabled={working} onPress={() => { void changeStatus(false); }} />
+                {hasExpenses && <Action title={hasOutstanding ? t("記錄還款") : t("查看結算")} primary
                   onPress={() => onViewSettlement(hasOutstanding ? "transfers" : undefined)} />}
               </>
             )}

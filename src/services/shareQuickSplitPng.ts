@@ -6,6 +6,7 @@ export type ShareOutcome = "closed" | "unavailable" | "capture-failed" | "share-
 
 export async function shareQuickSplitPng(
   view: ComponentRef<typeof View>,
+  title: string,
   isCurrent: () => boolean,
   beforePresent: () => Promise<void>,
 ): Promise<ShareOutcome> {
@@ -20,7 +21,7 @@ export async function shareQuickSplitPng(
     if (!isCurrent()) return "closed";
 
     presenting = true;
-    await presentLocalSharePng(image, "分享結算");
+    await presentLocalSharePng(image, title);
     return "closed";
   } catch {
     return presenting ? "share-failed" : "capture-failed";
