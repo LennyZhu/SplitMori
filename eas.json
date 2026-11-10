@@ -1,6 +1,7 @@
 {
   "cli": {
-    "requireCommit": false
+    "requireCommit": false,
+    "appVersionSource": "remote"
   },
   "build": {
     "development": {
@@ -9,6 +10,17 @@
       "node": "24.22.2",
       "ios": {
         "simulator": false
+      }
+    },
+    "production": {
+      "developmentClient": false,
+      "distribution": "store",
+      "environment": "production",
+      "autoIncrement": true,
+      "node": "24.22.2",
+      "ios": {
+        "buildConfiguration": "Release",
+        "image": "macos-tahoe-26.6-xcode-27.0"
       }
     }
   }

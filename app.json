@@ -3,6 +3,7 @@
     "name": "SplitMori",
     "slug": "splitmori",
     "version": "1.0.0",
+    "icon": "./assets/icon.png",
     "extra": {
       "lifetimeProProductId": "com.zhushunli.splitmori.pro.lifetime",
       "eas": {
@@ -16,14 +17,22 @@
     ],
     "ios": {
       "bundleIdentifier": "com.zhushunli.splitmori",
+      "appleTeamId": "8SSF5V63H9",
+      "supportsTablet": false,
       "infoPlist": {
         "CFBundleLocalizations": [
-          "zh-HK",
-          "en",
           "zh-HK",
           "en"
         ],
         "ITSAppUsesNonExemptEncryption": false
+      },
+      "privacyManifests": {
+        "NSPrivacyAccessedAPITypes": [
+          {
+            "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryFileTimestamp",
+            "NSPrivacyAccessedAPITypeReasons": ["C617.1", "3B52.1"]
+          }
+        ]
       }
     },
     "plugins": [

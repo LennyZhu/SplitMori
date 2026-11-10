@@ -6,3 +6,11 @@ node_modules/
 dist/
 .vercel
 .env*
+credentials.json
+*.p8
+*.p12
+*.pfx
+*.mobileprovision
+*.cer
+*.pem
+*.key
