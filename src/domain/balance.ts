@@ -4,11 +4,56 @@ import { validateMemberIds, type Allocation, type SplitResult } from "./split.ts
 
 export type MerchantPayment = Money & { readonly memberId: string };
 
+export type ExpensePayments =
+  | { readonly merchantPayment: MerchantPayment; readonly merchantPayments?: never }
+  | { readonly merchantPayment?: never; readonly merchantPayments: readonly MerchantPayment[] };
+
 export type Expense = {
   readonly id: string;
   readonly split: Pick<SplitResult, "total" | "allocations">;
-  readonly merchantPayment: MerchantPayment;
-};
+} & ExpensePayments;
+
+export function merchantPaymentsOf(expense: ExpensePayments): readonly MerchantPayment[] {
+  if (expense.merchantPayments !== undefined) {
+    return expense.merchantPayment === undefined && Array.isArray(expense.merchantPayments) ? expense.merchantPayments : [];
+  }
+  return expense.merchantPayment ? [expense.merchantPayment] : [];
+}
+
+export function paymentFields(payments: readonly MerchantPayment[]): ExpensePayments {
+  return payments.length === 1 ? { merchantPayment: payments[0] } : { merchantPayments: payments };
+}
+
+export function sameMerchantPayments(left: ExpensePayments, right: ExpensePayments): boolean {
+  const a = merchantPaymentsOf(left);
+  const b = merchantPaymentsOf(right);
+  if (a.length === 0 || a.length !== b.length || a.some((payment) => !payment) || b.some((payment) => !payment)) return false;
+  const byMember = new Map(b.map((payment) => [payment.memberId, payment]));
+  return byMember.size === b.length && new Set(a.map(({ memberId }) => memberId)).size === a.length
+    && a.every(({ memberId, currency, amountMinor }) => {
+      const other = byMember.get(memberId);
+      return other?.currency === currency && other.amountMinor === amountMinor;
+    });
+}
+
+export function validateMerchantPayments(total: Money, payments: readonly MerchantPayment[], members: { has(id: string): boolean }): Failure | undefined {
+  if (payments.length === 0) return failure("MISSING_MERCHANT_PAYMENT", "merchantPayment");
+  const seen = new Set<string>();
+  let paid = 0n;
+  for (const payment of payments) {
+    if (!payment) return failure("MISSING_MERCHANT_PAYMENT", "merchantPayment");
+    const invalid = validateMoney(payment, "merchantPayment");
+    if (invalid) return invalid;
+    if (payment.currency !== total.currency) return failure("CURRENCY_MISMATCH", "merchantPayment");
+    if (!members.has(payment.memberId)) return failure("MEMBER_NOT_PARTICIPATING", "merchantPayment");
+    if (seen.has(payment.memberId)) return failure("DUPLICATE_MEMBER_ID", "merchantPayment");
+    if (payments.length > 1 && payment.amountMinor === 0) return failure("NON_POSITIVE_AMOUNT", "merchantPayment");
+    seen.add(payment.memberId);
+    paid += BigInt(payment.amountMinor);
+  }
+  if (paid > BigInt(Number.MAX_SAFE_INTEGER)) return failure("AMOUNT_OVERFLOW", "merchantPayment");
+  if (paid !== BigInt(total.amountMinor)) return failure("TOTAL_MISMATCH", "merchantPayment");
+}
 
 export type MerchantRefund = Money & {
   readonly kind: "merchantRefund";
@@ -75,7 +120,7 @@ type MemberTotals = {
 
 type ExpenseTotals = {
   readonly gross: bigint;
-  readonly payerId: string;
+  readonly payments: readonly MerchantPayment[];
   readonly remainingAllocations: Map<string, bigint>;
   readonly refunds: MerchantRefund[];
   refunded: bigint;
@@ -91,23 +136,17 @@ function netBalance(member: MemberTotals): bigint {
 function applyExpense(
   currency: Currency,
   members: ReadonlyMap<string, MemberTotals>,
-  { split, merchantPayment }: Expense,
+  expense: Expense,
 ): Result<ExpenseTotals> {
-  const { total, allocations } = split;
+  const { total, allocations } = expense.split;
   const invalidTotal = validateMoney(total, "total");
   if (invalidTotal) return invalidTotal;
   if (total.currency !== currency) return failure("CURRENCY_MISMATCH", "currency");
   const gross = BigInt(total.amountMinor);
 
-  if (!merchantPayment) return failure("MISSING_MERCHANT_PAYMENT", "merchantPayment");
-  const invalidPayment = validateMoney(merchantPayment, "merchantPayment");
+  const payments = merchantPaymentsOf(expense);
+  const invalidPayment = validateMerchantPayments(total, payments, members);
   if (invalidPayment) return invalidPayment;
-  if (merchantPayment.currency !== currency) return failure("CURRENCY_MISMATCH", "merchantPayment");
-  const payer = members.get(merchantPayment.memberId);
-  if (!payer) return failure("MEMBER_NOT_PARTICIPATING", "merchantPayment");
-  if (merchantPayment.amountMinor !== total.amountMinor) {
-    return failure("TOTAL_MISMATCH", "merchantPayment");
-  }
 
   const invalidAllocations = validateMemberIds(
     allocations.map(({ memberId }) => memberId),
@@ -131,10 +170,10 @@ function applyExpense(
   if (allocatedTotal > maxMinor) return failure("AMOUNT_OVERFLOW", "allocations");
   if (allocatedTotal !== gross) return failure("TOTAL_MISMATCH", "allocations");
 
-  payer.merchantPaid += BigInt(merchantPayment.amountMinor);
+  for (const { memberId, amountMinor } of payments) members.get(memberId)!.merchantPaid += BigInt(amountMinor);
   return {
     ok: true,
-    value: { gross, payerId: merchantPayment.memberId, remainingAllocations, refunds: [], refunded: 0n },
+    value: { gross, payments, remainingAllocations, refunds: [], refunded: 0n },
   };
 }
 
@@ -182,7 +221,7 @@ function carryRefundsForward(
   members: ReadonlyMap<string, MemberTotals>, expenses: ReadonlyMap<string, ExpenseTotals>, previous: ExpenseTotals,
 ): Failure | undefined {
   // Remove the old effective expense and reapply its refunds to the replacement shares.
-  members.get(previous.payerId)!.merchantPaid -= previous.gross;
+  for (const { memberId, amountMinor } of previous.payments) members.get(memberId)!.merchantPaid -= BigInt(amountMinor);
   for (const [memberId, share] of previous.remainingAllocations) members.get(memberId)!.allocated -= share;
   for (const refund of previous.refunds) {
     members.get(refund.recipientId)!.refundReceived -= BigInt(refund.amountMinor);

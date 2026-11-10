@@ -1,5 +1,6 @@
 import {
-  calculateBalances, type ActivityEventBalances, type Expense, type MemberTransfer, type MerchantRefund,
+  calculateBalances, merchantPaymentsOf, paymentFields, sameMerchantPayments,
+  type ActivityEventBalances, type Expense, type MemberTransfer, type MerchantRefund,
 } from "../domain/balance.ts";
 import { previewExpenseCorrection, type ExpenseCorrectionPreview } from "../domain/correction.ts";
 import type { Currency } from "../domain/money.ts";
@@ -17,7 +18,7 @@ import {
 import {
   findFinancialVoid, insertFinancialVoid, readFinancialVoids, type FinancialVoidRequest, type StoredFinancialVoid,
 } from "./financeVoids.ts";
-import { migrations } from "./migrations.ts";
+import { migrations, multiPayerSchemaVersion } from "./migrations.ts";
 
 const splitModes = ["equal", "treat", "individual", "custom"] as const;
 export type FinanceExpense = Expense & {
@@ -286,18 +287,21 @@ function advancedExpense(expense: FinanceExpense): boolean {
   return expense.splitMode === "custom" || (expense.splitInput !== undefined && usesAdvancedSplit(expense.splitInput));
 }
 
-export function expenseEditBlocker(status: ActivityStatus, activeCount: number, expense: FinanceExpense, hasProAccess = false):
+export function expenseEditBlocker(status: ActivityStatus, activeCount: number, expense: FinanceExpense,
+  hasProAccess = false, hasVerifiedProAccess = false):
   "ACTIVITY_COMPLETED" | "EXPENSE_EDIT_LIMIT" | "UNSUPPORTED_EXPENSE_EDIT" | "PRO_REQUIRED" | undefined {
   if (status === "completed") return "ACTIVITY_COMPLETED";
   if (activeCount > 1 && !hasProAccess) return "EXPENSE_EDIT_LIMIT";
   if (expense.splitMode === "custom" && !expense.splitInput) return "UNSUPPORTED_EXPENSE_EDIT";
+  if (merchantPaymentsOf(expense).length > 1 && !hasVerifiedProAccess) return "PRO_REQUIRED";
   if (!hasProAccess && advancedExpense(expense)) return "PRO_REQUIRED";
 }
 
 function correctionReplacement(previous: FinanceExpense, proposed: FinanceExpense): FinanceExpense {
   const name = proposed.name ?? previous.name;
   const expenseDate = proposed.expenseDate ?? previous.expenseDate;
-  return { ...proposed, ...(name === undefined ? {} : { name }), ...(expenseDate === undefined ? {} : { expenseDate }) };
+  // The submitted preview already contains the inherited fields. Normalize both paths identically.
+  return copyExpense({ ...proposed, ...(name === undefined ? {} : { name }), ...(expenseDate === undefined ? {} : { expenseDate }) });
 }
 
 function groupAllocations(rows: readonly (Allocation & { ownerId: string })[]): Map<string, Allocation[]> {
@@ -337,8 +341,10 @@ async function readEvents(connection: SQLiteReader, activity: ActivityContext, s
     FROM expense_allocations WHERE activity_id = ? ORDER BY expense_id, position
   `, activityId));
   const payments = groupAllocations(await connection.getAllAsync<Allocation & { ownerId: string }>(`
-    SELECT expense_id AS ownerId, member_id AS memberId, amount_minor AS amountMinor
-    FROM merchant_payments WHERE activity_id = ?
+    SELECT p.expense_id AS ownerId, p.member_id AS memberId, p.amount_minor AS amountMinor
+    FROM merchant_payments AS p
+    JOIN activity_members AS a ON a.activity_id = p.activity_id AND a.member_id = p.member_id
+    WHERE p.activity_id = ? ORDER BY p.expense_id, a.position
   `, activityId));
   const reductions = groupAllocations(await connection.getAllAsync<Allocation & { ownerId: string }>(`
     SELECT r.refund_id AS ownerId, r.member_id AS memberId, r.amount_minor AS amountMinor
@@ -354,7 +360,7 @@ async function readEvents(connection: SQLiteReader, activity: ActivityContext, s
       && row.allocationVersion !== null) {
       const expenseAllocations = allocations.get(id);
       const merchantPayments = payments.get(id);
-      if (expenseAllocations && merchantPayments?.length === 1) {
+      if (expenseAllocations && merchantPayments?.length && (schemaVersion >= multiPayerSchemaVersion || merchantPayments.length === 1)) {
         return {
           ...order, kind, expense: {
             id, splitMode: row.splitMode, allocationVersion: row.allocationVersion,
@@ -362,7 +368,7 @@ async function readEvents(connection: SQLiteReader, activity: ActivityContext, s
             ...(row.expenseDate === null ? {} : { expenseDate: row.expenseDate }),
             ...(row.splitInput === null ? {} : { splitInput: JSON.parse(row.splitInput) as QuickSplitInput }),
             split: { total: { currency: row.expenseCurrency, amountMinor }, allocations: expenseAllocations },
-            merchantPayment: { ...merchantPayments[0], currency: row.expenseCurrency },
+            ...paymentFields(merchantPayments.map((payment) => ({ ...payment, currency: row.expenseCurrency! }))),
           },
         };
       }
@@ -439,17 +445,16 @@ function sameExpense(original: FinanceExpense, input: FinanceExpense): boolean {
     && original.splitMode === input.splitMode && original.allocationVersion === input.allocationVersion
     && original.split.total.currency === input.split.total.currency
     && original.split.total.amountMinor === input.split.total.amountMinor
-    && original.merchantPayment.memberId === input.merchantPayment?.memberId
-    && original.merchantPayment.currency === input.merchantPayment.currency
-    && original.merchantPayment.amountMinor === input.merchantPayment.amountMinor
+    && sameMerchantPayments(original, input)
     && sameAllocations(original.split.allocations, input.split.allocations);
 }
 
 function copyExpense(expense: FinanceExpense): FinanceExpense {
+  const { merchantPayment: _single, merchantPayments: _multiple, ...details } = expense;
   return {
-    ...expense,
+    ...details,
     split: { total: { ...expense.split.total }, allocations: expense.split.allocations.map((row) => ({ ...row })) },
-    merchantPayment: expense.merchantPayment && { ...expense.merchantPayment },
+    ...paymentFields(merchantPaymentsOf(expense).map((row) => ({ ...row }))),
     ...(expense.splitInput === undefined ? {} : { splitInput: JSON.parse(JSON.stringify(expense.splitInput)) as QuickSplitInput }),
   };
 }
@@ -495,7 +500,7 @@ async function insertEvent(
 
   if (event.kind === "expense") {
     const { expense } = event;
-    const { split, merchantPayment, splitMode, allocationVersion, name, expenseDate, splitInput } = expense;
+    const { split, splitMode, allocationVersion, name, expenseDate, splitInput } = expense;
     const { currency, amountMinor } = split.total;
     await transaction.runAsync(`
       INSERT INTO expenses (id, activity_id, currency, amount_minor, split_mode, allocation_version, name, expense_date, split_input)
@@ -514,14 +519,20 @@ async function insertEvent(
       `, activityId, id, memberId, share, position);
       allocations.push({ memberId, amountMinor: share });
     }
-    await transaction.runAsync(`
-      INSERT INTO merchant_payments (activity_id, expense_id, member_id, amount_minor) VALUES (?, ?, ?, ?)
-    `, activityId, id, merchantPayment.memberId, merchantPayment.amountMinor);
+    const paymentsByMember = new Map(merchantPaymentsOf(expense).map((payment) => [payment.memberId, payment]));
+    const payments = activity.memberIds.flatMap((memberId) => paymentsByMember.get(memberId) ?? []);
+    for (const { memberId, amountMinor } of payments) {
+      await transaction.runAsync(`
+        INSERT INTO merchant_payments (activity_id, expense_id, member_id, amount_minor) VALUES (?, ?, ?, ?)
+      `, activityId, id, memberId, amountMinor);
+    }
     return {
       ...order, kind: "expense", expense: {
-        ...expense,
+        id, splitMode, allocationVersion,
+        ...(name === undefined ? {} : { name }), ...(expenseDate === undefined ? {} : { expenseDate }),
+        ...(splitInput === undefined ? {} : { splitInput }),
         split: { total: { currency, amountMinor }, allocations },
-        merchantPayment: { memberId: merchantPayment.memberId, currency, amountMinor: merchantPayment.amountMinor },
+        ...paymentFields(payments),
       },
     };
   }
@@ -629,6 +640,7 @@ function projectRecordedEvent(
 async function recordInTransaction(
   transaction: SQLiteConnection, activityId: string, occurredAt: number, event: FinanceEvent, allowRetry = true,
   expectedBalances?: ExpectedTransferBalances, expectedRefundLedger?: string, hasProAccess: ProAccess = freeAccess,
+  hasVerifiedProAccess: ProAccess = freeAccess,
 ): Promise<Result<StoredFinanceEvent>> {
   const id = eventId(event);
   if (typeof id !== "string" || id.trim() === "") {
@@ -691,6 +703,9 @@ async function recordInTransaction(
     }
   }
 
+  if (event.kind === "expense" && merchantPaymentsOf(event.expense).length > 1 && !hasVerifiedProAccess()) {
+    return failure("PRO_REQUIRED", "merchantPayment");
+  }
   const persisted = event.kind === "merchantRefund" && expectedRefundLedger !== undefined
     ? { ...event, recordedAt: Date.now() } : event;
   const saved = await insertEvent(transaction, activity, occurredAt, persisted);
@@ -707,7 +722,7 @@ export async function insertNewExpenseInTransaction(
   return { ok: true, value: result.value };
 }
 
-export function createFinanceRepository(database: LocalDatabase, hasProAccess: ProAccess = freeAccess) {
+export function createFinanceRepository(database: LocalDatabase, hasProAccess: ProAccess = freeAccess, hasVerifiedProAccess: ProAccess = freeAccess) {
   function readLedger<T>(
     activityId: string,
     project: (activity: ActivityContext, events: StoredFinanceEvent[], revisions: StoredExpenseRevision[],
@@ -723,7 +738,7 @@ export function createFinanceRepository(database: LocalDatabase, hasProAccess: P
 
   function record(activityId: string, occurredAt: number, event: FinanceEvent, expectedBalances?: ExpectedTransferBalances): Promise<Result<StoredFinanceEvent>> {
     return withStorage(() => database.write((transaction) =>
-      recordInTransaction(transaction, activityId, occurredAt, event, true, expectedBalances, undefined, hasProAccess)));
+      recordInTransaction(transaction, activityId, occurredAt, event, true, expectedBalances, undefined, hasProAccess, hasVerifiedProAccess)));
   }
 
   async function voidFinancialEvent(
@@ -776,12 +791,15 @@ export function createFinanceRepository(database: LocalDatabase, hasProAccess: P
       return failure("EXPENSE_VERSION_CONFLICT", "expectedVersion");
     }
     const pro = hasProAccess();
-    const blocker = expenseEditBlocker(activity.status, activity.activeCount, current.expense, pro);
-    if (blocker) return failure(blocker, "activityId");
+    const verifiedPro = hasVerifiedProAccess();
+    const blocker = expenseEditBlocker(activity.status, activity.activeCount, current.expense, pro, verifiedPro);
+    if (blocker) return failure(blocker, blocker === "PRO_REQUIRED" && merchantPaymentsOf(current.expense).length > 1
+      ? "merchantPayment" : "activityId");
     const replacement = correctionReplacement(current.expense, proposed);
     const invalid = validateSplitSnapshot(replacement);
     if (invalid) return invalid;
     if (!pro && advancedExpense(replacement)) return failure("PRO_REQUIRED", "quickInput");
+    if (!verifiedPro && merchantPaymentsOf(replacement).length > 1) return failure("PRO_REQUIRED", "merchantPayment");
 
     const timeline = orderedTimeline(events, revisions, voids);
     const preview = previewExpenseCorrection({

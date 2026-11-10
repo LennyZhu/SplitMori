@@ -2,6 +2,7 @@ import { uuid } from "expo";
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from "react-native";
 import { expenseEditBlocker, type FinanceExpense, type ReviewedExpenseCorrectionRequest } from "../data/finance.ts";
+import { merchantPaymentsOf } from "../domain/balance.ts";
 import { calculateCharges } from "../domain/charges.ts";
 import type { ChargeDistribution } from "../domain/charges.ts";
 import type { Failure } from "../domain/result.ts";
@@ -11,12 +12,14 @@ import {
   summarizeExpenseRefunds, type ExpenseDetailData,
 } from "../services/expenseDetail.ts";
 import { formatResultMoney } from "../services/quickSplitResult.ts";
+import { hasVerifiedProAccess } from "../services/storeKitExpo.ts";
 import { ButtonPair, Card, Compare, Heading, Notice, Row, financeReviewStyles } from "./FinanceReviewUi.tsx";
 import { CreateExpenseScreen } from "./CreateExpenseScreen.tsx";
 import { MerchantRefundScreen, merchantRefundCopy } from "./MerchantRefundScreen.tsx";
 import { usePro, useProSnapshot } from "./ProContext.ts";
 import { AppLanguageContext } from "./AppLanguageContext.ts";
 import { advancedSplitCopy } from "./advancedSplitCopy.ts";
+import { merchantPaymentCopy, merchantPaymentError } from "./merchantPaymentCopy.ts";
 import { ConversionButton, ConversionPage, ConversionReadError, memberLabels } from "./QuickSplitConversionScreen.tsx";
 import { colors, Icon } from "./visuals.tsx";
 
@@ -30,6 +33,8 @@ const dateFormat = new Intl.DateTimeFormat("zh-HK", { year: "numeric", month: "l
 const label = (expense: FinanceExpense) => expense.name ?? "未命名費用";
 const shares = (expense: FinanceExpense) => new Map(expense.split.allocations.map(({ memberId, amountMinor }) => [memberId, amountMinor]));
 const describeSplit = (expense: FinanceExpense) => `${modes[expense.splitMode]} · ${expense.split.allocations.length} 人`;
+const paymentSummary = (expense: FinanceExpense, money: Money, nameFor: NameFor) =>
+  merchantPaymentsOf(expense).map(({ memberId, amountMinor }) => `${nameFor(memberId)} · ${money(amountMinor)}`).join("\n");
 
 function dateText(timestamp: number) {
   const date = new Date(timestamp);
@@ -120,7 +125,9 @@ function RefundRows({ refunds, money, nameFor }: {
 function Detail({ data, money, nameFor, onHistory, onRefundHistory }: {
   data: ExpenseDetailData; money: Money; nameFor: NameFor; onHistory: () => void; onRefundHistory: () => void;
 }) {
-  const copy = advancedSplitCopy(useContext(AppLanguageContext));
+  const language = useContext(AppLanguageContext);
+  const copy = advancedSplitCopy(language);
+  const paymentCopy = merchantPaymentCopy(language);
   const { activity, expense, refunds } = data;
   const { amountMinor, reductions } = summarizeExpenseRefunds(refunds);
   return (
@@ -135,12 +142,14 @@ function Detail({ data, money, nameFor, onHistory, onRefundHistory }: {
         <Text style={styles.total}>{money(expense.split.total.amountMinor)}</Text>
         <Text style={styles.caption}>{dateText(data.expenseDate)} · v{data.currentVersion}</Text>
       </Card>
-      {data.editBlocker && <Notice>{data.editBlocker === "PRO_REQUIRED" ? copy.locked
+      {data.editBlocker && <Notice>{data.editBlocker === "PRO_REQUIRED"
+        ? merchantPaymentsOf(expense).length > 1 ? paymentCopy.proRequired : copy.locked
         : correctionError({ code: data.editBlocker, field: "activityId" })}</Notice>}
       <Heading>付款與分攤</Heading>
       <Card>
-        <Row title="實際商家付款人" value={nameFor(expense.merchantPayment.memberId)} divider={false} />
-        <Row title="實際商家付款" value={money(expense.merchantPayment.amountMinor)} />
+        <Row title={paymentCopy.paidTotal} value={money(expense.split.total.amountMinor)} divider={false} />
+        {merchantPaymentsOf(expense).map(({ memberId, amountMinor }) =>
+          <Row key={memberId} title={nameFor(memberId)} value={money(amountMinor)} />)}
         <Row title="參與分攤" value={`${expense.split.allocations.length} 人`} />
         {amountMinor > 0 && <Text style={styles.caption}>各人目前承擔（扣除有效退款）</Text>}
         {expense.split.allocations.map(({ memberId, amountMinor: share }) =>
@@ -178,6 +187,7 @@ function Suggestions({ items, nameFor, money }: { items: readonly TransferSugges
 }
 
 function Impact({ preview, reviewedRefunds, onReview }: { preview: Preview; reviewedRefunds: boolean; onReview: () => void }) {
+  const paymentCopy = merchantPaymentCopy(useContext(AppLanguageContext));
   const { before, after, expense: { before: oldBill, after: newBill, refunds }, memberChanges, activity } = preview;
   const names = memberLabels(activity.members);
   const nameFor = (id: string) => names.get(id) ?? "未知成員";
@@ -238,9 +248,7 @@ function Impact({ preview, reviewedRefunds, onReview }: { preview: Preview; revi
       <Card>
         {label(oldBill) !== label(newBill) && <Compare title="費用名稱" before={label(oldBill)} after={label(newBill)} />}
         <Compare title="費用日期" before={dateText(preview.beforeDate)} after={dateText(preview.afterDate)} />
-        <Compare title="實際商家付款"
-          before={`${nameFor(oldBill.merchantPayment.memberId)} · ${money(oldBill.merchantPayment.amountMinor)}`}
-          after={`${nameFor(newBill.merchantPayment.memberId)} · ${money(newBill.merchantPayment.amountMinor)}`} />
+        <Compare title={paymentCopy.paid} before={paymentSummary(oldBill, money, nameFor)} after={paymentSummary(newBill, money, nameFor)} />
         <Row title="本筆有效商家退款" value={money(amountMinor)} />
         {beforeExpense && afterExpense && <Compare title="本筆有效費用" before={money(beforeExpense.effectiveTotalMinor)}
           after={money(afterExpense.effectiveTotalMinor)} />}
@@ -274,6 +282,7 @@ function Impact({ preview, reviewedRefunds, onReview }: { preview: Preview; revi
 function History({ data, saved, money, nameFor }: {
   data: ExpenseDetailData; saved: boolean; money: Money; nameFor: NameFor;
 }) {
+  const paymentCopy = merchantPaymentCopy(useContext(AppLanguageContext));
   const [expanded, setExpanded] = useState<number>();
   const originalDate = data.versions[0]?.occurredAt ?? data.expenseDate;
   return (
@@ -282,7 +291,8 @@ function History({ data, saved, money, nameFor }: {
       <Card>
         <View style={styles.row}><Text style={styles.caption}>{label(data.expense)} · 最新版本</Text><Text style={styles.badge}>v{data.currentVersion}</Text></View>
         <Text style={styles.total}>{money(data.expense.split.total.amountMinor)}</Text>
-        <Text style={styles.caption}>{nameFor(data.expense.merchantPayment.memberId)} 實際付款 · {describeSplit(data.expense)}</Text>
+        <Text style={styles.caption}>{describeSplit(data.expense)}</Text>
+        <Text style={styles.caption}>{paymentSummary(data.expense, money, nameFor)}</Text>
       </Card>
       <Heading>修訂歷史</Heading>
       {[...data.versions].reverse().map(({ expense, id, version, occurredAt }, index) => {
@@ -313,10 +323,10 @@ function History({ data, saved, money, nameFor }: {
               {previous ? <Compare title="費用日期" before={dateText(previous.expenseDate ?? originalDate)}
                 after={dateText(expense.expenseDate ?? originalDate)} />
                 : <Row title="費用日期" value={dateText(expense.expenseDate ?? originalDate)} />}
-              {previous ? <Compare title="商家付款人" before={nameFor(previous.merchantPayment.memberId)}
-                after={nameFor(expense.merchantPayment.memberId)} /> : <Row title="商家付款人" value={nameFor(expense.merchantPayment.memberId)} />}
+              {previous ? <Compare title={paymentCopy.paid} before={paymentSummary(previous, money, nameFor)}
+                after={paymentSummary(expense, money, nameFor)} /> : <Row title={paymentCopy.paid} value={paymentSummary(expense, money, nameFor)} />}
               {previous && <Compare title="分帳方式" before={modes[previous.splitMode]} after={modes[expense.splitMode]} />}
-              <Row title="實際付款" value={money(expense.merchantPayment.amountMinor)} />
+              <Row title={paymentCopy.paidTotal} value={money(expense.split.total.amountMinor)} />
               {[...memberIds].map((memberId) => oldShares
                 ? <Compare key={memberId} title={nameFor(memberId)}
                   before={oldShares.has(memberId) ? money(oldShares.get(memberId)!) : "未參與"}
@@ -335,11 +345,13 @@ export function ExpenseCorrectionScreen({ activityId, expenseId, onBack, onViewS
   activityId: string; expenseId: string; onBack: () => void; onViewSettlement: () => void;
 }) {
   const { hasProAccess, openPro } = usePro();
-  const copy = advancedSplitCopy(useContext(AppLanguageContext));
+  const language = useContext(AppLanguageContext);
+  const copy = advancedSplitCopy(language);
+  const paymentCopy = merchantPaymentCopy(language);
   const pro = useProSnapshot();
   const [loadedData, setData] = useState<ExpenseDetailData | null>();
   const data = loadedData && { ...loadedData,
-    editBlocker: expenseEditBlocker(loadedData.activity.status, loadedData.activeCount, loadedData.expense, pro.hasProAccess) };
+    editBlocker: expenseEditBlocker(loadedData.activity.status, loadedData.activeCount, loadedData.expense, pro.hasProAccess, pro.status === "pro") };
   const [page, setPage] = useState<"detail" | "edit" | "history">("detail");
   const [refundRoute, setRefundRoute] = useState<"register" | "history">();
   const [saved, setSaved] = useState(false);
@@ -373,8 +385,9 @@ export function ExpenseCorrectionScreen({ activityId, expenseId, onBack, onViewS
 
   async function openPreview(proposed: FinanceExpense) {
     if (!data) return "請先重新讀取費用。";
-    const result = await loadExpenseCorrectionPreview(activityId, proposed, data.currentVersion, undefined, hasProAccess);
-    if (!result.ok) return result.error.code === "PRO_REQUIRED" ? copy.locked : correctionError(result.error);
+    const result = await loadExpenseCorrectionPreview(activityId, proposed, data.currentVersion, undefined, hasProAccess, hasVerifiedProAccess);
+    if (!result.ok) return result.error.field === "merchantPayment" ? merchantPaymentError(result.error.code, paymentCopy)
+      : result.error.code === "PRO_REQUIRED" ? copy.locked : correctionError(result.error);
     request.current = undefined;
     setBlocked(false);
     setRetry(undefined);
@@ -401,7 +414,8 @@ export function ExpenseCorrectionScreen({ activityId, expenseId, onBack, onViewS
       occurredAt: Date.now(), proposed: preview.expense.after, reviewedRefundIds: preview.expense.refunds.map(({ id }) => id),
     };
     try {
-      const result = await saveReviewedExpenseCorrection(activityId, request.current, { verifyOnly: retry === "verify", hasProAccess });
+      const result = await saveReviewedExpenseCorrection(activityId, request.current,
+        { verifyOnly: retry === "verify", hasProAccess, hasVerifiedProAccess });
       if (result.status === "saved") {
         setReview(undefined);
         setSaved(true);
@@ -409,7 +423,8 @@ export function ExpenseCorrectionScreen({ activityId, expenseId, onBack, onViewS
         void reload();
       } else if (result.status === "rejected") {
         setBlocked(true);
-        setError(result.error.code === "PRO_REQUIRED" ? copy.locked : correctionError(result.error));
+        setError(result.error.field === "merchantPayment" ? merchantPaymentError(result.error.code, paymentCopy)
+          : result.error.code === "PRO_REQUIRED" ? copy.locked : correctionError(result.error));
       } else if (result.status === "notSaved") {
         setRetry("write");
         setError("已確認這次更正未入帳。可以重試儲存。");

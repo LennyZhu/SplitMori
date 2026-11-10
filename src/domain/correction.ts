@@ -1,5 +1,5 @@
 import {
-  calculateBalances, type ActivityEventBalances, type BalanceEvent, type Expense,
+  calculateBalances, sameMerchantPayments, type ActivityEventBalances, type BalanceEvent, type Expense,
   type MerchantRefund,
 } from "./balance.ts";
 import type { Currency } from "./money.ts";
@@ -38,15 +38,11 @@ export type ExpenseCorrectionPreview = {
 function matchesSnapshot(current: Expense, original: Expense): boolean {
   const { total, allocations } = current.split;
   const previousSplit = original.split;
-  const payer = current.merchantPayment;
-  const previousPayer = original.merchantPayment;
-  if (!previousSplit?.total || !Array.isArray(previousSplit.allocations) || !previousPayer) return false;
+  if (!previousSplit?.total || !Array.isArray(previousSplit.allocations)) return false;
 
   return total.currency === previousSplit.total.currency
     && total.amountMinor === previousSplit.total.amountMinor
-    && payer.memberId === previousPayer.memberId
-    && payer.currency === previousPayer.currency
-    && payer.amountMinor === previousPayer.amountMinor
+    && sameMerchantPayments(current, original)
     && allocations.length === previousSplit.allocations.length
     && allocations.every(({ memberId, amountMinor }, index) => {
       const previous = previousSplit.allocations[index];

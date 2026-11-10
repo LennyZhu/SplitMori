@@ -1,6 +1,7 @@
 import { createActivityRepository } from "../data/activities.ts";
 import type { LocalDatabase } from "../data/database.ts";
 import { createFinanceRepository } from "../data/finance.ts";
+import { merchantPaymentsOf } from "../domain/balance.ts";
 import { withActivityReadSnapshot } from "./activityList.ts";
 
 export function loadActivityMembers(activityId: string, database?: LocalDatabase) {
@@ -14,7 +15,7 @@ export function loadActivityMembers(activityId: string, database?: LocalDatabase
       switch (event.kind) {
         case "expense":
         case "expenseRevision":
-          used.add(event.expense.merchantPayment.memberId);
+          for (const payment of merchantPaymentsOf(event.expense)) used.add(payment.memberId);
           for (const row of event.expense.split.allocations) used.add(row.memberId);
           break;
         case "merchantRefund":

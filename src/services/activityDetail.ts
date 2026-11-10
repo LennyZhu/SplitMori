@@ -1,6 +1,7 @@
 import { createActivityRepository, type ActivityDetail } from "../data/activities.ts";
 import type { LocalDatabase } from "../data/database.ts";
 import { createFinanceRepository, projectCurrentExpenses, type FinanceExpense } from "../data/finance.ts";
+import { merchantPaymentsOf } from "../domain/balance.ts";
 import { withActivityReadSnapshot } from "./activityList.ts";
 
 type ActivityExpenseRow = {
@@ -52,7 +53,7 @@ export function loadActivityDetail(activityId: string, database?: LocalDatabase)
       if (effectiveMinor === undefined) throw new Error("Missing effective expense in the activity ledger");
       return {
         id: expense.id, name: expense.name ?? `費用 ${index + 1}`, occurredAt: expense.expenseDate ?? occurredAt, splitMode: expense.splitMode,
-        payerName: memberName(expense.merchantPayment.memberId), grossMinor, effectiveMinor,
+        payerName: merchantPaymentsOf(expense).map(({ memberId }) => memberName(memberId)).join("、"), grossMinor, effectiveMinor,
         refundMinor: grossMinor - effectiveMinor,
       };
     });

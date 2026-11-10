@@ -271,7 +271,7 @@ test("membership and payment constraints are enforced and completed activities a
     UPDATE activities SET currency = 'JPY' WHERE id = 'trip'
   `)), /FOREIGN KEY constraint/);
   await assert.rejects(database.write((transaction) => transaction.runAsync(`
-    INSERT INTO merchant_payments VALUES ('trip', 'dinner', 'a', 0)
+    INSERT INTO merchant_payments VALUES ('trip', 'dinner', 'z', 0)
   `)), /UNIQUE constraint/);
   await activities.completeActivity("trip");
   assert.deepEqual((await finance.createExpense("trip", 200, expense("later"))).error,
@@ -866,22 +866,31 @@ test("v6 migration and reopening preserve the original event and its void record
   }
 }));
 
-test("a void that would overflow balances after revisions leaves the ledger unchanged", withFinance(async (finance) => {
+test("a void that would overflow balances after revisions leaves the ledger unchanged", withFinance(async (_finance, _activities, database) => {
+  const finance = createFinanceRepository(database, () => true);
+  const withCustomInput = (entry) => ({
+    ...entry,
+    splitInput: {
+      members: [{ id: "z", displayName: "Alex" }, { id: "a", displayName: "Bo" }],
+      charges: { kind: "finalTotal", total: entry.split.total },
+      method: { kind: "custom", options: { kind: "fixed", members: entry.split.allocations } },
+    },
+  });
   const max = Number.MAX_SAFE_INTEGER;
   const original = expense("dinner", max - 1);
   original.splitMode = "custom";
   original.split = { ...original.split, allocations: [{ memberId: "z", amountMinor: 1 }, { memberId: "a", amountMinor: max - 2 }] };
   original.merchantPayment = { ...original.merchantPayment, memberId: "a" };
-  valueOf(await finance.createExpense("trip", 100, original));
+  valueOf(await finance.createExpense("trip", 100, withCustomInput(original)));
   valueOf(await finance.recordMemberTransfer("trip", 200, { ...repayment, id: "earlier", fromMemberId: "z", toMemberId: "a", amountMinor: 1 }));
   const first = { ...original, split: { ...original.split, allocations: [{ memberId: "a", amountMinor: max - 1 }] },
     merchantPayment: { ...original.merchantPayment, memberId: "z" } };
-  valueOf(await finance.commitExpenseCorrection("trip", correction(max - 1, { proposed: first })));
+  valueOf(await finance.commitExpenseCorrection("trip", correction(max - 1, { proposed: withCustomInput(first) })));
   valueOf(await finance.recordMemberTransfer("trip", 400, { ...repayment, amountMinor: 1 }));
   const second = { ...first, split: { total: { currency: "HKD", amountMinor: max }, allocations: [{ memberId: "a", amountMinor: max }] },
     merchantPayment: { ...first.merchantPayment, amountMinor: max } };
   valueOf(await finance.commitExpenseCorrection("trip", correction(max, {
-    proposed: second, revisionId: "correction-2", expectedVersion: 2, occurredAt: 500,
+    proposed: withCustomInput(second), revisionId: "correction-2", expectedVersion: 2, occurredAt: 500,
   })));
   const before = valueOf(await finance.getActivityLedger("trip"));
   assert.deepEqual((await finance.voidMemberTransfer("trip", {
@@ -1068,9 +1077,9 @@ test("backup validation rejects corrupt and future files and can preview an olde
   assert.equal(preview.financialEventCount, 0);
 }));
 
-test("S13 backup schema accepts the known standard and early revision layouts in v9 through v11", withTestFile(async (path) => {
+test("S13 backup schema accepts the known standard and early revision layouts through v12 and the unified v13 layout", withTestFile(async (path) => {
   const service = backupService(path);
-  for (const version of [9, 10, 11]) {
+  for (const version of [9, 10, 11, 12, 13]) {
     for (const early of [false, true]) {
       const fixture = `${path}-${version}-${early}.sqlite`;
       const connection = openTestConnection(fixture);
@@ -1101,7 +1110,7 @@ test("backup validation checks SQLite schema, foreign keys, and financial totals
   const invalid = join(dirname(path), "altered.splitmori-backup");
   for (const [sql, code] of [
     ["DROP TABLE quick_history", "BACKUP_SCHEMA_MISMATCH"],
-    ["DROP INDEX merchant_payments_single_payer", "BACKUP_SCHEMA_MISMATCH"],
+    ["DROP INDEX merchant_payments_by_activity", "BACKUP_SCHEMA_MISMATCH"],
     ["ALTER TABLE merchant_refunds DROP COLUMN recorded_at", "BACKUP_SCHEMA_MISMATCH"],
     ["CREATE INDEX unexpected_payment_index ON merchant_payments(member_id)", "BACKUP_SCHEMA_MISMATCH"],
     ["UPDATE merchant_payments SET member_id = 'missing'", "BACKUP_FOREIGN_KEYS_FAILED"],
@@ -1121,43 +1130,98 @@ test("backup validation checks SQLite schema, foreign keys, and financial totals
   }
 }));
 
-test("S13 v12 repairs the missing v11 payer index and exports the complete unchanged ledger", withFinance(async (
-  finance, activities, _database, connection, _reopen, path,
-) => {
-  await seedRefundTrip(finance, activities, true);
-  valueOf(await finance.commitReviewedMerchantRefund("trip", valueOf(await finance.previewMerchantRefund("trip", 400, refundInput))));
-  await connection.execAsync("DROP INDEX merchant_payments_single_payer; PRAGMA user_version = 11;");
-  const before = valueOf(await finance.getActivityLedger("trip"));
-  assert.equal((await inspectBackupDatabase(backupPlatform(path), connection, 11)).error?.code, "BACKUP_SCHEMA_MISMATCH");
+async function seedLegacyPayments(connection, version) {
+  await connection.execAsync("PRAGMA foreign_keys = ON");
+  for (let index = 0; index < version; index += 1) await applyMigration(connection, index);
+  await connection.execAsync(`
+    INSERT INTO activities VALUES ('trip', 'Trip', 'HKD', 'active', 1, 1);
+    INSERT INTO members VALUES ('z', 'Alex', 1), ('a', 'Bo', 1);
+    INSERT INTO activity_members VALUES ('trip', 'z', 0), ('trip', 'a', 1);
+    INSERT INTO financial_events VALUES (1, 'dinner', 'trip', 'expense', 100),
+      (2, 'refund', 'trip', 'merchantRefund', 200), (3, 'repayment', 'trip', 'memberTransfer', 300);
+    INSERT INTO expenses (id, activity_id, currency, amount_minor, split_mode, allocation_version, name)
+      VALUES ('dinner', 'trip', 'HKD', 10000, 'equal', 1, 'Dinner');
+    INSERT INTO expense_allocations VALUES ('trip', 'dinner', 'z', 5000, 0), ('trip', 'dinner', 'a', 5000, 1);
+    INSERT INTO merchant_payments VALUES ('trip', 'dinner', 'z', 10000);
+    INSERT INTO merchant_refunds (id, activity_id, expense_id, recipient_id, amount_minor, note)
+      VALUES ('refund', 'trip', 'dinner', 'a', 2000, 'Refund receipt');
+    INSERT INTO refund_reductions VALUES ('trip', 'dinner', 'refund', 'z', 1000), ('trip', 'dinner', 'refund', 'a', 1000);
+    INSERT INTO member_transfers VALUES ('repayment', 'trip', 'a', 'z', 1000, 'FPS');
+    INSERT INTO expense_revisions (sequence, id, activity_id, expense_id, version, occurred_at, currency,
+      amount_minor, split_mode, allocation_version, payer_id, paid_minor, reviewed_refund_ids, name)
+      VALUES (4, 'legacy-revision', 'trip', 'dinner', 2, 400, 'HKD', 8000, 'equal', 1, 'z', 8000, '["refund"]', 'Revised dinner');
+    INSERT INTO expense_revision_allocations VALUES ('trip', 'legacy-revision', 'z', 4000, 0),
+      ('trip', 'legacy-revision', 'a', 4000, 1);
+    PRAGMA user_version = ${version};
+  `);
+}
 
-  const upgraded = await initializeDatabase(connection, connection.writeSnapshot);
-  await applyMigration(connection, 11);
-  assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 12);
-  assert.equal((await connection.getFirstAsync("SELECT sql FROM sqlite_schema WHERE name = 'merchant_payments_single_payer'")).sql,
-    "CREATE UNIQUE INDEX merchant_payments_single_payer ON merchant_payments(expense_id)");
-  assert.deepEqual(valueOf(await createFinanceRepository(upgraded).getActivityLedger("trip")), before);
+test("Batch B migrates the S13 v11 index repair and preserves old single-payer revisions and cash flows", withTestFile(async (path) => {
+  const connection = openTestConnection(path);
+  try {
+    await seedLegacyPayments(connection, 11);
+    assert.equal(valueOf(await validateStoredLedgers(connection, 11)), true);
+    await connection.execAsync("DROP INDEX merchant_payments_single_payer");
+    assert.equal((await inspectBackupDatabase(backupPlatform(path), connection, 11)).error?.code, "BACKUP_SCHEMA_MISMATCH");
 
-  const service = backupService(path);
-  const { uri, manifest } = valueOf(await service.exportBackup(upgraded));
-  const preview = valueOf(await service.previewBackup(uri));
-  assert.deepEqual([manifest.schemaVersion, preview.refundCount, preview.repaymentCount], [12, 1, 1]);
-  assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
+    const database = await initializeDatabase(connection, connection.writeSnapshot);
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, migrations.length);
+    const finance = createFinanceRepository(database);
+    const [v1, v2] = valueOf(await finance.listExpenseRevisions("trip", "dinner"));
+    assert.deepEqual([v1.expense.merchantPayment, v2.expense.merchantPayment], [
+      { memberId: "z", currency: "HKD", amountMinor: 10_000 },
+      { memberId: "z", currency: "HKD", amountMinor: 8000 },
+    ]);
+    assert.deepEqual([v2.id, v2.version, v2.expense.name], ["legacy-revision", 2, "Revised dinner"]);
+    const ledger = valueOf(await finance.getActivityLedger("trip"));
+    assert.deepEqual(ledger.events.slice(1).map(({ id, note }) => [id, note]),
+      [["refund", "Refund receipt"], ["repayment", "FPS"]]);
+    assert.deepEqual(ledger.balanceSnapshot.balances.map(({ netBalanceMinor }) => netBalanceMinor), [4000, -4000]);
+
+    const service = backupService(path);
+    const { uri, manifest } = valueOf(await service.exportBackup(database));
+    const preview = valueOf(await service.previewBackup(uri));
+    assert.deepEqual([manifest.schemaVersion, preview.refundCount, preview.repaymentCount], [migrations.length, 1, 1]);
+    assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), ledger);
+  } finally {
+    connection.close();
+  }
 }));
 
-test("S13 v12 rolls back the index repair if a legacy expense has duplicate payers", withFinance(async (finance, _activities, _db, connection) => {
-  valueOf(await finance.createExpense("trip", 100, expense()));
-  await connection.execAsync(`
-    DROP INDEX merchant_payments_single_payer;
-    PRAGMA user_version = 11;
-    INSERT INTO merchant_payments (activity_id, expense_id, member_id, amount_minor)
-    SELECT activity_id, expense_id, 'a', 1 FROM merchant_payments WHERE member_id = 'z';
-  `);
-  const readPayments = () => connection.getAllAsync("SELECT * FROM merchant_payments ORDER BY member_id");
-  const before = await readPayments();
-  assert.equal(before.length, 2);
-  await assert.rejects(initializeDatabase(connection), (error) => error instanceof DatabaseInitializationError && error.stage === "migration");
-  assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 11);
-  assert.deepEqual(await readPayments(), before);
+test("S13 v12 rolls back the index repair if a v11 expense has duplicate payers", withTestFile(async (path) => {
+  const connection = openTestConnection(path);
+  try {
+    await seedLegacyPayments(connection, 11);
+    await connection.execAsync(`
+      DROP INDEX merchant_payments_single_payer;
+      INSERT INTO merchant_payments VALUES ('trip', 'dinner', 'a', 1);
+    `);
+    const readPayments = () => connection.getAllAsync("SELECT * FROM merchant_payments ORDER BY member_id");
+    const before = await readPayments();
+    await assert.rejects(initializeDatabase(connection), (error) => error instanceof DatabaseInitializationError && error.stage === "migration");
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 11);
+    assert.deepEqual(await readPayments(), before);
+    assert.deepEqual(await connection.getFirstAsync("SELECT payer_id, paid_minor FROM expense_revisions"), { payer_id: "z", paid_minor: 8000 });
+  } finally {
+    connection.close();
+  }
+}));
+
+test("Batch B rolls back the v13 revision table rebuild if migration cannot finish", withTestFile(async (path) => {
+  const connection = openTestConnection(path);
+  try {
+    await seedLegacyPayments(connection, 12);
+    // An unexpected schema collision fails after the tables have been copied and the old index dropped.
+    await connection.execAsync("CREATE INDEX merchant_payments_by_activity ON merchant_payments(member_id)");
+    await assert.rejects(initializeDatabase(connection), (error) => error instanceof DatabaseInitializationError && error.stage === "migration");
+    assert.equal((await connection.getFirstAsync("PRAGMA user_version")).user_version, 12);
+    assert.ok(await connection.getFirstAsync("SELECT name FROM sqlite_schema WHERE name = 'merchant_payments_single_payer'"));
+    assert.equal(await connection.getFirstAsync("SELECT name FROM sqlite_schema WHERE name = 'expense_revision_payments'"), null);
+    assert.deepEqual(await connection.getFirstAsync("SELECT payer_id, paid_minor FROM expense_revisions"), { payer_id: "z", paid_minor: 8000 });
+    assert.equal(valueOf(await validateStoredLedgers(connection, 12)), true);
+  } finally {
+    connection.close();
+  }
 }));
 
 test("snapshot and publishing failures leave the current ledger usable", withFinance(async (finance, _activities, database, _connection, _reopen, path) => {
@@ -1376,7 +1440,7 @@ test("restore rejects invalid paths, damaged backups and a valid backup swapped 
   writeFileSync(altered, payload);
   const malformed = openTestConnection(altered);
   try {
-    await malformed.execAsync("DROP INDEX merchant_payments_single_payer");
+    await malformed.execAsync("DROP INDEX merchant_payments_by_activity");
   } finally {
     malformed.close();
   }
@@ -1634,7 +1698,7 @@ test("v7 migrates a v6 ledger with expense revisions and keeps the legacy displa
     const detail = await loadActivityDetail("trip", database);
     assert.deepEqual(detail.expenses.map(({ name, effectiveMinor }) => [name, effectiveMinor]), [["費用 1", 8000]]);
     assert.equal((await connection.getFirstAsync("SELECT name FROM expenses WHERE id = 'dinner'")).name, null);
-    assert.equal(valueOf(await validateStoredLedgers(connection, 7)), true);
+    assert.equal(valueOf(await validateStoredLedgers(connection, migrations.length)), true);
   } finally {
     connection.close();
   }
@@ -2762,3 +2826,191 @@ test("S11 reads revised and voided activity ledgers without writes and retains t
     assert.equal(buildSettlementPngCard(preview, "en").outstanding, "HKD 700.00");
   },
 ));
+
+function multiPayerExpense(first = 6000, second = 4000) {
+  const { merchantPayment: _single, ...bill } = expense();
+  return {
+    ...bill,
+    merchantPayments: [
+      { memberId: "z", currency: "HKD", amountMinor: first },
+      { memberId: "a", currency: "HKD", amountMinor: second },
+    ],
+  };
+}
+
+test("Batch B keeps multiple merchant payments, a refund to the second payer and real repayments independent", withFinance(
+  async (_finance, _activities, database, _connection, reopen) => {
+    const finance = createFinanceRepository(database, () => true, () => true);
+    const bill = multiPayerExpense();
+    valueOf(await finance.createExpense("trip", 100, bill));
+    const before = await loadActivitySettlement("trip", database);
+    assert.deepEqual(before.members.map(({ netBalanceMinor }) => netBalanceMinor), [1000, -1000]);
+
+    const review = valueOf(await finance.previewMerchantRefund("trip", 200, { ...refund, recipientId: "a" }));
+    assert.deepEqual(review.refund.reductions, refund.reductions);
+    valueOf(await finance.commitReviewedMerchantRefund("trip", review));
+    const refunded = await loadActivitySettlement("trip", database);
+    assert.deepEqual([refunded.effectiveMinor, refunded.outstandingMinor], [8000n, 2000n]);
+    assert.deepEqual(refunded.members.map(({ netBalanceMinor }) => netBalanceMinor), [2000, -2000]);
+    valueOf(await finance.recordMemberTransfer("trip", 300, { ...repayment, amountMinor: 500 }));
+    assert.deepEqual((await loadActivitySettlement("trip", database)).members.map(({ netBalanceMinor }) => netBalanceMinor), [1500, -1500]);
+
+    const request = { id: "refund-void", targetEventId: refund.id, occurredAt: 400 };
+    valueOf(await finance.commitReviewedMerchantRefundVoid("trip", valueOf(await finance.previewMerchantRefundVoid("trip", "dinner", request))));
+    const restored = valueOf(await (await reopen()).getActivityLedger("trip"));
+    assert.deepEqual(restored.balanceSnapshot.balances.map(({ netBalanceMinor }) => netBalanceMinor), [500, -500]);
+    assert.deepEqual(restored.events.map(({ kind }) => kind), ["expense", "merchantRefund", "memberTransfer", "financialVoid"]);
+    assert.deepEqual(restored.events[0].expense.merchantPayments, bill.merchantPayments);
+    assert.equal(restored.events[1].recipientId, "a");
+    assert.equal(restored.events[2].amountMinor, 500);
+  },
+));
+
+test("Batch B rejects unverified Pro, invalid payer rows and partial writes, and retries by expense ID", withFinance(
+  async (_finance, activities, database, connection) => {
+    let verified = false;
+    const finance = createFinanceRepository(database, () => true, () => verified);
+    await activities.addMember("trip", { id: "outside-split", displayName: "Casey" });
+    const draft = {
+      ...createExpenseEditor(await activities.getActivity("trip")), finalTotal: "100.00",
+      paymentRows: [{ memberId: "z", amount: "60.00" }, { memberId: "outside-split", amount: "40.00" }],
+    };
+    const bill = valueOf(prepareNewExpense("dinner", "Dinner", {
+      ...draft, members: draft.members.map((member) => ({ ...member, included: member.id !== "outside-split" })),
+    }));
+    assert.equal((await finance.createExpense("trip", 100, bill)).error.code, "PRO_REQUIRED");
+    verified = true;
+    const [first, second] = bill.merchantPayments;
+    for (const [rows, code] of [
+      [[first, { ...second, amountMinor: 3999 }], "TOTAL_MISMATCH"],
+      [[first, { ...second, amountMinor: 4001 }], "TOTAL_MISMATCH"],
+      [[first, { ...second, memberId: "z" }], "DUPLICATE_MEMBER_ID"],
+      [[first, { ...second, memberId: "missing" }], "MEMBER_NOT_PARTICIPATING"],
+      [[first, { ...second, currency: "JPY" }], "CURRENCY_MISMATCH"],
+      [[first, { ...second, amountMinor: 0 }], "NON_POSITIVE_AMOUNT"],
+    ]) {
+      assert.equal((await finance.createExpense("trip", 100, { ...bill, merchantPayments: rows })).error.code, code);
+    }
+    await connection.execAsync(`
+      CREATE TRIGGER fail_second_payment BEFORE INSERT ON merchant_payments
+      WHEN NEW.member_id = 'outside-split' BEGIN SELECT RAISE(ABORT, 'payment failure'); END;
+    `);
+    assert.equal((await finance.createExpense("trip", 100, bill)).error.code, "FINANCE_STORAGE_ERROR");
+    for (const table of ["financial_events", "expenses", "expense_allocations", "merchant_payments"]) {
+      assert.equal((await connection.getFirstAsync(`SELECT COUNT(*) AS n FROM ${table}`)).n, 0);
+    }
+    await connection.execAsync("DROP TRIGGER fail_second_payment");
+    const saved = valueOf(await finance.createExpense("trip", 100, bill));
+    verified = false;
+    assert.deepEqual(valueOf(await finance.createExpense("trip", 100, { ...bill, merchantPayments: [second, first] })), saved);
+    assert.equal((await finance.createExpense("trip", 100, multiPayerExpense())).error.code, "EVENT_ID_CONFLICT");
+    assert.deepEqual((await loadActivitySettlement("trip", database)).members.map(({ netBalanceMinor }) => netBalanceMinor), [1000, -5000, 4000]);
+    // An activity member who did not pay the merchant can still be the actual refund recipient.
+    valueOf(await finance.recordMerchantRefund("trip", 200, { ...refund, recipientId: "a" }));
+    assert.deepEqual((await loadActivitySettlement("trip", database)).members.map(({ netBalanceMinor }) => netBalanceMinor), [2000, -6000, 4000]);
+  },
+));
+
+test("Batch B corrects payer amounts with reviewed refunds and prior repayments, atomically preserving every version", withFinance(
+  async (_finance, _activities, database, connection, reopen) => {
+    let verified = true;
+    const finance = createFinanceRepository(database, () => true, () => verified);
+    const original = valueOf(await finance.createExpense("trip", 100, { ...multiPayerExpense(), name: "Dinner" }));
+    valueOf(await finance.recordMerchantRefund("trip", 200, { ...refund, recipientId: "a" }));
+    valueOf(await finance.recordMemberTransfer("trip", 300, { ...repayment, amountMinor: 500 }));
+    const detail = await loadExpenseDetail("trip", "dinner", database);
+    const initial = hydrateExpenseEditor(detail.activity, detail.expense);
+    assert.deepEqual(initial.paymentRows, [{ memberId: "z", amount: "60.00" }, { memberId: "a", amount: "40.00" }]);
+    const proposed = valueOf(prepareExpenseEdit(detail.expense, initial, {
+      ...initial, paymentRows: [{ memberId: "z", amount: "70.00" }, { memberId: "a", amount: "30.00" }],
+    }, "Dinner", detail.expenseDate));
+    assert.deepEqual(proposed.split, original.expense.split);
+
+    const review = valueOf(await finance.previewExpenseCorrection("trip", "dinner", proposed, 1));
+    assert.deepEqual(review.memberChanges.map(({ beforeNetBalanceMinor, afterNetBalanceMinor }) =>
+      [beforeNetBalanceMinor, afterNetBalanceMinor]), [[1500, 2500], [-1500, -2500]]);
+    const request = correction(10_000, { occurredAt: 400, proposed: review.expense.after, expectedLedger: review.ledgerToken });
+    assert.equal((await finance.commitReviewedExpenseCorrection("trip", request)).error.code, "REFUND_REVIEW_REQUIRED");
+    request.reviewedRefundIds = [refund.id];
+    verified = false;
+    assert.equal((await finance.commitReviewedExpenseCorrection("trip", request)).error.code, "PRO_REQUIRED");
+    verified = true;
+    await connection.execAsync(`
+      CREATE TRIGGER fail_revision_payment BEFORE INSERT ON expense_revision_payments
+      WHEN NEW.member_id = 'a' BEGIN SELECT RAISE(ABORT, 'revision payment failure'); END;
+    `);
+    const before = valueOf(await finance.getActivityLedger("trip"));
+    assert.equal((await finance.commitReviewedExpenseCorrection("trip", request)).error.code, "FINANCE_STORAGE_ERROR");
+    for (const table of ["expense_revisions", "expense_revision_allocations", "expense_revision_payments"]) {
+      assert.equal((await connection.getFirstAsync(`SELECT COUNT(*) AS n FROM ${table}`)).n, 0);
+    }
+    assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
+    await connection.execAsync("DROP TRIGGER fail_revision_payment");
+    const saved = valueOf(await finance.commitReviewedExpenseCorrection("trip", request));
+    assert.equal(saved.version, 2);
+    assert.deepEqual(valueOf(await finance.getActivityLedger("trip")).events, before.events);
+
+    const free = await reopen();
+    assert.deepEqual(valueOf(await free.commitReviewedExpenseCorrection("trip", request)), saved);
+    const versions = valueOf(await free.listExpenseRevisions("trip", "dinner"));
+    assert.deepEqual(versions.map(({ expense }) => expense.merchantPayments.map(({ amountMinor }) => amountMinor)),
+      [[6000, 4000], [7000, 3000]]);
+    assert.deepEqual(valueOf(await free.getActivityLedger("trip")).balanceSnapshot, review.after);
+  },
+));
+
+test("Batch B restores both v12 single-payer and v13 multi-payer backups with revisions and event history", withRestore(async ({
+  directory, platform, live, source, service, exportSource, prepare,
+}) => {
+  const legacyPath = join(directory, "legacy-v12.sqlite");
+  const legacy = openTestConnection(legacyPath);
+  try {
+    await seedLegacyPayments(legacy, 12);
+  } finally {
+    legacy.close();
+  }
+  const bytes = readFileSync(legacyPath);
+  const legacyBackup = join(directory, "v12.splitmori-backup");
+  writeBackup(legacyBackup, { formatVersion: 1, schemaVersion: 12, createdAt: null, byteLength: bytes.length, sha256: sha256(bytes), assets: [] }, bytes);
+  const restore = async (file) => {
+    const { confirmation } = await prepare(file);
+    assert.deepEqual(await service.restoreBackup({ confirmation, confirmed: true }), { status: "restored" });
+  };
+  await restore(legacyBackup);
+  const free = createFinanceRepository(live);
+  assert.deepEqual(valueOf(await free.listExpenseRevisions("trip", "dinner")).map(({ expense }) => expense.merchantPayment.amountMinor),
+    [10_000, 8000]);
+  assert.equal((await live.read((db) => db.getFirstAsync("PRAGMA user_version"))).user_version, 13);
+
+  const pro = createFinanceRepository(source, () => true, () => true);
+  valueOf(await pro.createExpense("trip", 100, multiPayerExpense()));
+  valueOf(await pro.recordMerchantRefund("trip", 200, { ...refund, recipientId: "a" }));
+  valueOf(await pro.recordMemberTransfer("trip", 300, { ...repayment, amountMinor: 500 }));
+  valueOf(await pro.commitExpenseCorrection("trip", correction(10_000, {
+    occurredAt: 400, proposed: multiPayerExpense(7000, 3000), reviewedRefundIds: [refund.id],
+  })));
+  valueOf(await pro.voidMerchantRefund("trip", { id: "refund-void", targetEventId: refund.id, occurredAt: 500 }));
+  const before = valueOf(await pro.getActivityLedger("trip"));
+  const uri = await exportSource();
+  assert.equal(valueOf(await createBackupService(platform).previewBackup(uri)).manifest.schemaVersion, 13);
+  assert.deepEqual(valueOf(await pro.getActivityLedger("trip")), before);
+  await restore(uri);
+  assert.deepEqual(valueOf(await free.getActivityLedger("trip")), before);
+  assert.equal((await free.previewExpenseCorrection("trip", "dinner", expense(), 2)).error.code, "PRO_REQUIRED");
+
+  const { manifest, payload } = unpackBackup(uri);
+  const alteredPath = join(directory, "invalid.sqlite");
+  writeFileSync(alteredPath, payload);
+  const altered = openTestConnection(alteredPath);
+  try {
+    await altered.execAsync("DELETE FROM expense_revision_payments WHERE member_id = 'a'");
+  } finally {
+    altered.close();
+  }
+  const invalid = join(directory, "invalid.splitmori-backup");
+  const alteredBytes = readFileSync(alteredPath);
+  writeBackup(invalid, { ...manifest, byteLength: alteredBytes.length, sha256: sha256(alteredBytes) }, alteredBytes);
+  assert.deepEqual(await service.prepareRestore(pathToFileURL(invalid).href),
+    { status: "validation-failed", code: "BACKUP_LEDGER_INVALID" });
+  assert.deepEqual(valueOf(await free.getActivityLedger("trip")), before);
+}));

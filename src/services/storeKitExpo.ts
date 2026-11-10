@@ -30,3 +30,6 @@ export const proEntitlement = createProEntitlement(adapter, productId, {
   load: async (id) => await cache.getItem(id) === "pro",
   save: (id, wasPro) => cache.setItem(id, wasPro ? "pro" : "free"),
 });
+
+// High-risk new multi-payer writes require current confirmation, not the session fallback.
+export const hasVerifiedProAccess = () => proEntitlement.getSnapshot().status === "pro";

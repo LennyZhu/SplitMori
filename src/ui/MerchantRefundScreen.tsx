@@ -1,7 +1,8 @@
 import { uuid } from "expo";
-import { useCallback, useEffect, useRef, useState, type ComponentRef } from "react";
+import { useCallback, useContext, useEffect, useRef, useState, type ComponentRef } from "react";
 import { ActivityIndicator, Keyboard, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import type { DomainErrorCode } from "../domain/result.ts";
+import { merchantPaymentsOf } from "../domain/balance.ts";
 import type { TransferSuggestion } from "../domain/settlement.ts";
 import { loadExpenseDetail, summarizeCorrectionBalances, summarizeExpenseRefunds, type ExpenseDetailData } from "../services/expenseDetail.ts";
 import { expenseDateInput } from "../services/expenseEditor.ts";
@@ -13,6 +14,8 @@ import { formatResultMoney } from "../services/quickSplitResult.ts";
 import { ButtonPair, Card, Compare, Heading, Notice, Row, financeReviewStyles as reviewStyles } from "./FinanceReviewUi.tsx";
 import { ConversionButton, ConversionPage, ConversionReadError, memberLabels, MemberPicker } from "./QuickSplitConversionScreen.tsx";
 import { colors, Icon } from "./visuals.tsx";
+import { AppLanguageContext } from "./AppLanguageContext.ts";
+import { merchantPaymentCopy } from "./merchantPaymentCopy.ts";
 
 export const merchantRefundCopy = {
   title: "商家退款", register: "登記商家退款", registerAnother: "登記另一筆退款", history: "商家退款記錄",
@@ -98,7 +101,7 @@ function RefundHistoryCard({ entry, money, nameFor, onOpen }: {
     <Row title={copy.recipient} value={nameFor(refund.recipientId)} />
     <Row title={copy.allocation} value={refund.distribution === "proportional" ? copy.proportional : copy.recordedAllocation} />
     {version && <>
-      <Row title={copy.merchantPaid} value={money(version.expense.merchantPayment.amountMinor)} />
+      <Row title={copy.merchantPaid} value={money(version.expense.split.total.amountMinor)} />
       <Row title={copy.version} value={`${version.expense.name ?? copy.unnamedExpense} · v${version.version}`} />
     </>}
     {onOpen ? <Pressable accessibilityRole="button" onPress={onOpen} style={[styles.link, reviewStyles.divider]}>
@@ -192,6 +195,7 @@ function RefundImpact({ review }: { review: Preview }) {
 export function MerchantRefundScreen({ activityId, expenseId, entryPoint, onBack }: {
   activityId: string; expenseId: string; entryPoint: "register" | "history"; onBack: () => void;
 }) {
+  const paymentCopy = merchantPaymentCopy(useContext(AppLanguageContext));
   const [page, setPage] = useState<"register" | "history" | "detail">(entryPoint);
   const [data, setData] = useState<ExpenseDetailData | null>();
   const [draft, setDraft] = useState<MerchantRefundDraft>(() => ({
@@ -220,7 +224,10 @@ export function MerchantRefundScreen({ activityId, expenseId, entryPoint, onBack
       const result = await loadExpenseDetail(activityId, expenseId);
       if (id !== readId.current) return;
       setData(result);
-      if (result) setDraft((current) => current.recipientId ? current : { ...current, recipientId: result.expense.merchantPayment.memberId });
+      if (result?.expense.merchantPayment) {
+        const defaultRecipient = result.expense.merchantPayment.memberId;
+        setDraft((current) => current.recipientId ? current : { ...current, recipientId: defaultRecipient });
+      }
     } catch {
       if (id === readId.current) setReadError(true);
     }
@@ -350,7 +357,7 @@ export function MerchantRefundScreen({ activityId, expenseId, entryPoint, onBack
   }
 
   const footer = data && (page === "history" && active && available > 0 ? <ConversionButton label={copy.registerAnother} onPress={() => {
-    setDraft({ amount: "", recipientId: data.expense.merchantPayment.memberId, date: expenseDateInput(new Date()), note: "" });
+    setDraft({ amount: "", recipientId: data.expense.merchantPayment?.memberId ?? "", date: expenseDateInput(new Date()), note: "" });
     setAttempted(false);
     setSaved(undefined);
     setFormFromHistory(true);
@@ -380,8 +387,11 @@ export function MerchantRefundScreen({ activityId, expenseId, entryPoint, onBack
             <Notice>{copy.formHelp}</Notice>
             <Card>
               <Text style={reviewStyles.caption}>{expenseLabel(data)} · v{data.currentVersion} · {data.activity.currency}</Text>
-              <Row title={copy.merchantPayer} value={nameFor(data.expense.merchantPayment.memberId)} divider={false} />
-              <Row title={copy.merchantPaid} value={money(data.expense.merchantPayment.amountMinor)} />
+              {data.expense.merchantPayment
+                ? <Row title={copy.merchantPayer} value={nameFor(data.expense.merchantPayment.memberId)} divider={false} />
+                : merchantPaymentsOf(data.expense).map(({ memberId, amountMinor }, index) =>
+                  <Row key={memberId} title={nameFor(memberId)} value={money(amountMinor)} divider={index > 0} />)}
+              <Row title={paymentCopy.paidTotal} value={money(data.expense.split.total.amountMinor)} />
               <Row title={copy.effectiveExpense} value={money(available)} />
               <Row title={copy.effectiveRefund} value={money(amounts?.amountMinor ?? 0)} />
               <Row title={copy.remaining} value={money(available)} />
@@ -405,6 +415,7 @@ export function MerchantRefundScreen({ activityId, expenseId, entryPoint, onBack
                   <Text style={reviewStyles.compareLabel}>{names.get(draft.recipientId) ?? copy.selectRecipient}</Text>
                   <Icon name="down" size={16} />
                 </Pressable>
+                {data.expense.merchantPayments && <Text style={reviewStyles.caption}>{paymentCopy.refundRecipient}</Text>}
                 {fieldError("recipientId")}
               </View>
               <Heading>{copy.allocation}</Heading>

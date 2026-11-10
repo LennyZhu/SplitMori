@@ -8,18 +8,22 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { createActivityRepository, type ActivityDetail } from "../data/activities.ts";
 import { getLocalDatabase } from "../data/database.ts";
 import { createFinanceRepository, type FinanceExpense } from "../data/finance.ts";
+import { merchantPaymentsOf } from "../domain/balance.ts";
+import { parseAmount } from "../domain/money.ts";
 import type { DomainErrorCode } from "../domain/result.ts";
 import {
   calculateExpenseSplit, createExpenseEditor, expenseDateInput, expenseDateTimestamp, expenseSplitUnchanged,
-  hydrateExpenseEditor, prepareExpenseEdit, prepareNewExpense,
+  hydrateExpenseEditor, inspectExpensePayments, prepareExpenseEdit, prepareNewExpense, type ExpenseEditorState, type PaymentRow,
 } from "../services/expenseEditor.ts";
-import { lockedAdvancedField, type EditorField, type EditorMember, type QuickSplitEditorState } from "../services/quickSplitEditor.ts";
+import { lockedAdvancedField, type EditorField, type EditorMember } from "../services/quickSplitEditor.ts";
 import { formatResultMoney } from "../services/quickSplitResult.ts";
+import { hasVerifiedProAccess } from "../services/storeKitExpo.ts";
 import { SplitModeSelector } from "./SplitModeSelector.tsx";
 import { usePro, useProSnapshot } from "./ProContext.ts";
 import { AdvancedChargeFields, AdvancedMethodFields } from "./AdvancedSplitFields.tsx";
 import { advancedEditorMessage, advancedSplitCopy } from "./advancedSplitCopy.ts";
 import { AppLanguageContext } from "./AppLanguageContext.ts";
+import { merchantPaymentCopy, merchantPaymentError } from "./merchantPaymentCopy.ts";
 import { validationMessage } from "./splitEditorMessages.ts";
 import { colors, Icon } from "./visuals.tsx";
 
@@ -98,18 +102,20 @@ type EditExpenseForm = {
 export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
   activityId: string; onBack: () => void;
 } & ({ onSaved: () => void; edit?: never } | { onSaved?: never; edit: EditExpenseForm })) {
-  const { hasProAccess } = usePro();
+  const { hasProAccess, openPro } = usePro();
   const pro = useProSnapshot();
   const language = useContext(AppLanguageContext);
+  const paymentCopy = merchantPaymentCopy(language);
   const [activity, setActivity] = useState<ActivityDetail | null | undefined>(edit?.activity);
   const [initial] = useState(() => edit && hydrateExpenseEditor(edit.activity, edit.original));
-  const [editor, setEditor] = useState<QuickSplitEditorState | undefined>(initial);
+  const [editor, setEditor] = useState<ExpenseEditorState | undefined>(initial);
   const [loadError, setLoadError] = useState(false);
   const [name, setName] = useState(edit?.name ?? "");
   const [openedAt] = useState(() => edit ? new Date(edit.originalDate) : new Date());
   const [date, setDate] = useState(() => expenseDateInput(openedAt));
   const [dateEditing, setDateEditing] = useState(false);
   const [showPayers, setShowPayers] = useState(false);
+  const [openPaymentRow, setOpenPaymentRow] = useState<number>();
   const [showDetails, setShowDetails] = useState(initial?.chargeMode === "details");
   const [attempted, setAttempted] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -177,12 +183,12 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
     setSaveError(undefined);
   }
 
-  function updateEditor(patch: Partial<QuickSplitEditorState>) {
+  function updateEditor(patch: Partial<ExpenseEditorState>) {
     markDirty();
     setEditor((current) => current && { ...current, ...patch });
   }
 
-  function setField<K extends keyof QuickSplitEditorState>(field: K, value: QuickSplitEditorState[K]) {
+  function setField<K extends keyof ExpenseEditorState>(field: K, value: ExpenseEditorState[K]) {
     updateEditor({ [field]: value });
   }
 
@@ -195,6 +201,14 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
   const preview = editor && !preservedSplit ? calculateExpenseSplit(editor, pro.hasProAccess) : undefined;
   const split = preservedSplit ?? (preview?.ok ? preview.value.snapshot.split : undefined);
   const payer = editor?.members.find((member) => member.id === editor.merchantPayerId);
+  const rows = editor?.paymentRows;
+  const originalIsMultiple = edit ? merchantPaymentsOf(edit.original).length > 1 : false;
+  const needsVerifiedPro = rows !== undefined || originalIsMultiple;
+  const receipt = editor && !split ? parseAmount(editor.finalTotal.trim(), editor.currency) : undefined;
+  const billTotal = split?.total ?? (receipt?.ok ? receipt.value : undefined);
+  const payment = editor && inspectExpensePayments(editor, billTotal);
+  const remaining = payment?.remainingMinor;
+  const multiBlocked = needsVerifiedPro && (pro.status !== "pro" || (rows !== undefined && !payment?.result.ok));
   const error = preview?.ok === false ? preview.error : undefined;
   const participants = editor?.members.filter(({ included }) => included) ?? [];
   const formReady = !!(activity && editor);
@@ -213,11 +227,33 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
     requestAnimationFrame(() => scroll.current?.scrollTo({ y: Math.max(0, (offsets.current[section] ?? 0) - 8) }));
   }
 
+  function startMultiple() {
+    if (!editor) return;
+    if (!hasVerifiedProAccess()) {
+      Alert.alert(paymentCopy.multiple, paymentCopy.proRequired, [
+        { text: paymentCopy.cancel, style: "cancel" }, { text: paymentCopy.learn, onPress: () => openPro() },
+      ]);
+      return;
+    }
+    setOpenPaymentRow(undefined);
+    setShowPayers(false);
+    setField("paymentRows", [{ memberId: editor.merchantPayerId ?? "", amount: "" }, { memberId: "", amount: "" }]);
+  }
+
+  function editPaymentRow(index: number, patch: Partial<PaymentRow>) {
+    if (rows) setField("paymentRows", rows.map((row, at) => at === index ? { ...row, ...patch } : row));
+  }
+
   async function save() {
     if (!activity || !editor || pending.current) return;
     Keyboard.dismiss();
     setAttempted(true);
     setSaveError(undefined);
+    if (needsVerifiedPro && !hasVerifiedProAccess()) {
+      setSaveError(paymentCopy.proRequired);
+      focusSection("payer");
+      return;
+    }
     const locked = lockedAdvancedField(editor, hasProAccess());
     if (locked) {
       setSaveError(advancedSplitCopy(language).locked);
@@ -246,11 +282,12 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
         if (mounted.current) setSaveError(message);
         return;
       }
-      const repository = createFinanceRepository(await getLocalDatabase(), hasProAccess);
+      const repository = createFinanceRepository(await getLocalDatabase(), hasProAccess, hasVerifiedProAccess);
       const result = await repository.createExpense(activityId, occurredAt, expense.value);
       if (!mounted.current) return;
       if (result.ok) onSaved?.();
-      else setSaveError(result.error.code === "PRO_REQUIRED" ? advancedSplitCopy(language).locked : storageMessage(result.error.code));
+      else setSaveError(result.error.field === "merchantPayment" ? merchantPaymentError(result.error.code, paymentCopy)
+        : result.error.code === "PRO_REQUIRED" ? advancedSplitCopy(language).locked : storageMessage(result.error.code));
     } catch {
       if (mounted.current) setSaveError(edit ? "未能讀取更正預覽，請重試。" : storageMessage("FINANCE_STORAGE_ERROR"));
     } finally {
@@ -260,7 +297,7 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
   }
 
   const placeholder = activity?.currency === "JPY" ? "0" : "0.00";
-  const money = (minor: number) => activity ? formatResultMoney(activity.currency, minor) : "";
+  const money = (minor: number | bigint) => activity ? formatResultMoney(activity.currency, minor) : "";
   const shares = new Map(split?.allocations.map(({ memberId, amountMinor }) => [memberId, amountMinor]));
   const total = split && money(split.total.amountMinor);
 
@@ -416,11 +453,59 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
                 error={fieldError} onFocus={onInputFocus} />
             </Card>
 
-            <Card title="誰向商家付款？ *" onLayout={offset("payer")}>
+            <Card title={`${paymentCopy.heading} *`} onLayout={offset("payer")}>
+              {rows !== undefined && payment ? <>
+                {rows.map((row, index) => {
+                  const selected = editor.members.find(({ id }) => id === row.memberId);
+                  const rowError = payment.rowErrors[index];
+                  return <View key={index} style={styles.subsection}>
+                    <Text style={styles.label}>{paymentCopy.payer} {index + 1}</Text>
+                    <Pressable accessibilityRole="button" accessibilityLabel={`${paymentCopy.payer} ${index + 1} · ${selected?.displayName ?? paymentCopy.choose}`}
+                      accessibilityState={{ expanded: openPaymentRow === index }}
+                      onPress={() => setOpenPaymentRow(openPaymentRow === index ? undefined : index)}
+                      style={({ pressed }) => [styles.picker, pressed && styles.dimmed]}>
+                      <Text style={[styles.label, styles.fill]}>{selected?.displayName ?? paymentCopy.choose}</Text>
+                      <Icon name="down" size={17} />
+                    </Pressable>
+                    {openPaymentRow === index && <View accessibilityRole="radiogroup" style={styles.options}>
+                      {editor.members.filter(({ id }) => !rows.some((other, at) => at !== index && other.memberId === id))
+                        .map(({ id, displayName }) => <Option key={id} label={displayName} selected={row.memberId === id}
+                          onPress={() => { editPaymentRow(index, { memberId: id }); setOpenPaymentRow(undefined); }} />)}
+                    </View>}
+                    <AmountField label={paymentCopy.paid} value={row.amount} placeholder={placeholder} onFocus={onInputFocus}
+                      onChange={(amount) => editPaymentRow(index, { amount })}
+                      error={rowError && (row.memberId || row.amount.trim() || attempted) ? merchantPaymentError(rowError, paymentCopy) : undefined} />
+                    {rows.length > 2 && <Pressable accessibilityRole="button" style={({ pressed }) => [styles.memberRow, pressed && styles.dimmed]}
+                      onPress={() => { setOpenPaymentRow(undefined); setField("paymentRows", rows.filter((_, at) => at !== index)); }}>
+                      <Text style={styles.label}>{paymentCopy.remove} {index + 1}</Text>
+                    </Pressable>}
+                  </View>;
+                })}
+                {rows.length < editor.members.length && <Pressable accessibilityRole="button" style={({ pressed }) => [styles.memberRow, pressed && styles.dimmed]}
+                  onPress={() => setField("paymentRows", [...rows, { memberId: "", amount: "" }])}>
+                  <Icon name="plus" size={17} /><Text style={styles.label}>{paymentCopy.add}</Text>
+                </Pressable>}
+                <View style={styles.previewRow}>
+                  <Text style={[styles.caption, styles.fill]}>{paymentCopy.paidTotal}</Text>
+                  <Text style={styles.amount}>{money(payment.paidMinor)}</Text>
+                </View>
+                {remaining !== undefined && <View style={styles.previewRow}>
+                  <Text style={[styles.caption, styles.fill]}>{remaining < 0n ? paymentCopy.excess : paymentCopy.remaining}</Text>
+                  <Text style={styles.amount}>{money(remaining < 0n ? -remaining : remaining)}</Text>
+                </View>}
+                <ErrorText message={pro.status !== "pro" ? paymentCopy.proRequired
+                  : billTotal === undefined ? paymentCopy.billRequired
+                  : remaining !== undefined && remaining !== 0n ? paymentCopy.mismatch
+                  : payment.result.ok || payment.result.error.field !== "merchantPayment" ? undefined : merchantPaymentError(payment.result.error.code, paymentCopy)} />
+                <Pressable accessibilityRole="button" style={({ pressed }) => [styles.memberRow, pressed && styles.dimmed]} onPress={() => {
+                  setOpenPaymentRow(undefined);
+                  updateEditor({ merchantPayerId: editor.merchantPayerId ?? (rows[0]?.memberId || undefined), paymentRows: undefined });
+                }}><Text style={styles.label}>{paymentCopy.single}</Text></Pressable>
+              </> : <>
               <Pressable accessibilityRole="button" accessibilityState={{ expanded: showPayers }} onPress={() => setShowPayers(!showPayers)} style={styles.picker}>
                 <View style={[styles.fill, styles.field]}>
-                  <Text style={styles.label}>{payer?.displayName ?? "選擇實際付款人"}</Text>
-                  {payer && total && <Text style={styles.caption}>實際支付 {total}</Text>}
+                  <Text style={styles.label}>{payer?.displayName ?? paymentCopy.choose}</Text>
+                  {payer && total && <Text style={styles.caption}>{paymentCopy.paid} {total}</Text>}
                 </View>
                 <Icon name={showPayers ? "minus" : "down"} size={17} />
               </Pressable>
@@ -430,8 +515,14 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
                     onPress={() => { setField("merchantPayerId", id); setShowPayers(false); }} />)}
                 </View>
               )}
-              <Text style={styles.caption}>付款與分帳承擔額分開記錄。Free 每筆費用由一位成員全額付款。</Text>
-              <ErrorText message={attempted && !payer ? "請選擇實際向商家付款的成員。" : undefined} />
+              <ErrorText message={attempted && !payer ? paymentCopy.required : undefined} />
+              {editor.members.length > 1 && <Pressable accessibilityRole="button"
+                style={({ pressed }) => [styles.memberRow, pressed && styles.dimmed]} onPress={startMultiple}>
+                <Icon name="plus" size={17} /><Text style={styles.label}>{paymentCopy.multiple}{pro.status === "pro" ? "" : " · Pro"}</Text>
+              </Pressable>}
+              {originalIsMultiple && pro.status !== "pro" && <ErrorText message={paymentCopy.proRequired} />}
+              </>}
+              <Text style={styles.caption}>{paymentCopy.separate}</Text>
             </Card>
 
             {edit && <Card onLayout={offset("date")}>{dateField}</Card>}
@@ -506,9 +597,9 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
       <View style={styles.footer}>
         <View style={styles.footerContent}>
           <ErrorText message={saveError} />
-          <Pressable accessibilityRole="button" accessibilityState={{ disabled: !formReady || saving, busy: saving }}
-            disabled={!formReady || saving} onPress={() => { void save(); }}
-            style={({ pressed }) => [styles.saveButton, (pressed || !formReady || saving) && styles.dimmed]}>
+          <Pressable accessibilityRole="button" accessibilityState={{ disabled: !formReady || saving || multiBlocked, busy: saving }}
+            disabled={!formReady || saving || multiBlocked} onPress={() => { void save(); }}
+            style={({ pressed }) => [styles.saveButton, (pressed || !formReady || saving || multiBlocked) && styles.dimmed]}>
             <Text style={styles.saveText}>{edit ? (saving ? "正在計算…" : "預覽更正影響") : (saving ? "正在儲存…" : "儲存費用")}</Text>
           </Pressable>
         </View>

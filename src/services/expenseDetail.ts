@@ -41,11 +41,13 @@ export function loadExpenseDetail(activityId: string, expenseId: string, databas
 
 export function loadExpenseCorrectionPreview(
   activityId: string, expense: FinanceExpense, version: number, database?: LocalDatabase, hasProAccess: ProAccess = freeAccess,
+  hasVerifiedProAccess: ProAccess = freeAccess,
 ) {
   return withActivityReadSnapshot(database, async (snapshot) => {
     const activity = await createActivityRepository(snapshot).getActivity(activityId);
     if (!activity) return failure("ACTIVITY_NOT_FOUND", "activityId");
-    const preview = await createFinanceRepository(snapshot, hasProAccess).previewExpenseCorrection(activityId, expense.id, expense, version);
+    const preview = await createFinanceRepository(snapshot, hasProAccess, hasVerifiedProAccess)
+      .previewExpenseCorrection(activityId, expense.id, expense, version);
     return preview.ok ? { ok: true, value: { ...preview.value, activity } } as const : preview;
   });
 }
@@ -56,11 +58,13 @@ type CorrectionSaveOutcome =
 
 export async function saveReviewedExpenseCorrection(
   activityId: string, request: ReviewedExpenseCorrectionRequest,
-  { verifyOnly = false, database, hasProAccess = freeAccess }: { verifyOnly?: boolean; database?: LocalDatabase; hasProAccess?: ProAccess } = {},
+  { verifyOnly = false, database, hasProAccess = freeAccess, hasVerifiedProAccess = freeAccess }: {
+    verifyOnly?: boolean; database?: LocalDatabase; hasProAccess?: ProAccess; hasVerifiedProAccess?: ProAccess;
+  } = {},
 ): Promise<CorrectionSaveOutcome> {
   let finance: ReturnType<typeof createFinanceRepository>;
   try {
-    finance = createFinanceRepository(database ?? await getLocalDatabase(), hasProAccess);
+    finance = createFinanceRepository(database ?? await getLocalDatabase(), hasProAccess, hasVerifiedProAccess);
   } catch {
     return { status: verifyOnly ? "unknown" : "notSaved" };
   }

@@ -1,6 +1,6 @@
 import { backupSnapshotName, getLocalDatabase, type LocalDatabase, type SQLiteConnection } from "../data/database.ts";
 import { validateStoredLedgers } from "../data/finance.ts";
-import { applyMigration, migrations } from "../data/migrations.ts";
+import { applyMigration, migrations, multiPayerSchemaVersion } from "../data/migrations.ts";
 import { failure, type DomainErrorCode, type Failure, type Result } from "../domain/result.ts";
 import { backupDiagnosticsEnabled, logBackupFailure, logBackupSchemaDifference } from "./backupDiagnostics.ts";
 
@@ -271,8 +271,9 @@ async function schemaMatches(platform: BackupPlatform, db: BackupDatabase, versi
   }
   const standard = await withReferenceSchema(platform, version, false, readSchema);
   if (matches(standard)) return true;
-  // Match the complete known early schema, including the appended v10 column after repair.
-  const early = version >= 3 ? await withReferenceSchema(platform, version, true, readSchema) : undefined;
+  // v13 rebuilds the revision table, so both pre-v13 layouts converge on one exact schema.
+  const early = version >= 3 && version < multiPayerSchemaVersion
+    ? await withReferenceSchema(platform, version, true, readSchema) : undefined;
   if (early && matches(early)) return true;
   if (backupDiagnosticsEnabled()) await reportSchemaDifferences(platform, db, version, actual, standard, early);
   return false;

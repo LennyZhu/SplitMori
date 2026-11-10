@@ -1,5 +1,7 @@
 import type { SQLiteConnection } from "./database.ts";
 
+export const multiPayerSchemaVersion = 13;
+
 export const migrations = [
   `
   CREATE TABLE activities (
@@ -241,6 +243,70 @@ export const migrations = [
   `
   -- Some existing ledgers reached v11 without the v2 single-payer index.
   CREATE UNIQUE INDEX IF NOT EXISTS merchant_payments_single_payer ON merchant_payments(expense_id);
+  `,
+  `
+  ALTER TABLE expense_revision_allocations RENAME TO expense_revision_allocations_v12;
+  ALTER TABLE expense_revisions RENAME TO expense_revisions_v12;
+
+  CREATE TABLE expense_revisions (
+    sequence INTEGER PRIMARY KEY CHECK (sequence BETWEEN 1 AND 9007199254740991),
+    id TEXT NOT NULL UNIQUE CHECK (length(trim(id)) > 0),
+    activity_id TEXT NOT NULL,
+    expense_id TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version BETWEEN 2 AND 9007199254740991),
+    occurred_at INTEGER NOT NULL CHECK (occurred_at BETWEEN 0 AND 9007199254740991),
+    currency TEXT NOT NULL,
+    amount_minor INTEGER NOT NULL CHECK (amount_minor BETWEEN 0 AND 9007199254740991),
+    split_mode TEXT NOT NULL CHECK (split_mode IN ('equal', 'treat', 'individual', 'custom')),
+    allocation_version INTEGER NOT NULL CHECK (allocation_version BETWEEN 1 AND 9007199254740991),
+    reviewed_refund_ids TEXT NOT NULL,
+    name TEXT CHECK (name IS NULL OR length(trim(name)) > 0),
+    expense_date INTEGER CHECK (expense_date BETWEEN 0 AND 9007199254740991),
+    split_input TEXT,
+    UNIQUE (expense_id, version),
+    UNIQUE (activity_id, id),
+    FOREIGN KEY (activity_id, expense_id) REFERENCES expenses(activity_id, id) ON DELETE RESTRICT,
+    FOREIGN KEY (activity_id, currency) REFERENCES activities(id, currency) ON UPDATE RESTRICT ON DELETE RESTRICT
+  ) STRICT;
+
+  CREATE TABLE expense_revision_allocations (
+    activity_id TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    member_id TEXT NOT NULL,
+    amount_minor INTEGER NOT NULL CHECK (amount_minor BETWEEN 0 AND 9007199254740991),
+    position INTEGER NOT NULL CHECK (position BETWEEN 0 AND 9007199254740991),
+    PRIMARY KEY (revision_id, member_id),
+    UNIQUE (revision_id, position),
+    FOREIGN KEY (activity_id, revision_id) REFERENCES expense_revisions(activity_id, id) ON DELETE RESTRICT,
+    FOREIGN KEY (activity_id, member_id) REFERENCES activity_members(activity_id, member_id) ON DELETE RESTRICT
+  ) STRICT;
+
+  CREATE TABLE expense_revision_payments (
+    activity_id TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    member_id TEXT NOT NULL,
+    amount_minor INTEGER NOT NULL CHECK (amount_minor BETWEEN 0 AND 9007199254740991),
+    PRIMARY KEY (revision_id, member_id),
+    FOREIGN KEY (activity_id, revision_id) REFERENCES expense_revisions(activity_id, id) ON DELETE RESTRICT,
+    FOREIGN KEY (activity_id, member_id) REFERENCES activity_members(activity_id, member_id) ON DELETE RESTRICT
+  ) STRICT;
+
+  INSERT INTO expense_revisions (sequence, id, activity_id, expense_id, version, occurred_at, currency, amount_minor,
+    split_mode, allocation_version, reviewed_refund_ids, name, expense_date, split_input)
+  SELECT sequence, id, activity_id, expense_id, version, occurred_at, currency, amount_minor, split_mode,
+    allocation_version, reviewed_refund_ids, name, expense_date, split_input FROM expense_revisions_v12;
+  INSERT INTO expense_revision_allocations (activity_id, revision_id, member_id, amount_minor, position)
+  SELECT activity_id, revision_id, member_id, amount_minor, position FROM expense_revision_allocations_v12;
+  INSERT INTO expense_revision_payments (activity_id, revision_id, member_id, amount_minor)
+  SELECT activity_id, id, payer_id, paid_minor FROM expense_revisions_v12;
+
+  DROP TABLE expense_revision_allocations_v12;
+  DROP TABLE expense_revisions_v12;
+  CREATE INDEX expense_revisions_timeline ON expense_revisions(activity_id, occurred_at, sequence);
+  CREATE INDEX expense_revision_payments_by_activity ON expense_revision_payments(activity_id, revision_id);
+
+  DROP INDEX merchant_payments_single_payer;
+  CREATE INDEX merchant_payments_by_activity ON merchant_payments(activity_id, expense_id);
   `,
 ] as const;
 
