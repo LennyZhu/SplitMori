@@ -1,0 +1,10 @@
+{
+  "name": "splitmori-support-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "build:release": "node build.mjs --release",
+    "test": "node --test"
+  }
+}

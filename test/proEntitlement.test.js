@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createProEntitlement } from "../src/services/proEntitlement.ts";
-import { proCopy } from "../src/ui/proCopy.ts";
+import { isRestoreStatus, proCopy } from "../src/ui/proCopy.ts";
 
 const sku = "test.lifetime-pro";
 
@@ -220,16 +220,43 @@ test("S12 distinguishes restore outcomes, retains prior access on read failure a
   assert.equal(service.getSnapshot().lastKnownPro, false);
 });
 
+test("S13 can restore from a Free session without loading the paywall price", async () => {
+  const { service, data, calls } = setup();
+  await service.refresh();
+  assert.equal(service.getSnapshot().status, "free");
+  data.current = "pro";
+
+  const restoring = service.restore();
+  assert.equal(service.getSnapshot().purchase, "restoring");
+  await Promise.all([restoring, service.restore()]);
+
+  assert.equal(service.getSnapshot().purchase, "restored");
+  assert.equal(service.getSnapshot().product.status, "loading");
+  assert.equal(service.hasProAccess(), true);
+  assert.equal(calls.filter(([kind]) => kind === "sync").length, 1);
+  assert.equal(calls.some(([kind]) => kind === "product" || kind === "purchase"), false);
+});
+
+test("S13 shows localized restore statuses separately from purchase notices", () => {
+  for (const status of ["restoring", "restored", "restoreNone", "restoreFailed"]) {
+    assert.equal(isRestoreStatus(status), true);
+    assert.ok(proCopy("zh-HK")[status]);
+    assert.ok(proCopy("en")[status]);
+  }
+  for (const status of ["purchasing", "purchased", "pending", "finishPending", "verificationFailed"]) {
+    assert.equal(isRestoreStatus(status), false);
+  }
+});
+
 test("S12 Paywall describes one-time billing and the real feature availability in both languages", () => {
   const zh = proCopy("zh-HK");
   const en = proCopy("en");
   assert.match(zh.terms, /一次性買斷.*非訂閱/);
   assert.match(en.terms, /one-time purchase.*no subscription/i);
-  assert.match(zh.plannedNote, /仍在開發/);
-  assert.match(en.plannedNote, /unavailable with a purchase today/);
   assert.match(zh.documentExport, /PDF 及 CSV/);
   assert.match(en.documentExport, /PDF and CSV/);
-  assert.doesNotMatch([...zh.upcoming, ...en.upcoming].join(" "), /PDF|CSV/);
+  assert.doesNotMatch(Object.values(zh).join(" "), /尚未開放|進階 PNG 樣式/);
+  assert.doesNotMatch(Object.values(en).join(" "), /still in development|advanced PNG styles/i);
   assert.ok(zh.price("HK$ 38.00").includes("HK$ 38.00"));
   assert.ok(en.price("€4,99").includes("€4,99"));
 });

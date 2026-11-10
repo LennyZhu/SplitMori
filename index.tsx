@@ -127,12 +127,11 @@ function App() {
   const [route, setRoute] = useState<Route>({ name: "home" });
   const [creationBlocker, setCreationBlocker] = useState<ActivityCreationBlocker | null>(null);
   const [proOpen, setProOpen] = useState(false);
-  const openPro = useCallback((restore = false) => {
+  const openPro = useCallback(() => {
     Keyboard.dismiss();
     setProOpen(true);
     void proEntitlement.loadProduct();
-    if (restore) void proEntitlement.restore();
-    else void proEntitlement.refresh();
+    void proEntitlement.refresh();
   }, []);
   const closePro = useCallback(() => setProOpen(false), []);
   const entryCheck = useRef<object>(undefined);

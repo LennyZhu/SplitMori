@@ -7,7 +7,8 @@
       "lifetimeProProductId": "com.zhushunli.splitmori.pro.lifetime",
       "eas": {
         "projectId": "4fde99a1-04c3-44db-8791-bc88fae5dab5"
-      }
+      },
+      "legalSiteOrigin": "https://splitmori-site.vercel.app"
     },
     "platforms": [
       "ios",

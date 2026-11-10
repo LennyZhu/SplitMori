@@ -1,4 +1,5 @@
 import type { AppLanguage } from "../services/appPreferences.ts";
+import type { PurchaseStatus } from "../services/proEntitlement.ts";
 
 const messages = {
   "zh-HK": {
@@ -6,8 +7,6 @@ const messages = {
     availableNow: "現已可用", multipleActivities: "同時管理多個進行中的活動",
     advancedSplits: ["高級自訂分攤", "多位請客者", "逐項消費及高級費用分配", "單筆費用由多位成員向商家付款"],
     documentExport: "活動結算 PDF 及 CSV 匯出",
-    planned: "尚未開放", plannedNote: "以下功能仍在開發。",
-    upcoming: ["進階 PNG 樣式"],
     freeSummary: "快速分帳、基礎退款、PNG 分享及完整備份仍可免費使用。",
     terms: "由 Apple 處理的一次性買斷，非訂閱，不會自動續費。",
     loading: "正在確認購買狀態…", free: "Free · 可升級至 Lifetime Pro", pro: "Lifetime Pro 已解鎖",
@@ -22,7 +21,7 @@ const messages = {
     buy: "解鎖 Pro", retry: "重試", restore: "恢復購買", learn: "了解 Pro",
     purchasing: "正在等候 Apple 確認購買…", pending: "購買正在等候批准，批准後將更新購買資格。",
     cancelled: "已取消購買。", purchased: "購買完成，Lifetime Pro 已解鎖。",
-    failed: "Apple 購買未完成，請稍後重試。", verificationFailed: "未能確認本次交易。請重試驗證或恢復購買。",
+    failed: "Apple 購買未完成，請稍後重試。", verificationFailed: "未能確認本次交易。請重試驗證。",
     finishPending: "Lifetime Pro 已解鎖。交易仍待完成，可重試同步。",
     restoring: "正在向 Apple 查詢購買記錄…", restored: "已恢復 Lifetime Pro。",
     restoreNone: "這個 Apple 帳戶沒有有效的 Lifetime Pro 購買。",
@@ -38,8 +37,6 @@ const messages = {
     availableNow: "Available now", multipleActivities: "Manage multiple active activities at once",
     advancedSplits: ["Advanced custom splits", "Multiple hosts", "Itemized expenses and advanced allocations", "Multiple merchant payers per expense"],
     documentExport: "PDF and CSV activity settlement export",
-    planned: "Still in development", plannedNote: "These features are in development and are unavailable with a purchase today.",
-    upcoming: ["Advanced PNG styles"],
     freeSummary: "Quick splits, basic refunds, PNG sharing and full backups remain free.",
     terms: "A one-time purchase handled by Apple. There is no subscription or automatic renewal.",
     loading: "Checking purchase status…", free: "Free · Upgrade to Lifetime Pro", pro: "Lifetime Pro unlocked",
@@ -54,7 +51,7 @@ const messages = {
     buy: "Unlock Pro", retry: "Try again", restore: "Restore purchases", learn: "Explore Pro",
     purchasing: "Waiting for Apple to confirm your purchase…", pending: "Your purchase is awaiting approval. Access will update after approval.",
     cancelled: "Purchase cancelled.", purchased: "Purchase complete. Lifetime Pro is unlocked.",
-    failed: "The Apple purchase didn’t complete. Try again later.", verificationFailed: "Couldn’t confirm this transaction. Retry verification or restore purchases.",
+    failed: "The Apple purchase didn’t complete. Try again later.", verificationFailed: "Couldn’t confirm this transaction. Retry verification.",
     finishPending: "Lifetime Pro is unlocked. The transaction still needs to be finished. You can retry syncing.",
     restoring: "Checking your purchases with Apple…", restored: "Lifetime Pro restored.",
     restoreNone: "This Apple Account has no active Lifetime Pro purchase.",
@@ -68,3 +65,7 @@ const messages = {
 };
 
 export const proCopy = (language: AppLanguage) => messages[language];
+
+export function isRestoreStatus(status: PurchaseStatus) {
+  return status === "restoring" || status === "restored" || status === "restoreNone" || status === "restoreFailed";
+}
