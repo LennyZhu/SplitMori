@@ -3,7 +3,7 @@ import {
 } from "../domain/balance.ts";
 import { previewExpenseCorrection, type ExpenseCorrectionPreview } from "../domain/correction.ts";
 import type { Currency } from "../domain/money.ts";
-import { calculateQuickSplit, type QuickSplitInput } from "../domain/quickSplit.ts";
+import { calculateQuickSplit, usesAdvancedSplit, type QuickSplitInput } from "../domain/quickSplit.ts";
 import { allocateProportionalRefund, remainingRefundShares } from "../domain/refundAllocation.ts";
 import { failure, type Result } from "../domain/result.ts";
 import { suggestTransfers, type TransferSuggestion } from "../domain/settlement.ts";
@@ -282,11 +282,16 @@ async function readActivity(connection: SQLiteReader, id: string): Promise<Activ
   return { ...activity, memberIds: members.map(({ memberId }) => memberId) };
 }
 
-export function expenseEditBlocker(status: ActivityStatus, activeCount: number, mode: FinanceExpense["splitMode"], hasProAccess = false):
-  "ACTIVITY_COMPLETED" | "EXPENSE_EDIT_LIMIT" | "UNSUPPORTED_EXPENSE_EDIT" | undefined {
+function advancedExpense(expense: FinanceExpense): boolean {
+  return expense.splitMode === "custom" || (expense.splitInput !== undefined && usesAdvancedSplit(expense.splitInput));
+}
+
+export function expenseEditBlocker(status: ActivityStatus, activeCount: number, expense: FinanceExpense, hasProAccess = false):
+  "ACTIVITY_COMPLETED" | "EXPENSE_EDIT_LIMIT" | "UNSUPPORTED_EXPENSE_EDIT" | "PRO_REQUIRED" | undefined {
   if (status === "completed") return "ACTIVITY_COMPLETED";
   if (activeCount > 1 && !hasProAccess) return "EXPENSE_EDIT_LIMIT";
-  if (mode === "custom") return "UNSUPPORTED_EXPENSE_EDIT";
+  if (expense.splitMode === "custom" && !expense.splitInput) return "UNSUPPORTED_EXPENSE_EDIT";
+  if (!hasProAccess && advancedExpense(expense)) return "PRO_REQUIRED";
 }
 
 function correctionReplacement(previous: FinanceExpense, proposed: FinanceExpense): FinanceExpense {
@@ -655,6 +660,7 @@ async function recordInTransaction(
     if (activity.activeCount > 1 && !hasProAccess()) return failure("EXPENSE_EDIT_LIMIT", "activityId");
     const invalid = validateSplitSnapshot(event.expense);
     if (invalid) return invalid;
+    if (!hasProAccess() && advancedExpense(event.expense)) return failure("PRO_REQUIRED", "quickInput");
   }
 
   const ordered = orderedTimeline(
@@ -769,12 +775,13 @@ export function createFinanceRepository(database: LocalDatabase, hasProAccess: P
     if (expectedVersion !== undefined && current.currentVersion !== expectedVersion) {
       return failure("EXPENSE_VERSION_CONFLICT", "expectedVersion");
     }
-    const mode = current.expense.splitMode === "custom" ? "custom" : proposed.splitMode;
-    const blocker = expenseEditBlocker(activity.status, activity.activeCount, expectedVersion === undefined ? "equal" : mode, hasProAccess());
+    const pro = hasProAccess();
+    const blocker = expenseEditBlocker(activity.status, activity.activeCount, current.expense, pro);
     if (blocker) return failure(blocker, "activityId");
     const replacement = correctionReplacement(current.expense, proposed);
     const invalid = validateSplitSnapshot(replacement);
     if (invalid) return invalid;
+    if (!pro && advancedExpense(replacement)) return failure("PRO_REQUIRED", "quickInput");
 
     const timeline = orderedTimeline(events, revisions, voids);
     const preview = previewExpenseCorrection({

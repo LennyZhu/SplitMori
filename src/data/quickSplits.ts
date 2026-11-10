@@ -1,7 +1,8 @@
 import type { Currency } from "../domain/money.ts";
-import { calculateQuickSplit, type QuickSplitInput, type QuickSplitSnapshot } from "../domain/quickSplit.ts";
+import { calculateQuickSplit, usesAdvancedSplit, type QuickSplitInput, type QuickSplitSnapshot } from "../domain/quickSplit.ts";
 import { failure, type Result } from "../domain/result.ts";
 import type { LocalDatabase, SQLiteReader } from "./database.ts";
+import { freeAccess, type ProAccess } from "../services/proEntitlement.ts";
 
 type JsonValue = null | boolean | number | string | readonly JsonValue[] | { readonly [key: string]: JsonValue };
 
@@ -79,7 +80,7 @@ async function withStorage<T>(operation: () => Promise<Result<T>>): Promise<Resu
   }
 }
 
-export function createQuickSplitRepository(database: LocalDatabase) {
+export function createQuickSplitRepository(database: LocalDatabase, hasProAccess: ProAccess = freeAccess) {
   return {
     /** Each new editor snapshot uses a new id and a strictly later capture time. */
     async saveQuickDraft(id: string, input: QuickDraftInput, capturedAt: number): Promise<Result<QuickDraft>> {
@@ -145,6 +146,7 @@ export function createQuickSplitRepository(database: LocalDatabase) {
           return failure("INVALID_QUICK_INPUT", "quickInput");
         }
         if (!calculated.ok) return calculated;
+        if (!hasProAccess() && usesAdvancedSplit(encoded.value.input)) return failure("PRO_REQUIRED", "quickInput");
         const now = Date.now();
         await transaction.runAsync(`
           INSERT INTO quick_history (id, created_at, updated_at, schema_version, input_json, result_json)

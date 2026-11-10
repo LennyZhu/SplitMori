@@ -1,12 +1,16 @@
-import { useMemo, useRef, useState } from "react";
+import { useContext, useMemo, useRef, useState } from "react";
 import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { usesAdvancedSplit } from "../domain/quickSplit.ts";
 import type { QuickSplitPreview } from "../services/quickSplitEditor.ts";
 import { describeQuickSplitResult, formatResultMoney, type QuickSplitResultView } from "../services/quickSplitResult.ts";
 import { buildQuickSplitShareCard, type QuickSplitShareCard } from "../services/quickSplitShare.ts";
 import type { ShareOutcome } from "../services/shareQuickSplitPng.ts";
 import { QuickSplitSharePreview } from "./QuickSplitSharePreview.tsx";
 import { useQuickHistorySave } from "./useQuickHistorySave.ts";
+import { useAdvancedSplitAction } from "./AdvancedSplitFields.tsx";
+import { advancedSplitCopy } from "./advancedSplitCopy.ts";
+import { AppLanguageContext } from "./AppLanguageContext.ts";
 import { colors, Icon } from "./visuals.tsx";
 
 const shareErrors: Record<Exclude<ShareOutcome, "closed">, string> = {
@@ -108,7 +112,10 @@ function DetailsSheet({ result, onClose }: { result: QuickSplitResultView; onClo
 export function QuickSplitResultScreen({ preview, onBack, onAddPayer, onConvert }: {
   preview: QuickSplitPreview; onBack: () => void; onAddPayer: () => void; onConvert: (historyId: string) => void;
 }) {
-  const result = useMemo(() => describeQuickSplitResult(preview), [preview]);
+  const language = useContext(AppLanguageContext);
+  const copy = advancedSplitCopy(language);
+  const authorize = useAdvancedSplitAction();
+  const result = useMemo(() => describeQuickSplitResult(preview, language), [preview, language]);
   const { state, save } = useQuickHistorySave(preview.input);
   const [details, setDetails] = useState(false);
   const [shareCard, setShareCard] = useState<QuickSplitShareCard>();
@@ -118,6 +125,16 @@ export function QuickSplitResultScreen({ preview, onBack, onAddPayer, onConvert 
   const saving = state.status === "saving";
   const saved = state.status === "saved";
   const canSave = result.balanced && !saving && !saved;
+
+  function addToActivity() {
+    if (state.status !== "saved") {
+      Alert.alert("請先儲存計算記錄", "儲存後即可選擇活動，再確認成員及實際付款人。");
+      return;
+    }
+    const add = () => onConvert(state.historyId);
+    if (usesAdvancedSplit(preview.input)) authorize(copy.addToActivity, add);
+    else add();
+  }
 
   function startShare() {
     if (shareInProgress.current || !result.balanced) return;
@@ -221,7 +238,8 @@ export function QuickSplitResultScreen({ preview, onBack, onAddPayer, onConvert 
             {saved && <Text accessibilityLiveRegion="polite" style={styles.caption}>已儲存至快速分帳記錄。</Text>}
             {state.status === "error" && (
               <Text accessibilityRole="alert" style={styles.error}>
-                {state.code === "QUICK_STORAGE_ERROR" ? "未能寫入本機記錄，請重試。" : `未能儲存計算記錄（${state.code}）。`}
+                {state.code === "PRO_REQUIRED" ? copy.locked : state.code === "QUICK_STORAGE_ERROR"
+                  ? "未能寫入本機記錄，請重試。" : `未能儲存計算記錄（${state.code}）。`}
               </Text>
             )}
             <View style={styles.resultActions}>
@@ -235,8 +253,7 @@ export function QuickSplitResultScreen({ preview, onBack, onAddPayer, onConvert 
                 <Text style={styles.saveText}>{saving ? "正在儲存…" : saved ? "已儲存計算記錄" : "儲存計算記錄"}</Text>
               </Pressable>
               <Pressable accessibilityRole="button" disabled={saving || !!shareCard || !result.balanced}
-                onPress={() => state.status === "saved" ? onConvert(state.historyId)
-                  : Alert.alert("請先儲存計算記錄", "儲存後即可選擇活動，再確認成員及實際付款人。")}
+                onPress={addToActivity}
                 style={({ pressed }) => [styles.saveButton, styles.actionCell, (pressed || saving || !result.balanced) && styles.pressed]}>
                 <Text style={styles.saveText}>加入活動</Text>
               </Pressable>

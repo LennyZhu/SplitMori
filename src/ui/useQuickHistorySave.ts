@@ -5,12 +5,14 @@ import { createQuickSplitRepository } from "../data/quickSplits.ts";
 import type { QuickSplitInput } from "../domain/quickSplit.ts";
 import type { DomainErrorCode } from "../domain/result.ts";
 import { createQuickHistorySave } from "../services/quickHistorySave.ts";
+import { usePro } from "./ProContext.ts";
 
 type SaveState = { readonly status: "idle" | "saving" }
   | { readonly status: "saved"; readonly historyId: string }
   | { readonly status: "error"; readonly code: DomainErrorCode };
 
 export function useQuickHistorySave(input: QuickSplitInput) {
+  const { hasProAccess } = usePro();
   const [state, setState] = useState<SaveState>({ status: "idle" });
   const saveAttempt = useRef<ReturnType<typeof createQuickHistorySave> | undefined>(undefined);
   const mounted = useRef(false);
@@ -26,7 +28,7 @@ export function useQuickHistorySave(input: QuickSplitInput) {
 
     try {
       saveAttempt.current ??= createQuickHistorySave(`quick-history:${uuid.v4()}`, input, async (id, snapshotInput) => {
-        const repository = createQuickSplitRepository(await getLocalDatabase());
+        const repository = createQuickSplitRepository(await getLocalDatabase(), hasProAccess);
         return repository.saveQuickHistory(id, snapshotInput);
       });
       const result = await saveAttempt.current();

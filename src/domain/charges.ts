@@ -1,12 +1,15 @@
 import { roundBasisPoints, validateMinorAmount, validateMoney, type Money } from "./money.ts";
 import { failure, type Result } from "./result.ts";
 import {
-  allocateByWeight, validateMemberIds, type Allocation, type IndividualSplitResult, type SplitResult,
+  allocateByWeight, validateMemberIds, type Allocation, type IndividualSplitResult, type ItemizedSplitResult, type SplitResult,
 } from "./split.ts";
 
 type ServiceFee =
   | { readonly kind: "manual"; readonly amountMinor: number; readonly basis?: never }
   | { readonly kind: "quick10"; readonly basis?: "beforeDiscount" | "afterDiscount"; readonly amountMinor?: never };
+
+export type ChargeDistribution = { readonly kind: "equal" }
+  | { readonly kind: "selected"; readonly memberIds: readonly string[] };
 
 export type ChargeDetailsInput = {
   readonly kind: "details";
@@ -14,6 +17,7 @@ export type ChargeDetailsInput = {
   readonly discountMinor?: number;
   readonly serviceFee?: ServiceFee;
   readonly receiptTotal?: Money;
+  readonly distribution?: { readonly serviceFee?: ChargeDistribution; readonly discount?: ChargeDistribution };
 };
 
 type FinalTotal = { readonly kind: "finalTotal"; readonly total: Money };
@@ -35,7 +39,8 @@ export type ChargedSplitResult = {
     readonly discountMinor: number;
   })[];
   readonly allocationVersion: 1;
-  readonly explanation: Exclude<SplitResult["explanation"], { kind: "treat" }> | IndividualSplitResult["explanation"];
+  readonly explanation: Exclude<SplitResult["explanation"], { kind: "treat" }>
+    | IndividualSplitResult["explanation"] | ItemizedSplitResult["explanation"];
 };
 
 function calculateDetails(
@@ -84,7 +89,7 @@ export function calculateCharges(input: ChargeInput): Result<FinalTotal | Calcul
 
 /** Apply details to a split of the subtotal. For a treat, pass the calculated final total to splitTreat. */
 export function allocateCharges(
-  base: SplitResult | IndividualSplitResult,
+  base: SplitResult | IndividualSplitResult | ItemizedSplitResult,
   details: ChargeDetailsInput,
 ): Result<ChargedSplitResult> {
   const { explanation } = base;
@@ -109,16 +114,32 @@ export function allocateCharges(
   }
   if (weightTotal > BigInt(Number.MAX_SAFE_INTEGER)) return failure("AMOUNT_OVERFLOW", "allocations");
   if (weightTotal !== BigInt(subtotal.amountMinor)) return failure("TOTAL_MISMATCH", "allocations");
-  if (weightTotal === 0n && serviceFeeMinor > 0) return failure("NO_CHARGE_WEIGHTS", "charges");
-
-  const feeShares = allocateByWeight(serviceFeeMinor, weights);
-  const discountShares = allocateByWeight(discountMinor, weights);
-  const allocations = base.allocations.map(({ memberId, amountMinor: baseMinor }, index) => ({
-    memberId,
-    baseMinor,
-    serviceFeeMinor: feeShares[index],
-    discountMinor: discountShares[index],
-    amountMinor: baseMinor - discountShares[index] + feeShares[index],
-  }));
+  const participantIds = base.allocations.map(({ memberId }) => memberId);
+  function distribute(amountMinor: number, rule: ChargeDistribution | undefined): Result<number[]> {
+    if (rule === undefined) {
+      if (weightTotal === 0n && amountMinor > 0) return failure("NO_CHARGE_WEIGHTS", "charges");
+      return { ok: true, value: allocateByWeight(amountMinor, weights) };
+    }
+    if (rule.kind === "equal") return { ok: true, value: allocateByWeight(amountMinor, weights.map(() => 1)) };
+    if (rule.kind !== "selected" || !Array.isArray(rule.memberIds)) return failure("INVALID_QUICK_INPUT", "chargeDistribution");
+    const invalidSelection = validateMemberIds(rule.memberIds);
+    if (invalidSelection) return failure(invalidSelection.error.code, "chargeDistribution");
+    const selected = new Set(rule.memberIds);
+    if (rule.memberIds.some((id) => !participantIds.includes(id))) return failure("MEMBER_NOT_PARTICIPATING", "chargeDistribution");
+    return { ok: true, value: allocateByWeight(amountMinor, participantIds.map((id) => selected.has(id) ? 1 : 0)) };
+  }
+  const fees = distribute(serviceFeeMinor, details.distribution?.serviceFee);
+  if (!fees.ok) return fees;
+  const discounts = distribute(discountMinor, details.distribution?.discount);
+  if (!discounts.ok) return discounts;
+  const allocations: ChargedSplitResult["allocations"][number][] = [];
+  for (const [index, { memberId, amountMinor: baseMinor }] of base.allocations.entries()) {
+    const serviceFeeMinor = fees.value[index];
+    const discountMinor = discounts.value[index];
+    const adjusted = BigInt(baseMinor) - BigInt(discountMinor) + BigInt(serviceFeeMinor);
+    if (adjusted < 0n) return failure("CHARGE_SHARE_NEGATIVE", "chargeDistribution");
+    if (adjusted > BigInt(Number.MAX_SAFE_INTEGER)) return failure("AMOUNT_OVERFLOW", "chargeDistribution");
+    allocations.push({ memberId, baseMinor, serviceFeeMinor, discountMinor, amountMinor: Number(adjusted) });
+  }
   return { ok: true, value: { total, allocations, allocationVersion: base.allocationVersion, explanation } };
 }

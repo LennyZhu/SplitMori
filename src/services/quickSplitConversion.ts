@@ -4,6 +4,8 @@ import { insertNewExpenseInTransaction, type FinanceExpense, type StoredExpense 
 import { readQuickHistory, type QuickHistoryRecord } from "../data/quickSplits.ts";
 import type { MerchantPayment } from "../domain/balance.ts";
 import { validateMinorAmount, validateMoney, type Currency, type Money } from "../domain/money.ts";
+import { usesAdvancedSplit, type QuickSplitInput, type QuickSplitMethod } from "../domain/quickSplit.ts";
+import type { ChargeDistribution } from "../domain/charges.ts";
 import { failure, type Result } from "../domain/result.ts";
 import { validateMemberIds, type Allocation } from "../domain/split.ts";
 import { freeAccess, type ProAccess } from "./proEntitlement.ts";
@@ -108,7 +110,49 @@ function mapExpense(history: QuickHistoryRecord, activity: ActivityDetail, reque
     merchantPayment: request.merchantPayment,
     splitMode: history.snapshot.split.explanation.kind,
     allocationVersion: history.snapshot.split.allocationVersion,
+    ...(usesAdvancedSplit(history.input) && { splitInput: mapSplitInput(history.input, request.memberMapping) }),
   } };
+}
+
+/** The source member order is part of the saved rounding calculation. */
+function mapSplitInput(input: QuickSplitInput, mapping: readonly MemberMapping[]): QuickSplitInput {
+  const ids = new Map(mapping.map(({ quickMemberId, activityMemberId }) => [quickMemberId, activityMemberId]));
+  const id = (source: string) => {
+    const target = ids.get(source);
+    if (!target) throw new Error("Missing expense participant mapping");
+    return target;
+  };
+  const member = <T extends { memberId: string }>(value: T) => ({ ...value, memberId: id(value.memberId) });
+  const host = <T extends { hostId: string }>(value: T) => ({ ...value, hostId: id(value.hostId) });
+  const distribution = (rule?: ChargeDistribution) =>
+    rule?.kind === "selected" ? { ...rule, memberIds: rule.memberIds.map(id) } : rule;
+  const { method, charges } = input;
+  let mapped: QuickSplitMethod;
+  switch (method.kind) {
+    case "equal": mapped = { ...method, memberIds: method.memberIds.map(id) }; break;
+    case "treat":
+      mapped = { ...method, memberIds: method.memberIds.map(id), options: "hosts" in method.options
+        ? { hosts: method.options.hosts.map(host) } : host(method.options) };
+      break;
+    case "individual":
+      mapped = "items" in method
+        ? { ...method, memberIds: method.memberIds.map(id), items: method.items.map((item) => ({ ...item, memberIds: item.memberIds.map(id) })) }
+        : { ...method, personalSpending: method.personalSpending.map(member),
+          shared: { ...method.shared, memberIds: method.shared.memberIds.map(id) } };
+      break;
+    case "custom": {
+      const { options } = method;
+      mapped = { kind: "custom", options: options.kind === "fixed" ? { ...options, members: options.members.map(member) }
+        : options.kind === "percentage" ? { ...options, members: options.members.map(member) }
+        : { ...options, members: options.members.map(member) } };
+      break;
+    }
+  }
+  return { members: input.members.map((entry) => ({ ...entry, id: id(entry.id) })), method: mapped,
+    charges: charges.kind === "details" && charges.distribution
+      ? { ...charges, distribution: { serviceFee: distribution(charges.distribution.serviceFee), discount: distribution(charges.distribution.discount) } }
+      : charges,
+  };
 }
 
 export function createQuickSplitConversionService(database: LocalDatabase, hasProAccess: ProAccess = freeAccess) {

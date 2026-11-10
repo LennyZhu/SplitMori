@@ -1,8 +1,9 @@
 import { uuid } from "expo";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from "react-native";
 import { expenseEditBlocker, type FinanceExpense, type ReviewedExpenseCorrectionRequest } from "../data/finance.ts";
 import { calculateCharges } from "../domain/charges.ts";
+import type { ChargeDistribution } from "../domain/charges.ts";
 import type { Failure } from "../domain/result.ts";
 import type { TransferSuggestion } from "../domain/settlement.ts";
 import {
@@ -14,6 +15,8 @@ import { ButtonPair, Card, Compare, Heading, Notice, Row, financeReviewStyles } 
 import { CreateExpenseScreen } from "./CreateExpenseScreen.tsx";
 import { MerchantRefundScreen, merchantRefundCopy } from "./MerchantRefundScreen.tsx";
 import { usePro, useProSnapshot } from "./ProContext.ts";
+import { AppLanguageContext } from "./AppLanguageContext.ts";
+import { advancedSplitCopy } from "./advancedSplitCopy.ts";
 import { ConversionButton, ConversionPage, ConversionReadError, memberLabels } from "./QuickSplitConversionScreen.tsx";
 import { colors, Icon } from "./visuals.tsx";
 
@@ -56,26 +59,42 @@ function correctionError({ code, field }: Failure["error"]) {
 }
 
 function BillDetails({ expense, money, nameFor }: { expense: FinanceExpense; money: Money; nameFor: NameFor }) {
+  const copy = advancedSplitCopy(useContext(AppLanguageContext));
   const input = expense.splitInput;
-  if (!input || (input.charges.kind === "finalTotal" && input.method.kind !== "treat" && input.method.kind !== "individual")) return null;
+  if (!input || (input.charges.kind === "finalTotal" && input.method.kind === "equal")) return null;
   const charges = calculateCharges(input.charges);
   const method = input.method;
+  const distribution = input.charges.kind === "details" ? input.charges.distribution : undefined;
+  const ruleText = (rule: ChargeDistribution) => rule.kind === "equal" ? copy.equal : rule.memberIds.map(nameFor).join(" · ");
   return (
     <>
-      <Heading>費用明細</Heading>
+      <Heading>{copy.details}</Heading>
       <Card>
         {charges.ok && charges.value.kind === "details" && <>
-          <Row title="商品小計" value={money(charges.value.subtotal.amountMinor)} divider={false} />
-          <Row title="服務費" value={money(charges.value.serviceFeeMinor)} />
-          <Row title="整單折扣" value={money(charges.value.discountMinor)} />
+          <Row title={copy.subtotal} value={money(charges.value.subtotal.amountMinor)} divider={false} />
+          <Row title={copy.fee} value={money(charges.value.serviceFeeMinor)} />
+          <Row title={copy.discountTotal} value={money(charges.value.discountMinor)} />
         </>}
-        {method.kind === "treat" && <Row title={`${nameFor(method.options.hostId)} 請客 · ${method.options.includeHostInRemainder ? "參與" : "不參與"}餘額分攤`}
-          value={method.options.cover.kind === "fixed" ? money(method.options.cover.amountMinor) : `${method.options.cover.basisPoints / 100}%`} />}
-        {method.kind === "individual" && <>
+        {distribution?.serviceFee && <Row title={copy.serviceFee} value={ruleText(distribution.serviceFee)} />}
+        {distribution?.discount && <Row title={copy.discount} value={ruleText(distribution.discount)} />}
+        {method.kind === "treat" && ("hosts" in method.options ? method.options.hosts : [method.options]).map((host) =>
+          <Row key={host.hostId} title={`${nameFor(host.hostId)} · ${copy.committed} · ${host.includeHostInRemainder ? copy.sharesRemainder : copy.noRemainder}`}
+            value={host.cover.kind === "fixed" ? money(host.cover.amountMinor) : `${host.cover.basisPoints / 100}%`} />)}
+        {method.kind === "individual" && "items" in method && method.items.map((item, index) => <View key={index}>
+          <Row title={`${item.name} × ${item.quantity}`} value={money(item.amountMinor)} />
+          <Row title={copy.participants} value={item.memberIds.map(nameFor).join(" · ")} />
+        </View>)}
+        {method.kind === "individual" && "personalSpending" in method && <>
           <Row title="公共消費" value={money(method.shared.amountMinor)} />
           {method.shared.memberIds.length > 0 && <Row title="公共消費參與者" value={method.shared.memberIds.map(nameFor).join("、")} />}
           {method.personalSpending.map(({ memberId, personalMinor }) =>
             <Row key={memberId} title={`${nameFor(memberId)} · 個人消費`} value={money(personalMinor)} />)}
+        </>}
+        {method.kind === "custom" && <>
+          <Row title={copy.custom} value={copy[method.options.kind]} />
+          {method.options.members.map((member) => <Row key={member.memberId} title={nameFor(member.memberId)}
+            value={"amountMinor" in member ? money(member.amountMinor)
+              : "basisPoints" in member ? `${member.basisPoints / 100}%` : String(member.shares)} />)}
         </>}
       </Card>
     </>
@@ -101,6 +120,7 @@ function RefundRows({ refunds, money, nameFor }: {
 function Detail({ data, money, nameFor, onHistory, onRefundHistory }: {
   data: ExpenseDetailData; money: Money; nameFor: NameFor; onHistory: () => void; onRefundHistory: () => void;
 }) {
+  const copy = advancedSplitCopy(useContext(AppLanguageContext));
   const { activity, expense, refunds } = data;
   const { amountMinor, reductions } = summarizeExpenseRefunds(refunds);
   return (
@@ -115,7 +135,8 @@ function Detail({ data, money, nameFor, onHistory, onRefundHistory }: {
         <Text style={styles.total}>{money(expense.split.total.amountMinor)}</Text>
         <Text style={styles.caption}>{dateText(data.expenseDate)} · v{data.currentVersion}</Text>
       </Card>
-      {data.editBlocker && <Notice>{correctionError({ code: data.editBlocker, field: "activityId" })}</Notice>}
+      {data.editBlocker && <Notice>{data.editBlocker === "PRO_REQUIRED" ? copy.locked
+        : correctionError({ code: data.editBlocker, field: "activityId" })}</Notice>}
       <Heading>付款與分攤</Heading>
       <Card>
         <Row title="實際商家付款人" value={nameFor(expense.merchantPayment.memberId)} divider={false} />
@@ -313,11 +334,12 @@ function History({ data, saved, money, nameFor }: {
 export function ExpenseCorrectionScreen({ activityId, expenseId, onBack, onViewSettlement }: {
   activityId: string; expenseId: string; onBack: () => void; onViewSettlement: () => void;
 }) {
-  const { hasProAccess } = usePro();
+  const { hasProAccess, openPro } = usePro();
+  const copy = advancedSplitCopy(useContext(AppLanguageContext));
   const pro = useProSnapshot();
   const [loadedData, setData] = useState<ExpenseDetailData | null>();
   const data = loadedData && { ...loadedData,
-    editBlocker: expenseEditBlocker(loadedData.activity.status, loadedData.activeCount, loadedData.expense.splitMode, pro.hasProAccess) };
+    editBlocker: expenseEditBlocker(loadedData.activity.status, loadedData.activeCount, loadedData.expense, pro.hasProAccess) };
   const [page, setPage] = useState<"detail" | "edit" | "history">("detail");
   const [refundRoute, setRefundRoute] = useState<"register" | "history">();
   const [saved, setSaved] = useState(false);
@@ -352,7 +374,7 @@ export function ExpenseCorrectionScreen({ activityId, expenseId, onBack, onViewS
   async function openPreview(proposed: FinanceExpense) {
     if (!data) return "請先重新讀取費用。";
     const result = await loadExpenseCorrectionPreview(activityId, proposed, data.currentVersion, undefined, hasProAccess);
-    if (!result.ok) return correctionError(result.error);
+    if (!result.ok) return result.error.code === "PRO_REQUIRED" ? copy.locked : correctionError(result.error);
     request.current = undefined;
     setBlocked(false);
     setRetry(undefined);
@@ -387,7 +409,7 @@ export function ExpenseCorrectionScreen({ activityId, expenseId, onBack, onViewS
         void reload();
       } else if (result.status === "rejected") {
         setBlocked(true);
-        setError(correctionError(result.error));
+        setError(result.error.code === "PRO_REQUIRED" ? copy.locked : correctionError(result.error));
       } else if (result.status === "notSaved") {
         setRetry("write");
         setError("已確認這次更正未入帳。可以重試儲存。");
@@ -436,9 +458,9 @@ export function ExpenseCorrectionScreen({ activityId, expenseId, onBack, onViewS
   return (
     <ConversionPage key={page} title={page === "history" ? "修訂歷史" : "費用詳情"}
       onBack={page === "history" ? () => setPage("detail") : onBack}
-      endAction={page === "detail" && data && !data.editBlocker ? {
-        label: "更多費用操作",
-        onPress: () => Alert.alert("費用操作", undefined, [
+      endAction={page === "detail" && data && (!data.editBlocker || data.editBlocker === "PRO_REQUIRED") ? {
+        label: data.editBlocker ? copy.upgrade : "更多費用操作",
+        onPress: () => data.editBlocker ? openPro() : Alert.alert("費用操作", undefined, [
           { text: "更正費用", onPress: () => setPage("edit") }, { text: "取消", style: "cancel" },
         ]),
       } : undefined}

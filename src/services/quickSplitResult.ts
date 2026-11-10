@@ -1,6 +1,7 @@
 import { calculateCharges, type CalculatedChargeDetails } from "../domain/charges.ts";
 import { formatAmount, wholeBasisPoints, type Currency } from "../domain/money.ts";
 import type { QuickSplitPreview } from "./quickSplitEditor.ts";
+import type { AppLanguage } from "./appPreferences.ts";
 
 type BreakdownLine = {
   readonly label: string;
@@ -67,7 +68,7 @@ export function formatResultMoney(currency: Currency, amountMinor: number | bigi
 }
 
 function memberBreakdown(
-  allocation: Allocation, explanation: Split["explanation"], personalSpending: ReadonlyMap<string, number>,
+  allocation: Allocation, explanation: Split["explanation"], personalSpending: ReadonlyMap<string, number>, language: AppLanguage,
 ): BreakdownLine[] {
   const { memberId, amountMinor } = allocation;
   const breakdown: BreakdownLine[] = [];
@@ -80,6 +81,13 @@ function memberBreakdown(
       }
       break;
     case "individual": {
+      if ("items" in explanation) {
+        for (const item of explanation.items) {
+          const share = item.allocations.find((entry) => entry.memberId === memberId);
+          if (share) breakdown.push({ label: item.name, amountMinor: share.amountMinor });
+        }
+        break;
+      }
       const personalMinor = "personalMinor" in allocation ? allocation.personalMinor : personalSpending.get(memberId);
       if (personalMinor === undefined) {
         breakdown.push({ label: "原始分攤", amountMinor: originalMinor });
@@ -93,6 +101,14 @@ function memberBreakdown(
       break;
     }
     case "treat": {
+      if ("hosts" in explanation) {
+        const host = explanation.hosts.find(({ hostId }) => hostId === memberId);
+        if (host) breakdown.push({ label: language === "en" ? "Host commitment" : "請客承擔", amountMinor: host.coveredMinor });
+        if (!host || host.includeHostInRemainder) breakdown.push({
+          label: language === "en" ? "Share of remainder" : "剩餘均分", amountMinor: amountMinor - (host?.coveredMinor ?? 0),
+        });
+        break;
+      }
       const isHost = memberId === explanation.hostId;
       if (isHost) breakdown.push({ label: "請客承擔", amountMinor: explanation.coveredMinor });
       if (!isHost || explanation.includeHostInRemainder) {
@@ -103,7 +119,7 @@ function memberBreakdown(
       break;
     }
     case "custom":
-      breakdown.push({ label: "自訂分攤", amountMinor });
+      breakdown.push({ label: language === "en" ? "Custom split" : "自訂分攤", amountMinor });
       break;
   }
 
@@ -122,13 +138,13 @@ function getRoundingNote(
   const { explanation, total } = split;
   const notes: string[] = [];
   const equalRemainder = explanation.kind === "equal" ? explanation.extraMinorUnits
-    : explanation.kind === "individual" ? explanation.sharedSplit.extraMinorUnits
+    : explanation.kind === "individual" && "sharedSplit" in explanation ? explanation.sharedSplit.extraMinorUnits
       : explanation.kind === "treat" ? explanation.remainderSplit.extraMinorUnits : 0;
   if (equalRemainder > 0) {
     const subject = explanation.kind === "individual" ? "公共消費" : explanation.kind === "treat" ? "請客後餘額" : "分攤金額";
     notes.push(`${subject}未能整除。尾差按試算時的成員順序分配，獲分配尾差的成員在這一步各多分配 ${formatResultMoney(total.currency, 1)}。`);
   }
-  if (explanation.kind === "treat" && explanation.cover.kind === "percentage"
+  if (explanation.kind === "treat" && "cover" in explanation && explanation.cover.kind === "percentage"
     && BigInt(total.amountMinor) * BigInt(explanation.cover.basisPoints) % BigInt(wholeBasisPoints) !== 0n) {
     notes.push("按百分比計算的請客金額，已按幣種的最小貨幣單位四捨五入。");
   }
@@ -137,7 +153,7 @@ function getRoundingNote(
       ? charges.subtotal.amountMinor - charges.discountMinor : charges.subtotal.amountMinor;
     if (basis % 10 !== 0) notes.push("快捷服務費已按幣種的最小貨幣單位四捨五入。");
   }
-  if (charges && charges.subtotal.amountMinor > 0) {
+  if (charges && charges.subtotal.amountMinor > 0 && input.charges.kind === "details" && !input.charges.distribution) {
     const subtotal = BigInt(charges.subtotal.amountMinor);
     const hasChargeRemainder = (amountMinor: number) => amountMinor > 0 && split.allocations.some((allocation: Allocation) =>
       "baseMinor" in allocation && BigInt(amountMinor) * BigInt(allocation.baseMinor) % subtotal !== 0n,
@@ -153,17 +169,17 @@ function getRoundingNote(
   return notes.length ? notes.join(" ") : undefined;
 }
 
-export function describeQuickSplitResult(preview: QuickSplitPreview): QuickSplitResultView {
+export function describeQuickSplitResult(preview: QuickSplitPreview, language: AppLanguage = "zh-HK"): QuickSplitResultView {
   const { input, snapshot: { split, suggestions } } = preview;
   const { currency, amountMinor: totalMinor } = split.total;
   const names = new Map(input.members.map(({ id, displayName }) => [id, displayName]));
   const memberName = (id: string) => names.get(id) ?? id;
   const payerName = input.merchantPayerId === undefined ? undefined : memberName(input.merchantPayerId);
-  const personalSpending = new Map(input.method.kind === "individual"
+  const personalSpending = new Map(input.method.kind === "individual" && "personalSpending" in input.method
     ? input.method.personalSpending.map(({ memberId, personalMinor }) => [memberId, personalMinor]) : []);
   const members = split.allocations.map((allocation) => ({
     id: allocation.memberId, name: memberName(allocation.memberId), amountMinor: allocation.amountMinor,
-    breakdown: memberBreakdown(allocation, split.explanation, personalSpending),
+    breakdown: memberBreakdown(allocation, split.explanation, personalSpending, language),
   }));
   const allocatedMinor = members.reduce((sum, member) => sum + BigInt(member.amountMinor), 0n);
 
@@ -181,7 +197,8 @@ export function describeQuickSplitResult(preview: QuickSplitPreview): QuickSplit
 
   return {
     currency, totalMinor, allocatedMinor, balanced: allocatedMinor === BigInt(totalMinor),
-    modeLabel: modeLabels[split.explanation.kind], payerName, members, chargeBreakdown,
+    modeLabel: language === "en" && split.explanation.kind === "custom" ? "Custom split" : modeLabels[split.explanation.kind],
+    payerName, members, chargeBreakdown,
     suggestions: payerName === undefined ? [] : suggestions.map(({ fromMemberId, toMemberId, amountMinor }) => ({
       fromMemberId, toMemberId, fromName: memberName(fromMemberId), toName: memberName(toMemberId), amountMinor,
     })),

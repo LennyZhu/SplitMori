@@ -1,5 +1,5 @@
 import { uuid } from "expo";
-import { useCallback, useEffect, useRef, useState, type ComponentRef, type ReactNode, type RefObject } from "react";
+import { useCallback, useContext, useEffect, useRef, useState, type ComponentRef, type ReactNode, type RefObject } from "react";
 import {
   ActivityIndicator, BackHandler, Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView,
   StyleSheet, Text, TextInput, View,
@@ -15,6 +15,8 @@ import {
 } from "../services/quickSplitConversion.ts";
 import { formatResultMoney } from "../services/quickSplitResult.ts";
 import { usePro } from "./ProContext.ts";
+import { AppLanguageContext } from "./AppLanguageContext.ts";
+import { advancedSplitCopy } from "./advancedSplitCopy.ts";
 import { colors, Icon } from "./visuals.tsx";
 
 const modeLabels = { equal: "平均分攤", treat: "請客", individual: "各自消費", custom: "自訂分攤" } as const;
@@ -270,6 +272,7 @@ function ConfirmConversion({ history, activityId, onBack, onJoined }: {
   history: QuickHistoryRecord; activityId: string; onBack: () => void; onJoined: (id: string) => void;
 }) {
   const { hasProAccess } = usePro();
+  const copy = advancedSplitCopy(useContext(AppLanguageContext));
   const read = useCallback(async () => createActivityRepository(await getLocalDatabase()).getActivity(activityId), [activityId]);
   const { state, retry } = useConversionRead(read);
   const activity = state.status === "loaded" ? state.value : undefined;
@@ -371,7 +374,9 @@ function ConfirmConversion({ history, activityId, onBack, onJoined }: {
     <>
       <ConversionPage title="確認加入活動" endLabel="返回" onBack={back} busy={saving} scrollRef={scroll}
         footer={<>
-          {error && <Text accessibilityRole="alert" style={styles.error}>{conversionError(error)}</Text>}
+          {error && <Text accessibilityRole="alert" style={styles.error}>
+            {error === "PRO_REQUIRED" ? copy.locked : conversionError(error)}
+          </Text>}
           <ConversionButton label={saving ? "正在加入…" : "確認加入活動"} disabled={!available || saving} onPress={() => { void submit(); }} />
         </>}>
         {state.status === "loading" && <ActivityIndicator accessibilityLabel="正在讀取活動" color={colors.ink} />}

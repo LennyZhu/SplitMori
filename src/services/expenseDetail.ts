@@ -34,7 +34,7 @@ export function loadExpenseDetail(activityId: string, expenseId: string, databas
       activity, expense, expenseDate: expense.expenseDate ?? occurredAt, currentVersion, versions: history.value,
       refunds: refunds.filter(({ id }) => !voided.has(id)), voidedRefundCount: refundVoids.length, refundHistory,
       activeCount: active?.activeCount ?? 0,
-      editBlocker: expenseEditBlocker(activity.status, active?.activeCount ?? 0, expense.splitMode),
+      editBlocker: expenseEditBlocker(activity.status, active?.activeCount ?? 0, expense),
     };
   });
 }

@@ -1,8 +1,24 @@
 import type { QuickDraftInput } from "../data/quickSplits.ts";
+import type { ChargeDistribution } from "../domain/charges.ts";
 import { isCurrency, parseAmount, wholeBasisPoints, type Currency } from "../domain/money.ts";
 import { calculateQuickSplit, type QuickSplitInput, type QuickSplitSnapshot } from "../domain/quickSplit.ts";
 import type { DomainErrorCode, Failure } from "../domain/result.ts";
-import type { PersonalSpending } from "../domain/split.ts";
+import type { CustomSplitOptions, ItemSpending, PersonalSpending, TreatOptions } from "../domain/split.ts";
+
+export type EditorHost = {
+  readonly hostId?: string;
+  readonly coverKind: "fixed" | "percentage";
+  readonly coverAmount: string;
+  readonly coverPercentage: string;
+  readonly includeHostInRemainder: boolean;
+};
+export type EditorItem = {
+  readonly id: string;
+  readonly name: string;
+  readonly quantity: string;
+  readonly amount: string;
+  readonly memberIds: readonly string[];
+};
 
 export type EditorMember = {
   readonly id: string;
@@ -14,7 +30,7 @@ export type EditorMember = {
 
 export type QuickSplitEditorState = {
   readonly currency: Currency;
-  readonly mode: "equal" | "treat" | "individual";
+  readonly mode: QuickSplitInput["method"]["kind"];
   readonly members: readonly EditorMember[];
   readonly nextMemberNumber: number;
   readonly finalTotal: string;
@@ -31,12 +47,19 @@ export type QuickSplitEditorState = {
   readonly includeHostInRemainder: boolean;
   readonly sharedAmount: string;
   readonly merchantPayerId?: string;
+  readonly extraHosts?: readonly EditorHost[];
+  readonly itemized?: boolean;
+  readonly items?: readonly EditorItem[];
+  readonly customKind?: CustomSplitOptions["kind"];
+  readonly customValues?: Readonly<Record<string, string>>;
+  readonly feeDistribution?: ChargeDistribution;
+  readonly discountDistribution?: ChargeDistribution;
 };
 
 export type EditorField =
   | "currency" | "finalTotal" | "members" | "hostId" | "coverAmount" | "coverPercentage"
   | "personalAmount" | "sharedAmount" | "sharedMembers" | "subtotal" | "discount" | "serviceFee"
-  | "merchantPayerId";
+  | "merchantPayerId" | "hosts" | "items" | "custom" | "chargeDistribution";
 
 export type EditorError = { readonly code: DomainErrorCode; readonly field: EditorField; readonly memberId?: string };
 export type QuickSplitPreview = { readonly input: QuickSplitInput; readonly snapshot: QuickSplitSnapshot };
@@ -74,6 +97,10 @@ export function removeEditorMember(state: QuickSplitEditorState, id: string): Qu
     members: state.members.filter((member) => member.id !== id),
     hostId: state.hostId === id ? undefined : state.hostId,
     merchantPayerId: state.merchantPayerId === id ? undefined : state.merchantPayerId,
+    extraHosts: state.extraHosts?.filter((host) => host.hostId !== id),
+    items: state.items?.map((item) => ({ ...item, memberIds: item.memberIds.filter((memberId) => memberId !== id) })),
+    feeDistribution: withoutMember(state.feeDistribution, id),
+    discountDistribution: withoutMember(state.discountDistribution, id),
   };
 }
 
@@ -93,6 +120,18 @@ export function serializeQuickSplitDraft(state: QuickSplitEditorState): QuickDra
 
 function stringValue(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function withoutMember(rule: ChargeDistribution | undefined, id: string): ChargeDistribution | undefined {
+  return rule?.kind === "selected" ? { ...rule, memberIds: rule.memberIds.filter((memberId) => memberId !== id) } : rule;
+}
+
+function hydrateDistribution(raw: unknown, memberIds: ReadonlySet<string>): ChargeDistribution | undefined {
+  if (!raw || typeof raw !== "object" || !("kind" in raw)) return;
+  if (raw.kind === "equal") return { kind: "equal" };
+  if (raw.kind === "selected" && "memberIds" in raw && Array.isArray(raw.memberIds)) {
+    return { kind: "selected", memberIds: [...new Set(raw.memberIds.filter((id) => memberIds.has(id)))] };
+  }
 }
 
 export function hydrateQuickSplitDraft(input: QuickDraftInput): QuickSplitEditorState {
@@ -128,10 +167,12 @@ export function hydrateQuickSplitDraft(input: QuickDraftInput): QuickSplitEditor
   const nextMemberNumber = typeof storedNextNumber === "number" && Number.isSafeInteger(storedNextNumber)
     && storedNextNumber > 0 && storedNextNumber < Number.MAX_SAFE_INTEGER - members.length
     ? storedNextNumber : members.length + 1;
+  const feeDistribution = hydrateDistribution(params?.feeDistribution, seen);
+  const discountDistribution = hydrateDistribution(params?.discountDistribution, seen);
 
   return {
     currency: isCurrency(input.currency) ? input.currency : defaults.currency,
-    mode: input.mode === "treat" || input.mode === "individual" ? input.mode : defaults.mode,
+    mode: input.mode === "treat" || input.mode === "individual" || input.mode === "custom" ? input.mode : defaults.mode,
     members, nextMemberNumber,
     finalTotal: stringValue(params?.finalTotal ?? params?.total),
     chargeMode: params?.chargeMode === "details" ? "details" : "finalTotal",
@@ -147,6 +188,24 @@ export function hydrateQuickSplitDraft(input: QuickDraftInput): QuickSplitEditor
     includeHostInRemainder: params?.includeHostInRemainder === true,
     sharedAmount: stringValue(params?.sharedAmount),
     merchantPayerId: idIfPresent(input.merchantPayerId),
+    ...(Array.isArray(params?.extraHosts) && { extraHosts: params.extraHosts.filter((host) => host && typeof host === "object").map((host) => ({
+      hostId: idIfPresent(host.hostId), coverKind: host.coverKind === "percentage" ? "percentage" : "fixed",
+      coverAmount: stringValue(host.coverAmount), coverPercentage: stringValue(host.coverPercentage),
+      includeHostInRemainder: host.includeHostInRemainder === true,
+    })) }),
+    ...(typeof params?.itemized === "boolean" && { itemized: params.itemized }),
+    ...(Array.isArray(params?.items) && { items: params.items.filter((item) => item && typeof item === "object").map((item, index) => ({
+      id: `stored-item-${index}`, name: stringValue(item.name), amount: stringValue(item.amount), quantity: stringValue(item.quantity),
+      memberIds: Array.isArray(item.memberIds) ? [...new Set<string>((item.memberIds as unknown[]).filter(
+        (id: unknown): id is string => typeof id === "string" && seen.has(id),
+      ))] : [],
+    })) }),
+    ...((params?.customKind === "percentage" || params?.customKind === "shares" || params?.customKind === "fixed") && { customKind: params.customKind }),
+    ...(params?.customValues && typeof params.customValues === "object" && { customValues: Object.fromEntries(
+      Object.entries(params.customValues).flatMap(([id, value]) => seen.has(id) && typeof value === "string" ? [[id, value]] : []),
+    ) }),
+    ...(feeDistribution && { feeDistribution }),
+    ...(discountDistribution && { discountDistribution }),
   };
 }
 
@@ -162,12 +221,29 @@ function parseEditorAmount(raw: string, currency: Currency, field: EditorField, 
   return parsed.ok ? parsed : editorFailure(parsed.error.code, field, memberId);
 }
 
-function parsePercentage(raw: string) {
+function parsePercentage(raw: string, field: EditorField = "coverPercentage", memberId?: string) {
   const match = /^(\d+)(?:\.(\d{1,2}))?$/.exec(raw.trim());
-  if (!match) return editorFailure("INVALID_PERCENTAGE", "coverPercentage");
+  if (!match) return editorFailure("INVALID_PERCENTAGE", field, memberId);
   const basisPoints = Number(match[1] + (match[2] ?? "").padEnd(2, "0"));
-  if (basisPoints > wholeBasisPoints) return editorFailure("INVALID_PERCENTAGE", "coverPercentage");
+  if (basisPoints > wholeBasisPoints) return editorFailure("INVALID_PERCENTAGE", field, memberId);
   return { ok: true, value: basisPoints } as const;
+}
+
+function positiveInteger(raw: string) {
+  const value = Number(raw.trim());
+  return /^\d+$/.test(raw.trim()) && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+function parseHost(host: EditorHost, currency: Currency, memberIds: readonly string[], multiple: boolean): EditorResult<TreatOptions> {
+  if (!host.hostId || !memberIds.includes(host.hostId)) return editorFailure("HOST_NOT_PARTICIPATING", multiple ? "hosts" : "hostId");
+  const coverValue = host.coverKind === "fixed"
+    ? parseEditorAmount(host.coverAmount, currency, multiple ? "hosts" : "coverAmount")
+    : parsePercentage(host.coverPercentage, multiple ? "hosts" : "coverPercentage");
+  if (!coverValue.ok) return coverValue;
+  const cover = typeof coverValue.value === "number"
+    ? { kind: "percentage" as const, basisPoints: coverValue.value }
+    : { kind: "fixed" as const, amountMinor: coverValue.value.amountMinor };
+  return { ok: true, value: { hostId: host.hostId, cover, includeHostInRemainder: host.includeHostInRemainder } };
 }
 
 function editorCharges(state: QuickSplitEditorState): EditorResult<QuickSplitInput["charges"]> {
@@ -191,6 +267,8 @@ function editorCharges(state: QuickSplitEditorState): EditorResult<QuickSplitInp
 
   return { ok: true, value: {
     kind: "details", subtotal: subtotal.value, discountMinor: discount.value.amountMinor, serviceFee, receiptTotal: total.value,
+    ...((state.mode === "equal" || state.mode === "individual") && (state.feeDistribution || state.discountDistribution)
+      ? { distribution: { serviceFee: state.feeDistribution, discount: state.discountDistribution } } : {}),
   } };
 }
 
@@ -200,18 +278,53 @@ function editorMethod(state: QuickSplitEditorState): EditorResult<QuickSplitInpu
     return { ok: true, value: { kind: "equal", memberIds: state.members.filter(({ included }) => included).map(({ id }) => id) } };
   }
   if (state.mode === "treat") {
-    if (!state.hostId || !memberIds.includes(state.hostId)) return editorFailure("HOST_NOT_PARTICIPATING", "hostId");
-    const coverValue = state.coverKind === "fixed"
-      ? parseEditorAmount(state.coverAmount, state.currency, "coverAmount")
-      : parsePercentage(state.coverPercentage);
-    if (!coverValue.ok) return coverValue;
-    const cover = typeof coverValue.value === "number"
-      ? { kind: "percentage" as const, basisPoints: coverValue.value }
-      : { kind: "fixed" as const, amountMinor: coverValue.value.amountMinor };
-    return { ok: true, value: {
-      kind: "treat", memberIds,
-      options: { hostId: state.hostId, cover, includeHostInRemainder: state.includeHostInRemainder },
-    } };
+    const extra = state.extraHosts ?? [];
+    const host = parseHost(state, state.currency, memberIds, extra.length > 0);
+    if (!host.ok) return host;
+    const hosts = [host.value];
+    for (const draft of extra) {
+      const parsed = parseHost(draft, state.currency, memberIds, true);
+      if (!parsed.ok) return parsed;
+      hosts.push(parsed.value);
+    }
+    return { ok: true, value: { kind: "treat", memberIds, options: extra.length ? { hosts } : host.value } };
+  }
+  if (state.mode === "custom") {
+    const participants = state.members.filter(({ included }) => included);
+    const kind = state.customKind ?? "fixed";
+    const fixed: { memberId: string; amountMinor: number }[] = [];
+    const percentages: { memberId: string; basisPoints: number }[] = [];
+    const weighted: { memberId: string; shares: number }[] = [];
+    for (const { id } of participants) {
+      const raw = state.customValues?.[id] ?? "";
+      if (kind === "fixed") {
+        const amount = parseEditorAmount(raw, state.currency, "custom", { memberId: id });
+        if (!amount.ok) return amount;
+        fixed.push({ memberId: id, amountMinor: amount.value.amountMinor });
+      } else if (kind === "percentage") {
+        const percent = parsePercentage(raw, "custom", id);
+        if (!percent.ok) return percent;
+        percentages.push({ memberId: id, basisPoints: percent.value });
+      } else {
+        const shares = positiveInteger(raw);
+        if (shares === undefined) return editorFailure("INVALID_SHARE_COUNT", "custom", id);
+        weighted.push({ memberId: id, shares });
+      }
+    }
+    const options: CustomSplitOptions = kind === "fixed" ? { kind, members: fixed }
+      : kind === "percentage" ? { kind, members: percentages } : { kind, members: weighted };
+    return { ok: true, value: { kind: "custom", options } };
+  }
+  if (state.itemized) {
+    const items: ItemSpending[] = [];
+    for (const item of state.items ?? []) {
+      const amount = parseEditorAmount(item.amount, state.currency, "items");
+      if (!amount.ok) return amount;
+      const quantity = positiveInteger(item.quantity);
+      if (!item.name.trim() || quantity === undefined) return editorFailure("INVALID_QUICK_INPUT", "items");
+      items.push({ name: item.name.trim(), quantity, amountMinor: amount.value.amountMinor, memberIds: item.memberIds });
+    }
+    return { ok: true, value: { kind: "individual", memberIds, items } };
   }
 
   const personalSpending: PersonalSpending[] = [];
@@ -239,13 +352,20 @@ function locateError(state: QuickSplitEditorState, { code, field }: Failure["err
     case "discount":
     case "serviceFee":
     case "sharedAmount":
+    case "items":
+    case "hosts":
+    case "chargeDistribution":
       return editorFailure(code, field);
+    case "basisPoints":
+    case "shares":
+    case "allocations":
+      return editorFailure(code, state.mode === "custom" ? "custom" : "members");
     case "total":
       return editorFailure(code, state.mode === "individual" && code === "TOTAL_MISMATCH" ? "sharedAmount" : "finalTotal");
     case "receiptTotal":
       return editorFailure(code, "finalTotal");
     case "cover":
-      return editorFailure(code, state.coverKind === "percentage" ? "coverPercentage" : "coverAmount");
+      return editorFailure(code, state.extraHosts?.length ? "hosts" : state.coverKind === "percentage" ? "coverPercentage" : "coverAmount");
     case "sharedMemberIds":
       return editorFailure(code, "sharedMembers");
     case "merchantPayment":
@@ -257,7 +377,18 @@ function locateError(state: QuickSplitEditorState, { code, field }: Failure["err
   }
 }
 
-export function calculateQuickSplitEditor(state: QuickSplitEditorState): EditorResult<QuickSplitPreview> {
+export function lockedAdvancedField(state: QuickSplitEditorState, hasProAccess: boolean): EditorField | undefined {
+  if (hasProAccess) return;
+  if (state.mode === "custom") return "custom";
+  if (state.mode === "treat" && state.extraHosts?.length) return "hosts";
+  if (state.mode === "individual" && state.itemized) return "items";
+  if (state.chargeMode === "details" && (state.mode === "equal" || state.mode === "individual")
+    && (state.feeDistribution || state.discountDistribution)) return "chargeDistribution";
+}
+
+export function calculateQuickSplitEditor(state: QuickSplitEditorState, hasProAccess = true): EditorResult<QuickSplitPreview> {
+  const locked = lockedAdvancedField(state, hasProAccess);
+  if (locked) return editorFailure("PRO_REQUIRED", locked);
   if (!isCurrency(state.currency)) return editorFailure("UNSUPPORTED_CURRENCY", "currency");
   const charges = editorCharges(state);
   if (!charges.ok) return charges;

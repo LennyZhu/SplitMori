@@ -1,5 +1,5 @@
 import { uuid } from "expo";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ComponentRef, type ReactNode } from "react";
+import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ComponentRef, type ReactNode } from "react";
 import {
   ActivityIndicator, Alert, BackHandler, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView,
   StyleSheet, Switch, Text, TextInput, View,
@@ -13,10 +13,13 @@ import {
   calculateExpenseSplit, createExpenseEditor, expenseDateInput, expenseDateTimestamp, expenseSplitUnchanged,
   hydrateExpenseEditor, prepareExpenseEdit, prepareNewExpense,
 } from "../services/expenseEditor.ts";
-import type { EditorField, EditorMember, QuickSplitEditorState } from "../services/quickSplitEditor.ts";
+import { lockedAdvancedField, type EditorField, type EditorMember, type QuickSplitEditorState } from "../services/quickSplitEditor.ts";
 import { formatResultMoney } from "../services/quickSplitResult.ts";
 import { SplitModeSelector } from "./SplitModeSelector.tsx";
-import { usePro } from "./ProContext.ts";
+import { usePro, useProSnapshot } from "./ProContext.ts";
+import { AdvancedChargeFields, AdvancedMethodFields } from "./AdvancedSplitFields.tsx";
+import { advancedEditorMessage, advancedSplitCopy } from "./advancedSplitCopy.ts";
+import { AppLanguageContext } from "./AppLanguageContext.ts";
 import { validationMessage } from "./splitEditorMessages.ts";
 import { colors, Icon } from "./visuals.tsx";
 
@@ -26,6 +29,7 @@ const editorSections: Record<EditorField, FormSection> = {
   currency: "total", finalTotal: "total", members: "members", hostId: "members", coverAmount: "members",
   coverPercentage: "members", personalAmount: "members", sharedAmount: "members", sharedMembers: "members",
   merchantPayerId: "payer", subtotal: "details", discount: "details", serviceFee: "details",
+  hosts: "members", items: "members", custom: "members", chargeDistribution: "details",
 };
 
 function storageMessage(code: DomainErrorCode) {
@@ -95,6 +99,8 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
   activityId: string; onBack: () => void;
 } & ({ onSaved: () => void; edit?: never } | { onSaved?: never; edit: EditExpenseForm })) {
   const { hasProAccess } = usePro();
+  const pro = useProSnapshot();
+  const language = useContext(AppLanguageContext);
   const [activity, setActivity] = useState<ActivityDetail | null | undefined>(edit?.activity);
   const [initial] = useState(() => edit && hydrateExpenseEditor(edit.activity, edit.original));
   const [editor, setEditor] = useState<QuickSplitEditorState | undefined>(initial);
@@ -171,9 +177,13 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
     setSaveError(undefined);
   }
 
-  function setField<K extends keyof QuickSplitEditorState>(field: K, value: QuickSplitEditorState[K]) {
+  function updateEditor(patch: Partial<QuickSplitEditorState>) {
     markDirty();
-    setEditor((current) => current && { ...current, [field]: value });
+    setEditor((current) => current && { ...current, ...patch });
+  }
+
+  function setField<K extends keyof QuickSplitEditorState>(field: K, value: QuickSplitEditorState[K]) {
+    updateEditor({ [field]: value });
   }
 
   function setMember(member: EditorMember, update: Partial<EditorMember>) {
@@ -182,7 +192,7 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
 
   const occurredAt = expenseDateTimestamp(date, openedAt);
   const preservedSplit = edit && initial && editor && expenseSplitUnchanged(initial, editor) ? edit.original.split : undefined;
-  const preview = editor && !preservedSplit ? calculateExpenseSplit(editor) : undefined;
+  const preview = editor && !preservedSplit ? calculateExpenseSplit(editor, pro.hasProAccess) : undefined;
   const split = preservedSplit ?? (preview?.ok ? preview.value.snapshot.split : undefined);
   const payer = editor?.members.find((member) => member.id === editor.merchantPayerId);
   const error = preview?.ok === false ? preview.error : undefined;
@@ -191,7 +201,9 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
   const details = editor?.chargeMode === "details";
 
   function fieldError(field: EditorField, memberId?: string) {
-    return attempted && error?.field === field && error.memberId === memberId ? validationMessage(error) : undefined;
+    return attempted && error?.field === field && error.memberId === memberId
+      ? advancedEditorMessage(error, language, editor?.customKind === "percentage") ?? validationMessage(error)
+      : undefined;
   }
 
   const offset = (section: FormSection) => (y: number) => { offsets.current[section] = y; };
@@ -206,6 +218,12 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
     Keyboard.dismiss();
     setAttempted(true);
     setSaveError(undefined);
+    const locked = lockedAdvancedField(editor, hasProAccess());
+    if (locked) {
+      setSaveError(advancedSplitCopy(language).locked);
+      focusSection(editorSections[locked]);
+      return;
+    }
     if (!name.trim() || occurredAt === undefined) {
       if (edit && name.trim()) {
         focusSection("date");
@@ -232,7 +250,7 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
       const result = await repository.createExpense(activityId, occurredAt, expense.value);
       if (!mounted.current) return;
       if (result.ok) onSaved?.();
-      else setSaveError(storageMessage(result.error.code));
+      else setSaveError(result.error.code === "PRO_REQUIRED" ? advancedSplitCopy(language).locked : storageMessage(result.error.code));
     } catch {
       if (mounted.current) setSaveError(edit ? "未能讀取更正預覽，請重試。" : storageMessage("FINANCE_STORAGE_ERROR"));
     } finally {
@@ -353,7 +371,7 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
                     <Text style={styles.caption}>{edit && member.included && split
                       ? money(shares.get(member.id) ?? 0) : member.included ? "參與分攤" : "不參與"}</Text>
                   </Pressable>
-                  {editor.mode === "individual" && member.included && (
+                  {editor.mode === "individual" && !editor.itemized && member.included && (
                     <AmountField label={`${member.displayName}的個人消費`} value={member.personalAmount}
                       onChange={(personalAmount) => setMember(member, { personalAmount })} placeholder={placeholder}
                       error={fieldError("personalAmount", member.id)} onFocus={onInputFocus} />
@@ -383,7 +401,7 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
                   </View>
                 </View>
               )}
-              {editor.mode === "individual" && (
+              {editor.mode === "individual" && !editor.itemized && (
                 <View style={styles.subsection}>
                   {amountField("sharedAmount", "公共消費總額")}
                   <Text style={styles.label}>公共消費參與者</Text>
@@ -394,6 +412,8 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
                   <ErrorText message={fieldError("sharedMembers")} />
                 </View>
               )}
+              <AdvancedMethodFields editor={editor} participants={participants} update={updateEditor}
+                error={fieldError} onFocus={onInputFocus} />
             </Card>
 
             <Card title="誰向商家付款？ *" onLayout={offset("payer")}>
@@ -448,6 +468,7 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
                         </View>
                       )}
                       {editor.serviceFeeMode !== "manual" && <ErrorText message={fieldError("serviceFee")} />}
+                      <AdvancedChargeFields editor={editor} participants={participants} update={updateEditor} error={fieldError} />
                     </>
                   )}
                 </>

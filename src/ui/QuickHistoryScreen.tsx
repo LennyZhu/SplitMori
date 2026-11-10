@@ -1,13 +1,17 @@
-import { useCallback } from "react";
+import { useCallback, useContext } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { getLocalDatabase } from "../data/database.ts";
 import { createQuickSplitRepository } from "../data/quickSplits.ts";
+import { usesAdvancedSplit } from "../domain/quickSplit.ts";
 import { createQuickSplitConversionService } from "../services/quickSplitConversion.ts";
 import { formatResultMoney } from "../services/quickSplitResult.ts";
 import {
   ConversionButton, ConversionPage, ConversionReadError, QuickRecordSummary, useConversionRead,
 } from "./QuickSplitConversionScreen.tsx";
 import { colors, Icon } from "./visuals.tsx";
+import { useAdvancedSplitAction } from "./AdvancedSplitFields.tsx";
+import { advancedSplitCopy } from "./advancedSplitCopy.ts";
+import { AppLanguageContext } from "./AppLanguageContext.ts";
 
 const dateFormat = new Intl.DateTimeFormat("zh-HK", { year: "numeric", month: "short", day: "numeric" });
 
@@ -42,6 +46,8 @@ export function QuickHistoryListScreen({ onRecord }: { onRecord: (id: string) =>
 export function QuickHistoryScreen({ historyId, onBack, onConvert, onViewActivity }: {
   historyId: string; onBack: () => void; onConvert: () => void; onViewActivity: (activityId: string) => void;
 }) {
+  const language = useContext(AppLanguageContext);
+  const authorize = useAdvancedSplitAction();
   const read = useCallback(async () => createQuickSplitConversionService(await getLocalDatabase()).getSource(historyId), [historyId]);
   const { state, retry } = useConversionRead(read);
   const source = state.status === "loaded" ? state.value : undefined;
@@ -53,7 +59,8 @@ export function QuickHistoryScreen({ historyId, onBack, onConvert, onViewActivit
     <ConversionPage title="快速分帳記錄" onBack={onBack}
       footer={source && (destination
         ? <ConversionButton label="查看活動" onPress={() => onViewActivity(destination.activityId)} />
-        : <ConversionButton label="加入活動" onPress={onConvert} />)}>
+        : <ConversionButton label="加入活動" onPress={() => usesAdvancedSplit(source.history.input)
+          ? authorize(advancedSplitCopy(language).addToActivity, onConvert) : onConvert()} />)}>
       {state.status === "loading" && <ActivityIndicator accessibilityLabel="正在讀取記錄" color={colors.ink} />}
       {state.status === "error" && <ConversionReadError retry={retry} />}
       {source === null && <Text style={styles.caption}>找不到這筆快速分帳記錄。</Text>}

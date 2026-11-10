@@ -37,6 +37,12 @@ export type SplitResult = {
         readonly remainderMinor: number;
         readonly includeHostInRemainder: boolean;
         readonly remainderSplit: EqualBreakdown;
+      }
+    | {
+        readonly kind: "treat";
+        readonly hosts: readonly (TreatOptions & { readonly coveredMinor: number })[];
+        readonly remainderMinor: number;
+        readonly remainderSplit: EqualBreakdown;
       };
 };
 
@@ -62,6 +68,14 @@ export type IndividualSplitResult = {
     readonly sharedTotalMinor: number;
     readonly sharedMemberIds: readonly string[];
     readonly sharedSplit: EqualBreakdown;
+  };
+};
+
+export type ItemSpending = SharedSpending & { readonly name: string; readonly quantity: number };
+export type ItemizedSplitResult = Omit<SplitResult, "explanation"> & {
+  readonly explanation: {
+    readonly kind: "individual";
+    readonly items: readonly (ItemSpending & { readonly allocations: readonly Allocation[] })[];
   };
 };
 
@@ -204,6 +218,89 @@ export function splitTreat(
       },
     },
   };
+}
+
+/** Every commitment is based on the same final total. Remainders follow participant order. */
+export function splitMultiTreat(total: Money, memberIds: readonly string[], hosts: readonly TreatOptions[]): Result<SplitResult> {
+  const invalid = validateMoney(total, "total") ?? validateMemberIds(memberIds);
+  if (invalid) return invalid;
+  if (hosts.length < 2) return failure("INVALID_QUICK_INPUT", "hosts");
+  const invalidHosts = validateMemberIds(hosts.map(({ hostId }) => hostId));
+  if (invalidHosts) return failure(invalidHosts.error.code, "hosts");
+  const participants = new Set(memberIds);
+  const commitments = new Map<string, TreatOptions & { coveredMinor: number }>();
+  let fixedTotal = 0n;
+  let basisPoints = 0;
+  for (const host of hosts) {
+    if (!participants.has(host.hostId)) return failure("HOST_NOT_PARTICIPATING", "hosts");
+    const { cover } = host;
+    if (cover.kind === "fixed") {
+      const invalidCover = validateMinorAmount(cover.amountMinor, "cover");
+      if (invalidCover) return invalidCover;
+      fixedTotal += BigInt(cover.amountMinor);
+      commitments.set(host.hostId, { ...host, coveredMinor: cover.amountMinor });
+    } else if (cover.kind === "percentage" && isValidBasisPoints(cover.basisPoints)) {
+      basisPoints += cover.basisPoints;
+      commitments.set(host.hostId, { ...host, coveredMinor: 0 });
+    } else {
+      return failure("INVALID_PERCENTAGE", "hosts");
+    }
+  }
+  const bill = BigInt(total.amountMinor);
+  if (basisPoints > wholeBasisPoints || fixedTotal * BigInt(wholeBasisPoints) + bill * BigInt(basisPoints) > bill * BigInt(wholeBasisPoints)) {
+    return failure("COVER_EXCEEDS_TOTAL", "hosts");
+  }
+  // Round percentage commitments together so two 50% hosts can split a single minor unit.
+  const percentHosts = memberIds.flatMap((id) => {
+    const cover = commitments.get(id)?.cover;
+    return cover?.kind === "percentage" ? [{ id, weight: cover.basisPoints }] : [];
+  });
+  const rounded = allocateByWeight(total.amountMinor, [...percentHosts.map(({ weight }) => weight), wholeBasisPoints - basisPoints]);
+  for (const [index, { id }] of percentHosts.entries()) {
+    commitments.set(id, { ...commitments.get(id)!, coveredMinor: rounded[index] });
+  }
+  const remainderMinor = rounded[percentHosts.length] - Number(fixedTotal);
+  const eligible = memberIds.filter((id) => !commitments.has(id) || commitments.get(id)?.includeHostInRemainder);
+  if (remainderMinor > 0 && eligible.length === 0) return failure("NO_REMAINDER_PARTICIPANTS", "hosts");
+  const remainder = allocateEvenly(remainderMinor, eligible);
+  const shares = new Map(remainder.allocations.map(({ memberId, amountMinor }) => [memberId, amountMinor]));
+  return { ok: true, value: {
+    total: { ...total }, allocationVersion: 1,
+    allocations: memberIds.map((memberId) => ({
+      memberId, amountMinor: (shares.get(memberId) ?? 0) + (commitments.get(memberId)?.coveredMinor ?? 0),
+    })),
+    explanation: { kind: "treat", hosts: [...commitments.values()], remainderMinor, remainderSplit: remainder.breakdown },
+  } };
+}
+
+export function splitItemized(total: Money, memberIds: readonly string[], items: readonly ItemSpending[]): Result<ItemizedSplitResult> {
+  const invalid = validateMoney(total, "total") ?? validateMemberIds(memberIds);
+  if (invalid) return invalid;
+  if (items.length === 0) return failure("INVALID_QUICK_INPUT", "items");
+  const shares = new Map(memberIds.map((id) => [id, 0]));
+  const details: ItemizedSplitResult["explanation"]["items"][number][] = [];
+  let sum = 0n;
+  for (const item of items) {
+    const invalidItem = validateMinorAmount(item.amountMinor, "total") ?? validateMemberIds(item.memberIds, "sharedMemberIds");
+    if (invalidItem) return failure(invalidItem.error.code, "items");
+    if (typeof item.name !== "string" || !item.name.trim() || !Number.isSafeInteger(item.quantity) || item.quantity < 1) {
+      return failure("INVALID_QUICK_INPUT", "items");
+    }
+    const selected = new Set(item.memberIds);
+    const eligible = memberIds.filter((id) => selected.has(id));
+    if (eligible.length !== selected.size) return failure("MEMBER_NOT_PARTICIPATING", "items");
+    sum += BigInt(item.amountMinor);
+    if (sum > BigInt(Number.MAX_SAFE_INTEGER)) return failure("AMOUNT_OVERFLOW", "items");
+    const { allocations } = allocateEvenly(item.amountMinor, eligible);
+    for (const { memberId, amountMinor } of allocations) shares.set(memberId, shares.get(memberId)! + amountMinor);
+    details.push({ ...item, memberIds: eligible, allocations });
+  }
+  if (sum !== BigInt(total.amountMinor)) return failure("TOTAL_MISMATCH", "items");
+  return { ok: true, value: {
+    total: { ...total }, allocationVersion: 1,
+    allocations: [...shares].map(([memberId, amountMinor]) => ({ memberId, amountMinor })),
+    explanation: { kind: "individual", items: details },
+  } };
 }
 
 /** Pass one personal amount per member in stable snapshot order, including zero amounts. */

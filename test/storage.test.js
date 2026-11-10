@@ -33,6 +33,7 @@ import {
 } from "../src/services/merchantRefund.ts";
 import { createQuickHistorySave } from "../src/services/quickHistorySave.ts";
 import { canSelectConversionTarget, createQuickSplitConversionService } from "../src/services/quickSplitConversion.ts";
+import { calculateQuickSplitEditor, createQuickSplitEditor } from "../src/services/quickSplitEditor.ts";
 import { createRestoreService } from "../src/services/restore.ts";
 
 // Exercises the production SQL against a real file with Node's SQLite adapter.
@@ -2365,7 +2366,7 @@ test("3B7A rolls back partial revisions and retries with the same ID, including 
 test("3B7A keeps historical custom fees and over-quota activities readable with guarded editing blocked", withFinance(
   async (finance, _activities, database) => {
     const custom = { ...expense("custom"), splitMode: "custom" };
-    valueOf(await finance.createExpense("trip", 100, custom));
+    valueOf(await createFinanceRepository(database, () => true).createExpense("trip", 100, custom));
     valueOf(await finance.createExpense("trip", 200, expense()));
     assert.equal((await loadExpenseDetail("trip", "custom", database)).editBlocker, "UNSUPPORTED_EXPENSE_EDIT");
     assert.equal((await loadExpenseCorrectionPreview("trip", custom, 1, database)).error.code, "UNSUPPORTED_EXPENSE_EDIT");
@@ -2382,6 +2383,71 @@ test("3B7A keeps historical custom fees and over-quota activities readable with 
     assert.equal(valueOf(await finance.listExpenseRevisions("trip", "dinner")).length, 1);
   },
 ));
+
+test("Batch A protects advanced expense writes and revisions while preserving the original expense and refund", withFinance(
+  async (finance, activities, database, _connection, reopen) => {
+    let pro = false;
+    const repository = createFinanceRepository(database, () => pro);
+    const activity = await activities.getActivity("trip");
+    const editor = { ...createExpenseEditor(activity), mode: "custom", finalTotal: "100.01",
+      customKind: "percentage", customValues: { z: "50", a: "50" }, merchantPayerId: "z" };
+    const original = valueOf(prepareNewExpense("dinner", "Dinner", editor));
+    assert.equal((await repository.createExpense("trip", 100, original)).error.code, "PRO_REQUIRED");
+    assert.equal(valueOf(await finance.listEvents("trip")).length, 0);
+    pro = true;
+    const saved = valueOf(await repository.createExpense("trip", 100, original));
+    valueOf(await repository.recordMerchantRefund("trip", 200, refund));
+    const hydrated = hydrateExpenseEditor(activity, saved.expense);
+    assert.deepEqual(hydrated.customValues, { z: "50.00", a: "50.00" });
+    const proposed = valueOf(prepareExpenseEdit(original, hydrated, { ...hydrated,
+      customKind: "shares", customValues: { z: "1", a: "2" },
+    }, "Dinner", 100));
+    const preview = valueOf(await repository.previewExpenseCorrection("trip", original.id, proposed, 1));
+    const request = { expenseId: original.id, revisionId: "pro-revision", expectedVersion: 1,
+      expectedLedger: preview.ledgerToken, occurredAt: 300, proposed, reviewedRefundIds: [refund.id] };
+    pro = false;
+    assert.equal((await repository.commitReviewedExpenseCorrection("trip", request)).error.code, "PRO_REQUIRED");
+    assert.equal(valueOf(await finance.listExpenseRevisions("trip", "dinner")).length, 1);
+    assert.deepEqual(valueOf(await repository.createExpense("trip", 100, original)), saved);
+    pro = true;
+    valueOf(await repository.commitReviewedExpenseCorrection("trip", request));
+    const reopened = await reopen();
+    const versions = valueOf(await reopened.listExpenseRevisions("trip", "dinner"));
+    assert.deepEqual(versions.map(({ expense }) => expense.split.allocations.map(({ amountMinor }) => amountMinor)), [[5001, 5000], [3334, 6667]]);
+    assert.equal(valueOf(await reopened.getExpense("trip", "dinner")).refunds[0].id, refund.id);
+  },
+));
+
+test("Batch A keeps advanced quick history and mapped item tails intact through backup and Free restore", withRestore(async ({
+  source, live, finance, service, exportSource, prepare,
+}) => {
+  let pro = false;
+  const hasProAccess = () => pro;
+  const quick = createQuickSplitRepository(source, hasProAccess);
+  const editor = { ...createQuickSplitEditor(), mode: "individual", finalTotal: "100.01", itemized: true,
+    items: [{ id: "row", name: "Tea", quantity: "2", amount: "100.01", memberIds: ["member-1", "member-2"] }] };
+  const { input } = valueOf(calculateQuickSplitEditor(editor));
+  assert.equal((await quick.saveQuickHistory("history", input)).error.code, "PRO_REQUIRED");
+  pro = true;
+  const history = valueOf(await quick.saveQuickHistory("history", input));
+  const conversion = createQuickSplitConversionService(source, hasProAccess);
+  const request = conversionRequest({ memberMapping: [
+    { quickMemberId: "member-1", activityMemberId: "a" }, { quickMemberId: "member-2", activityMemberId: "z" },
+  ] });
+  pro = false;
+  assert.deepEqual(valueOf(await quick.getQuickHistory("history")), history);
+  assert.equal((await conversion.convertQuickHistory(request)).error.code, "PRO_REQUIRED");
+  assert.equal(valueOf(await finance.listEvents("trip")).length, 0);
+  pro = true;
+  const receipt = valueOf(await conversion.convertQuickHistory(request));
+  assert.deepEqual(receipt.event.expense.splitInput.method.items[0].memberIds, ["a", "z"]);
+  const preview = await prepare(await exportSource());
+  assert.deepEqual(await service.restoreBackup({ confirmation: preview.confirmation, confirmed: true }), { status: "restored" });
+  const restored = await loadExpenseDetail("trip", receipt.event.expense.id, live);
+  assert.equal(restored.editBlocker, "PRO_REQUIRED");
+  assert.deepEqual(restored.expense.split.allocations.map(({ memberId, amountMinor }) => [memberId, amountMinor]), [["z", 5000], ["a", 5001]]);
+  assert.deepEqual(valueOf(await createQuickSplitRepository(live).getQuickHistory("history")), history);
+}));
 
 test("3B7A repairs the early v9 schema and saves a four-person correction without rewriting history", withTestFile(async (path) => {
   const connection = openTestConnection(path);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ComponentRef, type ReactNode } from "react";
+import { useCallback, useContext, useEffect, useRef, useState, type ComponentRef, type ReactNode } from "react";
 import {
   ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Switch,
   Text, TextInput, View,
@@ -10,6 +10,10 @@ import {
   type EditorError, type EditorField, type QuickSplitEditorState, type QuickSplitPreview,
 } from "../services/quickSplitEditor.ts";
 import { CurrencyPicker } from "./CurrencyPicker.tsx";
+import { AdvancedChargeFields, AdvancedMethodFields } from "./AdvancedSplitFields.tsx";
+import { advancedEditorMessage } from "./advancedSplitCopy.ts";
+import { AppLanguageContext } from "./AppLanguageContext.ts";
+import { usePro } from "./ProContext.ts";
 import { SplitModeSelector } from "./SplitModeSelector.tsx";
 import { validationMessage } from "./splitEditorMessages.ts";
 import { useQuickSplitDraft } from "./useQuickSplitDraft.ts";
@@ -23,6 +27,7 @@ const errorSections: Record<EditorField, SectionName> = {
   members: "members", hostId: "members", coverAmount: "members", coverPercentage: "members",
   personalAmount: "members", sharedAmount: "members", sharedMembers: "members",
   subtotal: "details", discount: "details", serviceFee: "details", merchantPayerId: "payer",
+  hosts: "members", items: "members", custom: "members", chargeDistribution: "details",
 };
 
 function InlineError({ message }: { message?: string }) {
@@ -83,6 +88,8 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
   onResult: (result: QuickSplitPreview) => void;
   focusPayer?: boolean; defaultCurrency: Currency;
 }) {
+  const language = useContext(AppLanguageContext);
+  const { hasProAccess } = usePro();
   const { editor, updateEditor, loading, error: draftError, retry, discard, discarding } = useQuickSplitDraft(defaultCurrency);
   const [validation, setValidation] = useState<EditorError>();
   const [showCurrencies, setShowCurrencies] = useState(false);
@@ -135,7 +142,9 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
   }
 
   function fieldError(field: EditorField, memberId?: string) {
-    return validation?.field === field && validation.memberId === memberId ? validationMessage(validation) : undefined;
+    return validation?.field === field && validation.memberId === memberId
+      ? advancedEditorMessage(validation, language, editor.customKind === "percentage") ?? validationMessage(validation)
+      : undefined;
   }
 
   function amountError(field: EditorField, raw: string, memberId?: string) {
@@ -178,7 +187,7 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
 
   function viewResult() {
     Keyboard.dismiss();
-    const result = calculateQuickSplitEditor(editor);
+    const result = calculateQuickSplitEditor(editor, hasProAccess());
     if (result.ok) {
       setValidation(undefined);
       onResult(result.value);
@@ -277,10 +286,11 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
                   return (
                     <View key={member.id} style={styles.member}>
                       <View style={styles.memberRow}>
-                        {editor.mode === "equal" && (
+                        {(editor.mode === "equal" || editor.mode === "custom") && (
                           <Pressable
                             accessibilityRole="checkbox"
-                            accessibilityLabel={`${name}參與平均分攤`}
+                            accessibilityLabel={editor.mode === "equal" ? `${name}參與平均分攤`
+                              : language === "en" ? `Include ${name}` : `${name}參與分攤`}
                             accessibilityState={{ checked: member.included }}
                             onPress={() => setMember(member.id, { included: !member.included })}
                             style={styles.iconButton}
@@ -306,7 +316,7 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
                           </Pressable>
                         )}
                       </View>
-                      {editor.mode === "individual" && (
+                      {editor.mode === "individual" && !editor.itemized && (
                         <Field label={`${name}的個人消費`} value={member.personalAmount}
                           onChangeText={(personalAmount) => setMember(member.id, { personalAmount })}
                           placeholder={amountPlaceholder} error={amountError("personalAmount", member.personalAmount, member.id)} onFocus={onInputFocus} />
@@ -345,7 +355,7 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
                   </View>
                 )}
 
-                {editor.mode === "individual" && (
+                {editor.mode === "individual" && !editor.itemized && (
                   <View style={styles.subsection}>
                     <Field label="公共消費總額" value={editor.sharedAmount} onChangeText={(value) => setField("sharedAmount", value)}
                       placeholder={amountPlaceholder} error={amountError("sharedAmount", editor.sharedAmount)} onFocus={onInputFocus} />
@@ -359,6 +369,10 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
                     <InlineError message={fieldError("sharedMembers")} />
                   </View>
                 )}
+                <AdvancedMethodFields editor={editor} participants={editor.mode === "custom"
+                  ? editor.members.filter(({ included }) => included) : editor.members}
+                  update={(patch) => apply((current) => ({ ...current, ...patch }))}
+                  error={fieldError} onFocus={onInputFocus} />
               </Section>
             </View>
 
@@ -396,6 +410,9 @@ export function QuickSplitScreen({ onBack, onResult, focusPayer, defaultCurrency
                       </>
                     )}
                     {editor.serviceFeeMode !== "manual" && <InlineError message={fieldError("serviceFee")} />}
+                    <AdvancedChargeFields editor={editor} participants={editor.mode === "equal"
+                      ? editor.members.filter(({ included }) => included) : editor.members}
+                      update={(patch) => apply((current) => ({ ...current, ...patch }))} error={fieldError} />
                   </>
                 ) : <Text style={styles.caption}>目前按實付總額分帳。</Text>}
               </Section>

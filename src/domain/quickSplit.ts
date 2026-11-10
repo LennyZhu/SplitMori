@@ -3,15 +3,16 @@ import { allocateCharges, calculateCharges, type ChargeInput, type ChargedSplitR
 import { failure, type Result } from "./result.ts";
 import { suggestTransfers, type TransferSuggestion } from "./settlement.ts";
 import {
-  splitCustom, splitEqual, splitIndividual, splitTreat, validateMemberIds, type CustomSplitOptions,
-  type CustomSplitResult, type IndividualSplitResult, type PersonalSpending, type SharedSpending,
+  splitCustom, splitEqual, splitIndividual, splitItemized, splitMultiTreat, splitTreat, validateMemberIds, type CustomSplitOptions,
+  type CustomSplitResult, type IndividualSplitResult, type ItemizedSplitResult, type ItemSpending, type PersonalSpending, type SharedSpending,
   type SplitResult, type TreatOptions,
 } from "./split.ts";
 
-type QuickSplitMethod =
+export type QuickSplitMethod =
   | { readonly kind: "equal"; readonly memberIds: readonly string[] }
-  | { readonly kind: "treat"; readonly memberIds: readonly string[]; readonly options: TreatOptions }
+  | { readonly kind: "treat"; readonly memberIds: readonly string[]; readonly options: TreatOptions | { readonly hosts: readonly TreatOptions[] } }
   | { readonly kind: "individual"; readonly personalSpending: readonly PersonalSpending[]; readonly shared: SharedSpending }
+  | { readonly kind: "individual"; readonly memberIds: readonly string[]; readonly items: readonly ItemSpending[] }
   | { readonly kind: "custom"; readonly options: CustomSplitOptions };
 
 export type QuickSplitMember = { readonly id: string; readonly displayName: string };
@@ -24,12 +25,17 @@ export type QuickSplitInput = {
   readonly merchantPayerId?: string;
 };
 
-type QuickAllocation = SplitResult | IndividualSplitResult | CustomSplitResult | ChargedSplitResult;
+type QuickAllocation = SplitResult | IndividualSplitResult | ItemizedSplitResult | CustomSplitResult | ChargedSplitResult;
 
 export type QuickSplitSnapshot = {
   readonly split: QuickAllocation;
   readonly suggestions: readonly TransferSuggestion[];
 };
+
+export function usesAdvancedSplit({ method, charges }: QuickSplitInput): boolean {
+  return method.kind === "custom" || (method.kind === "treat" && "hosts" in method.options)
+    || (method.kind === "individual" && "items" in method) || (charges.kind === "details" && charges.distribution !== undefined);
+}
 
 function calculateAllocation({ charges, method }: QuickSplitInput): Result<QuickAllocation> {
   if (charges.kind !== "details" && charges.kind !== "finalTotal") {
@@ -39,10 +45,13 @@ function calculateAllocation({ charges, method }: QuickSplitInput): Result<Quick
   if (!calculated.ok) return calculated;
   const { total } = calculated.value;
   const subtotal = charges.kind === "details" ? charges.subtotal : total;
+  if (charges.kind === "details" && charges.distribution !== undefined
+    && (method.kind === "treat" || method.kind === "custom")) return failure("CHARGE_ALLOCATION_UNSUPPORTED", "chargeDistribution");
 
   switch (method.kind) {
     case "treat":
-      return splitTreat(total, method.memberIds, method.options);
+      return "hosts" in method.options ? splitMultiTreat(total, method.memberIds, method.options.hosts)
+        : splitTreat(total, method.memberIds, method.options);
     case "custom":
       return splitCustom(total, method.options);
     case "equal": {
@@ -50,7 +59,8 @@ function calculateAllocation({ charges, method }: QuickSplitInput): Result<Quick
       return split.ok && charges.kind === "details" ? allocateCharges(split.value, charges) : split;
     }
     case "individual": {
-      const split = splitIndividual(subtotal, method.personalSpending, method.shared);
+      const split = "items" in method ? splitItemized(subtotal, method.memberIds, method.items)
+        : splitIndividual(subtotal, method.personalSpending, method.shared);
       return split.ok && charges.kind === "details" ? allocateCharges(split.value, charges) : split;
     }
     default:
