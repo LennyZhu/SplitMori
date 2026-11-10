@@ -47,7 +47,7 @@ const modeLabels: Record<Split["explanation"]["kind"], string> = {
   custom: "自訂分攤",
 };
 
-export function formatResultMoney(currency: Currency, amountMinor: number | bigint): string {
+export function formatResultAmount(currency: Currency, amountMinor: number | bigint): string {
   let amount: string;
   if (typeof amountMinor === "bigint" && amountMinor > BigInt(Number.MAX_SAFE_INTEGER)) {
     // A diagnostic sum may exceed the domain's safe integer range. Keep its digits exact.
@@ -62,6 +62,12 @@ export function formatResultMoney(currency: Currency, amountMinor: number | bigi
     amount = formatted.value;
   }
 
+  return amount;
+}
+
+export function formatResultMoney(currency: Currency, amountMinor: number | bigint): string {
+  const amount = formatResultAmount(currency, amountMinor);
+  if (amount === "—") return amount;
   const [whole, fraction] = amount.split(".");
   const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   return `${currency} ${grouped}${fraction === undefined ? "" : `.${fraction}`}`;

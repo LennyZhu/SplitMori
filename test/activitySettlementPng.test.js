@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildSettlementPngCard, resolveSettlementPngLanguages, settlementPngLayout } from "../src/services/activitySettlementPng.ts";
+import { buildSettlementDocument, shareSettlementDocument } from "../src/services/activitySettlementExport.ts";
 
 const snapshot = {
   name: "香港 / Tokyo", createdAt: Date.UTC(2026, 10, 7, 12), currency: "HKD", activityStatus: "completed", status: "unsettled",
@@ -8,6 +9,103 @@ const snapshot = {
   members: [{ memberId: "a", displayName: "陳小明", netBalanceMinor: 1001 }, { memberId: "b", displayName: "Alex", netBalanceMinor: -1001 }],
   suggestions: [{ fromMemberId: "b", toMemberId: "a", amountMinor: 1001 }],
 };
+
+test("S11 Pro PDF and CSV reuse the preview's amounts, language, dates and separate statuses in all currencies", () => {
+  for (const currency of ["HKD", "CNY", "MOP", "TWD", "USD", "JPY"]) {
+    for (const language of ["zh-HK", "en"]) {
+      const data = { ...snapshot, currency };
+      const card = buildSettlementPngCard(data, language);
+      const preview = { snapshot: data, card };
+      const pdf = buildSettlementDocument(preview, "pdf");
+      const csv = buildSettlementDocument(preview, "csv");
+      assert.equal(pdf.name, card.fileName.replace(/png$/, "pdf"));
+      assert.equal(csv.name, card.fileName.replace(/png$/, "csv"));
+      for (const value of [card.name, card.activityDate, card.generatedAt, card.activityStatus, card.settlementStatus]) {
+        assert.ok(pdf.content.includes(value));
+        assert.ok(csv.content.includes(value));
+      }
+      assert.ok(pdf.content.includes(card.outstanding));
+      const digits = currency === "JPY" ? "1001" : "10.01";
+      assert.ok(csv.content.includes(`"${currency}","${digits}"`));
+      assert.ok(csv.content.includes(`"Alex","陳小明","${currency}","${digits}"`));
+      assert.match(pdf.content, language === "en" ? /Suggested transfers are not completed payments/ : /轉帳建議不代表已完成付款/);
+      assert.match(csv.content, language === "en" ? /Suggested transfers are not completed payments/ : /轉帳建議不代表已完成付款/);
+    }
+  }
+});
+
+test("S11 Pro exports preserve long names and zero balances, escape markup and keep CSV names inert", () => {
+  const name = '活動 <script>alert("x")</script> & "Party", two lines';
+  const formulaName = '  =HYPERLINK("example")';
+  const lastName = "長名稱".repeat(18) + " Last member";
+  const data = { ...snapshot, name, status: "settled", outstandingMinor: 0n, suggestions: [],
+    members: Array.from({ length: 150 }, (_, index) => ({
+      memberId: String(index), displayName: index === 0 ? formulaName : index === 149 ? lastName : `人員 ${index}`,
+      netBalanceMinor: 0,
+    })),
+  };
+  const card = buildSettlementPngCard(data, "en");
+  const preview = { snapshot: data, card };
+  const pdf = buildSettlementDocument(preview, "pdf").content;
+  const csv = buildSettlementDocument(preview, "csv").content;
+  assert.match(pdf, /&lt;script&gt;alert\(&quot;x&quot;\)&lt;\/script&gt; &amp;/);
+  assert.doesNotMatch(pdf, /<script>/);
+  assert.ok(pdf.includes(lastName));
+  assert.ok(csv.includes(lastName));
+  assert.ok(csv.startsWith("\uFEFF"));
+  assert.ok(csv.includes(`"'${formulaName.replaceAll('"', '""')}"`));
+  assert.ok(csv.includes(`"${name.replaceAll('"', '""')}"`));
+  assert.equal(csv.match(/"HKD","0\.00","Settled"/g).length, 150);
+  assert.equal((pdf.match(/<tr><td>/g) ?? []).length, 154);
+  assert.ok(pdf.includes(card.emptyTransfers) && csv.includes(card.emptyTransfers));
+});
+
+test("S11 Pro generation and presentation require verified access; cancelling and failing clean up the file", async () => {
+  const preview = { snapshot, card: buildSettlementPngCard(snapshot, "en") };
+  let verified = false;
+  let supports = true;
+  let action = "cancelled";
+  let events = [];
+  const options = {
+    hasVerifiedProAccess: () => verified, isActive: () => true,
+    onPresenting: () => events.push("presenting"), title: "Export PDF",
+  };
+  const platform = {
+    supports: () => supports,
+    async prepare(document) {
+      events.push(document.format);
+      if (action === "generate-failed") throw new Error("cache failed");
+      if (action === "access-lost") verified = false;
+      return { uri: "file:///test/settlement.pdf", discard: () => events.push("discard") };
+    },
+    async present() {
+      events.push("share");
+      if (action === "share-failed") throw new Error("share failed");
+      return action;
+    },
+  };
+  const share = () => shareSettlementDocument(preview, "pdf", platform, options);
+  assert.equal(await share(), "proRequired");
+  assert.deepEqual(events, []);
+  verified = true;
+  supports = false;
+  assert.equal(await share(), "documentUnavailable");
+  assert.deepEqual(events, []);
+  supports = true;
+  for (const [scenario, outcome, calls] of [
+    ["access-lost", "proRequired", ["pdf", "discard"]],
+    ["generate-failed", "documentFailed", ["pdf"]],
+    ["cancelled", "cancelled", ["pdf", "presenting", "share", "discard"]],
+    ["share-failed", "shareFailed", ["pdf", "presenting", "share", "discard"]],
+    ["completed", "completed", ["pdf", "presenting", "share", "discard"]],
+  ]) {
+    action = scenario;
+    verified = true;
+    events = [];
+    assert.equal(await share(), outcome);
+    assert.deepEqual(events, calls);
+  }
+});
 
 test("S11 defaults the UI and image to the current App language and localizes feedback", () => {
   const zh = resolveSettlementPngLanguages({ appLocale: "zh-HK", systemLocale: "en-US" });

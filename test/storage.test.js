@@ -23,6 +23,7 @@ import { loadActivityDetail } from "../src/services/activityDetail.ts";
 import { loadActivityMembers } from "../src/services/activityMembers.ts";
 import { loadActivitySettlement } from "../src/services/activitySettlement.ts";
 import { buildSettlementPngCard, loadSettlementPngSnapshot } from "../src/services/activitySettlementPng.ts";
+import { buildSettlementDocument } from "../src/services/activitySettlementExport.ts";
 import { createAppPreferencesStore } from "../src/services/appPreferences.ts";
 import { loadExpenseCorrectionPreview, loadExpenseDetail, saveReviewedExpenseCorrection, summarizeCorrectionBalances } from "../src/services/expenseDetail.ts";
 import { createExpenseEditor, expenseDateInput, expenseDateTimestamp, hydrateExpenseEditor, prepareExpenseEdit, prepareNewExpense } from "../src/services/expenseEditor.ts";
@@ -2837,6 +2838,41 @@ function multiPayerExpense(first = 6000, second = 4000) {
     ],
   };
 }
+
+test("S11 Pro PDF, CSV and Free PNG read the same immutable v13 settlement snapshot", withFinance(
+  async (_finance, activities, database) => {
+    const finance = createFinanceRepository(database, () => true, () => true);
+    valueOf(await finance.createExpense("trip", 100, multiPayerExpense()));
+    valueOf(await finance.recordMerchantRefund("trip", 200, { ...refund, recipientId: "a", note: "Private refund note" }));
+    valueOf(await finance.recordMemberTransfer("trip", 300, { ...repayment, amountMinor: 500, note: "Private repayment note" }));
+    valueOf(await finance.commitExpenseCorrection("trip", correction(10_000, {
+      occurredAt: 400, proposed: multiPayerExpense(7000, 3000), reviewedRefundIds: [refund.id],
+    })));
+    await activities.completeActivity("trip");
+
+    const snapshot = await loadSettlementPngSnapshot("trip", database);
+    const card = buildSettlementPngCard(snapshot, "en");
+    const preview = { snapshot, card };
+    assert.deepEqual([card.activityStatus, card.settlementStatus], ["Completed", "Unsettled"]);
+    assert.deepEqual([card.effective, card.refund, card.repayment, card.outstanding], ["HKD 80.00", "HKD 20.00", "HKD 5.00", "HKD 25.00"]);
+    assert.deepEqual(card.transfers.map(({ from, to, amount }) => [from, to, amount]), [["Bo", "Alex", "HKD 25.00"]]);
+    const before = valueOf(await finance.getActivityLedger("trip"));
+    const pdf = buildSettlementDocument(preview, "pdf").content;
+    const csv = buildSettlementDocument(preview, "csv").content;
+    for (const amount of ["80.00", "20.00", "5.00", "25.00"]) {
+      assert.ok(pdf.includes(`HKD ${amount}`));
+      assert.ok(csv.includes(`"HKD","${amount}"`));
+    }
+    assert.doesNotMatch(pdf + csv, /Private .* note/);
+    assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
+
+    valueOf(await finance.recordMemberTransfer("trip", 500, { ...repayment, id: "remaining", amountMinor: 2500 }));
+    const latest = buildSettlementPngCard(await loadSettlementPngSnapshot("trip", database), "en");
+    assert.deepEqual([latest.effective, latest.outstanding, latest.settlementStatus], ["HKD 80.00", "HKD 0.00", "Settled"]);
+    assert.equal(buildSettlementDocument(preview, "pdf").content, pdf);
+    assert.equal(buildSettlementDocument(preview, "csv").content, csv);
+  },
+));
 
 test("Batch B keeps multiple merchant payments, a refund to the second payer and real repayments independent", withFinance(
   async (_finance, _activities, database, _connection, reopen) => {

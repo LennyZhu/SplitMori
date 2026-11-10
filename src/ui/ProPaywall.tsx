@@ -32,6 +32,7 @@ export function ProPaywall({ onClose }: { onClose: () => void }) {
       <SettingsGroup title={copy.availableNow}>
         <SettingsRow title={copy.multipleActivities} icon="check" />
         {copy.advancedSplits.map((feature) => <SettingsRow key={feature} title={feature} icon="check" divider compact />)}
+        <SettingsRow title={copy.documentExport} icon="check" divider compact />
       </SettingsGroup>
       <SettingsGroup title={copy.planned}>
         {copy.upcoming.map((feature, index) => <SettingsRow key={feature} compact title={feature} divider={index > 0} />)}

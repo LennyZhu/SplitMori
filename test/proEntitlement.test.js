@@ -227,6 +227,9 @@ test("S12 Paywall describes one-time billing and the real feature availability i
   assert.match(en.terms, /one-time purchase.*no subscription/i);
   assert.match(zh.plannedNote, /仍在開發/);
   assert.match(en.plannedNote, /unavailable with a purchase today/);
+  assert.match(zh.documentExport, /PDF 及 CSV/);
+  assert.match(en.documentExport, /PDF and CSV/);
+  assert.doesNotMatch([...zh.upcoming, ...en.upcoming].join(" "), /PDF|CSV/);
   assert.ok(zh.price("HK$ 38.00").includes("HK$ 38.00"));
   assert.ok(en.price("€4,99").includes("€4,99"));
 });

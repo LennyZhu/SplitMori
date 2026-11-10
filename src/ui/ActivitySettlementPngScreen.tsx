@@ -4,10 +4,14 @@ import {
   buildSettlementPngCard, loadSettlementPngSnapshot, resolveSettlementPngLanguages, settlementPngLayout,
   type SettlementPngCard, type SettlementPngLanguage, type SettlementPngSnapshot,
 } from "../services/activitySettlementPng.ts";
+import { shareSettlementDocument, type SettlementDocumentFormat } from "../services/activitySettlementExport.ts";
+import { settlementDocumentPlatform } from "../services/activitySettlementExportExpo.ts";
 import { canShareLocalPng, captureLocalSharePng, presentLocalSharePng, type LocalSharePng } from "../services/localSharePng.ts";
 import { saveSharePngToPhotos } from "../services/saveSharePngToPhotos.ts";
+import { hasVerifiedProAccess } from "../services/storeKitExpo.ts";
 import { ActivitySettlementPngReceipt, settlementReceiptWidth } from "./ActivitySettlementPngReceipt.tsx";
 import { ButtonPair, Notice } from "./FinanceReviewUi.tsx";
+import { usePro, useProSnapshot } from "./ProContext.ts";
 import { ConversionButton, ConversionPage } from "./QuickSplitConversionScreen.tsx";
 import { colors, Icon } from "./visuals.tsx";
 
@@ -15,9 +19,33 @@ type Job = { snapshot: SettlementPngSnapshot; card: SettlementPngCard };
 type CapturedPng = { image: LocalSharePng; aspectRatio: number };
 type Preview = Job & CapturedPng;
 type Page = "preview" | "actions" | "saved";
-type Busy = "generate" | "save" | "share";
+type Busy = "generate" | "save" | "share" | "document";
 type Issue = "readFailed" | "generateFailed" | "imageMissing" | "saveFailed" | "saveDenied" | "saveCancelled"
   | "photosUnavailable" | "shareUnavailable" | "shareFailed";
+type DocumentOutcome = Awaited<ReturnType<typeof shareSettlementDocument>>;
+
+const documentCopy = {
+  "zh-HK": {
+    heading: "進階匯出 · Pro", pdf: "匯出 PDF", csv: "匯出 CSV",
+    pdfHint: "可分頁閱讀的結算報告", csvHint: "可在試算表開啟的結算資料",
+    output: (language: string) => `使用目前預覽的結算資料 · ${language}`,
+    locked: "使用 Lifetime Pro 解鎖", generating: "正在準備結算文件…",
+    completed: "系統已完成所選的匯出操作。", cancelled: "已取消匯出。",
+    proRequired: "目前未能確認 Pro 權益。你仍可使用基本 PNG。",
+    documentUnavailable: "目前版本無法匯出此文件，請更新 App 後重試。",
+    documentFailed: "未能建立結算文件，請重試。", shareFailed: "系統未能完成匯出，請重試。",
+  },
+  en: {
+    heading: "Advanced export · Pro", pdf: "Export PDF", csv: "Export CSV",
+    pdfHint: "Paginated settlement report", csvHint: "Settlement data for spreadsheets",
+    output: (language: string) => `Uses the current settlement preview · ${language}`,
+    locked: "Unlock with Lifetime Pro", generating: "Preparing settlement document…",
+    completed: "The system completed the selected export action.", cancelled: "Export cancelled.",
+    proRequired: "Pro access could not be confirmed. Basic PNG sharing is still available.",
+    documentUnavailable: "This version cannot export this document. Update the app and try again.",
+    documentFailed: "Couldn’t create the settlement document. Try again.", shareFailed: "The system couldn’t complete the export. Try again.",
+  },
+} as const;
 
 function CaptureReceipt({ job, onCaptured }: { job: Job; onCaptured: (job: Job, captured?: CapturedPng) => void }) {
   const view = useRef<ComponentRef<typeof View>>(null);
@@ -80,7 +108,7 @@ function ActionRow({ mark, label, caption, onPress, divider = false, disabled }:
   return (
     <Pressable accessibilityRole="button" accessibilityState={{ disabled }} disabled={disabled} onPress={onPress}
       style={({ pressed }) => [styles.actionRow, divider && styles.divider, pressed && styles.pressed]}>
-      <View style={styles.actionMark}><Text accessible={false} style={styles.mark}>{mark}</Text></View>
+      <View style={styles.actionMark}><Text accessible={false} style={[styles.mark, mark.length > 1 && styles.fileMark]}>{mark}</Text></View>
       <View style={styles.actionText}><Text style={styles.actionLabel}>{label}</Text><Text style={styles.caption}>{caption}</Text></View>
       <Icon name="next" size={16} color={colors.muted} />
     </Pressable>
@@ -88,19 +116,23 @@ function ActionRow({ mark, label, caption, onPress, divider = false, disabled }:
 }
 
 export function ActivitySettlementPngScreen({ activityId, appLocale, onBack }: { activityId: string; appLocale: string; onBack: () => void }) {
+  const { openPro } = usePro();
+  const { status: proStatus } = useProSnapshot();
   const [initialOutputLanguage] = useState(() => resolveSettlementPngLanguages({ appLocale }).outputLanguage);
   const [page, setPage] = useState<Page>("preview");
   const [busy, setBusy] = useState<Busy>();
   const [issue, setIssue] = useState<Issue>();
+  const [documentOutcome, setDocumentOutcome] = useState<DocumentOutcome>();
   const [job, setJob] = useState<Job>();
   const [preview, setPreview] = useState<Preview>();
   const active = useRef(false);
   const operation = useRef<object | undefined>(undefined);
   const latest = useRef<Preview | undefined>(undefined);
   const usingImage = useRef<LocalSharePng | undefined>(undefined);
-  const { copy, outputLanguage } = resolveSettlementPngLanguages({
+  const { appLanguage, copy, outputLanguage } = resolveSettlementPngLanguages({
     appLocale, selectedOutputLanguage: preview?.card.language ?? initialOutputLanguage,
   });
+  const documents = documentCopy[appLanguage];
 
   const finish = useCallback(() => {
     operation.current = undefined;
@@ -113,6 +145,7 @@ export function ActivitySettlementPngScreen({ activityId, appLocale, onBack }: {
     operation.current = request;
     setBusy("generate");
     setIssue(undefined);
+    setDocumentOutcome(undefined);
     let current: SettlementPngSnapshot | null;
     try {
       current = snapshot ?? await loadSettlementPngSnapshot(activityId);
@@ -163,6 +196,7 @@ export function ActivitySettlementPngScreen({ activityId, appLocale, onBack }: {
   function back() {
     if (operation.current && busy !== "generate") return;
     setIssue(undefined);
+    setDocumentOutcome(undefined);
     if (page === "actions") setPage("preview");
     else onBack();
   }
@@ -172,6 +206,7 @@ export function ActivitySettlementPngScreen({ activityId, appLocale, onBack }: {
     operation.current = {};
     setBusy(action);
     setIssue(undefined);
+    setDocumentOutcome(undefined);
     const { image } = preview;
     usingImage.current = image;
     try {
@@ -194,16 +229,38 @@ export function ActivitySettlementPngScreen({ activityId, appLocale, onBack }: {
     }
   }
 
+  async function exportDocument(format: SettlementDocumentFormat) {
+    if (operation.current || !preview || issue === "imageMissing") return;
+    if (!hasVerifiedProAccess()) {
+      openPro();
+      return;
+    }
+    operation.current = {};
+    setBusy("document");
+    setIssue(undefined);
+    setDocumentOutcome(undefined);
+    try {
+      const outcome = await shareSettlementDocument(preview, format, settlementDocumentPlatform, {
+        hasVerifiedProAccess, isActive: () => active.current, title: documents[format],
+        onPresenting: () => setBusy("share"),
+      });
+      if (active.current) setDocumentOutcome(outcome);
+    } finally {
+      if (active.current) finish();
+    }
+  }
+
   const changeLanguage = (next: SettlementPngLanguage) => {
     if (next !== outputLanguage && preview) void generate(next, preview.snapshot);
   };
   const regenerate = () => { void generate(outputLanguage); };
   const unavailable = issue === "imageMissing";
   const isBusy = busy !== undefined;
-  const isPresenting = busy === "save" || busy === "share";
+  const isPresenting = busy === "save" || busy === "share" || busy === "document";
   const showActions = () => {
     if (operation.current || unavailable) return;
     setIssue(undefined);
+    setDocumentOutcome(undefined);
     setPage("actions");
   };
   const previewImage = (style: "previewImage" | "thumbnail" | "savedImage") => preview && (
@@ -223,9 +280,10 @@ export function ActivitySettlementPngScreen({ activityId, appLocale, onBack }: {
           : page === "actions" ? <Pressable accessibilityRole="button" disabled={isPresenting} onPress={back}
             style={({ pressed }) => [styles.secondary, pressed && styles.pressed]}><Text style={styles.actionLabel}>{copy.backToPreview}</Text></Pressable>
             : <ConversionButton label={copy.backToSettlement} onPress={onBack} />}>
-        {busy === "generate" || busy === "save" ? (
+        {busy === "generate" || busy === "save" || busy === "document" ? (
           <View style={styles.statusLine} accessibilityLiveRegion="polite">
-            <ActivityIndicator color={colors.ink} /><Text style={styles.caption}>{busy === "generate" ? copy.generating : copy.saving}</Text>
+            <ActivityIndicator color={colors.ink} /><Text style={styles.caption}>{busy === "generate" ? copy.generating
+              : busy === "save" ? copy.saving : documents.generating}</Text>
           </View>
         ) : null}
         {issue && <Notice alert={issue !== "saveCancelled"}>{copy[issue]}
@@ -261,6 +319,21 @@ export function ActivitySettlementPngScreen({ activityId, appLocale, onBack }: {
             <ActionRow mark="⟳" label={copy.regenerate} caption={copy.regenerateHint} disabled={isBusy} onPress={regenerate} divider />
           </View>
           <Notice>{copy.shareNote}</Notice>
+          <View>
+            <Text accessibilityRole="header" style={styles.actionLabel}>{documents.heading}</Text>
+            <Text style={styles.caption}>{documents.output(outputLanguage === "zh-HK" ? "繁體中文" : "English")}</Text>
+          </View>
+          <View style={styles.card}>
+            <ActionRow mark="PDF" label={documents.pdf} caption={proStatus === "free" ? documents.locked
+              : proStatus === "pro" ? documents.pdfHint : documents.proRequired}
+              disabled={isBusy || unavailable} onPress={() => void exportDocument("pdf")} />
+            <ActionRow mark="CSV" label={documents.csv} caption={proStatus === "free" ? documents.locked
+              : proStatus === "pro" ? documents.csvHint : documents.proRequired}
+              disabled={isBusy || unavailable} onPress={() => void exportDocument("csv")} divider />
+          </View>
+          {documentOutcome && <View accessibilityLiveRegion="polite">
+            <Notice alert={documentOutcome !== "completed" && documentOutcome !== "cancelled"}>{documents[documentOutcome]}</Notice>
+          </View>}
         </>}
         {page === "saved" && (
           <View style={styles.success} accessibilityLiveRegion="polite">
@@ -296,6 +369,7 @@ const styles = StyleSheet.create({
   divider: { borderTopColor: colors.line, borderTopWidth: StyleSheet.hairlineWidth },
   actionMark: { width: 37, height: 37, alignItems: "center", justifyContent: "center", backgroundColor: colors.tile, borderRadius: 10 },
   mark: { color: colors.ink, fontSize: 22, fontWeight: "500" },
+  fileMark: { fontSize: 11, fontWeight: "700" },
   actionText: { flex: 1, gap: 4 },
   actionLabel: { color: colors.ink, fontSize: 16, fontWeight: "700" },
   pressed: { opacity: 0.65 },
