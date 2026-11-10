@@ -1,5 +1,9 @@
+import { useContext } from "react";
 import { Alert, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import type { QuickSplitEditorState } from "../services/quickSplitEditor.ts";
+import { AppLanguageContext } from "./AppLanguageContext.ts";
+import { usePro } from "./ProContext.ts";
+import { proCopy } from "./proCopy.ts";
 import { colors, Icon } from "./visuals.tsx";
 
 type Mode = QuickSplitEditorState["mode"];
@@ -12,6 +16,9 @@ const modes = [
 ] as const;
 
 export function SplitModeSelector({ mode, onSelect }: { mode: Mode; onSelect: (mode: Mode) => void }) {
+  const language = useContext(AppLanguageContext);
+  const copy = proCopy(language);
+  const { hasProAccess, openPro } = usePro();
   const { width, fontScale } = useWindowDimensions();
   const compact = width < 370 || fontScale > 1.2;
 
@@ -25,9 +32,11 @@ export function SplitModeSelector({ mode, onSelect }: { mode: Mode; onSelect: (m
             accessibilityRole="radio"
             accessibilityLabel={kind === "custom" ? `${label}，Pro` : label}
             accessibilityState={{ checked: selected }}
-            onPress={() => kind === "custom"
-              ? Alert.alert("自訂分攤 · Pro", "此功能需要 Pro。購買及解鎖尚未開放，你仍可繼續編輯目前的分帳。")
-              : onSelect(kind)}
+            onPress={() => {
+              if (kind !== "custom") { onSelect(kind); return; }
+              Alert.alert(language === "zh-HK" ? "自訂分攤 · Pro" : "Custom split · Pro", copy.customUnavailable,
+                hasProAccess() ? [{ text: copy.ok }] : [{ text: copy.dismiss, style: "cancel" }, { text: copy.learn, onPress: () => openPro() }]);
+            }}
             style={({ pressed }) => [
               styles.mode, compact && styles.compactMode, selected && styles.activeMode, pressed && styles.pressed,
             ]}

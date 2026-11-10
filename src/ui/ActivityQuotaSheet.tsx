@@ -1,12 +1,21 @@
+import { useContext, useEffect } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { ActivityCreationBlocker } from "../data/activities.ts";
+import { AppLanguageContext } from "./AppLanguageContext.ts";
+import { usePro, useProSnapshot } from "./ProContext.ts";
+import { proCopy } from "./proCopy.ts";
 import { colors } from "./visuals.tsx";
 
 export function ActivityQuotaSheet({ blocker, onView, onClose, purpose = "create" }: {
   blocker: ActivityCreationBlocker; onView: () => void; onClose: () => void; purpose?: "create" | "reopen";
 }) {
   const { top, bottom, left, right } = useSafeAreaInsets();
+  const copy = proCopy(useContext(AppLanguageContext));
+  const { openPro } = usePro();
+  const { status, hasProAccess } = useProSnapshot();
+  useEffect(() => { if (hasProAccess) onClose(); }, [hasProAccess, onClose]);
+  if (hasProAccess) return null;
   return (
     <Modal visible transparent presentationStyle="overFullScreen" animationType="fade" onRequestClose={onClose}>
       <View style={[styles.overlay, { paddingTop: top + 12, paddingLeft: left, paddingRight: right }]}>
@@ -20,19 +29,21 @@ export function ActivityQuotaSheet({ blocker, onView, onClose, purpose = "create
           <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
             <View style={styles.mark}><Text style={styles.markText}>!</Text></View>
             <Text accessibilityRole="header" style={styles.title}>
-              {purpose === "reopen" ? "暫時無法重新開啟" : "已有進行中的活動"}
+              {purpose === "reopen" ? copy.quotaReopen : copy.quotaCreate}
             </Text>
             <Text style={styles.copy}>
-              免費版同時只可有 <Text style={styles.strong}>1 個進行中的活動</Text>。
-              {purpose === "reopen"
-                ? `請先完成「${blocker.name}」，再重新開啟這個活動。記錄還款毋須重新開啟。`
-                : `你可以繼續使用「${blocker.name}」，或先將現有活動標記完成後再建立新活動。`}
+              <Text style={styles.strong}>{status === "free" ? copy.quotaFree : copy.unknown}</Text>
+              {" "}{purpose === "reopen" ? copy.quotaReopenHelp(blocker.name) : copy.quotaCreateHelp(blocker.name)}
             </Text>
             <Pressable accessibilityRole="button" onPress={onView} style={({ pressed }) => [styles.button, styles.primary, pressed && styles.pressed]}>
-              <Text style={styles.primaryText}>查看現有活動</Text>
+              <Text style={styles.primaryText}>{copy.viewActivity}</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" onPress={() => { onClose(); openPro(); }}
+              style={({ pressed }) => [styles.button, styles.secondary, pressed && styles.pressed]}>
+              <Text style={styles.secondaryText}>{copy.learn}</Text>
             </Pressable>
             <Pressable accessibilityRole="button" onPress={onClose} style={({ pressed }) => [styles.button, styles.secondary, pressed && styles.pressed]}>
-              <Text style={styles.secondaryText}>稍後再說</Text>
+              <Text style={styles.secondaryText}>{copy.dismiss}</Text>
             </Pressable>
           </ScrollView>
         </View>

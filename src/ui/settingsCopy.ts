@@ -7,8 +7,7 @@ const copy = {
   "zh-HK": {
     settings: "設定", general: "一般設定", data: "資料與安全", purchases: "購買與支援", language: "語言",
     currency: "預設幣別", backup: "本地備份與還原", backupSubtitle: "完整備份、預覽及安全覆蓋",
-    pro: "SplitMori Pro", proSubtitle: "Lifetime 一次買斷 · 即將推出", restorePurchases: "恢復購買",
-    purchasePending: "購買功能接入後提供", privacy: "隱私政策", terms: "使用條款", support: "支援與回饋",
+    privacy: "隱私政策", terms: "使用條款", support: "支援與回饋",
     about: "關於 SplitMori", aboutHint: "版本資訊與法律支援", unavailableLink: "正式連結尚未提供", openLinkFailed: "未能開啟連結，請稍後再試。",
     appVersion: "App 版本", build: "構建版本", unavailable: "未提供", more: "更多資訊", aboutSummary: "簡單、專業的多人分帳工具",
     storage: "資料儲存", localStorage: "此裝置", account: "帳號", noAccount: "不需要", back: "返回",
@@ -47,8 +46,7 @@ const copy = {
   en: {
     settings: "Settings", general: "General", data: "Data and safety", purchases: "Purchases and support", language: "Language",
     currency: "Default currency", backup: "Local backup and restore", backupSubtitle: "Full backup, preview and safe replacement",
-    pro: "SplitMori Pro", proSubtitle: "Lifetime purchase · Coming later", restorePurchases: "Restore purchases",
-    purchasePending: "Available when purchases launch", privacy: "Privacy policy", terms: "Terms of use", support: "Support and feedback",
+    privacy: "Privacy policy", terms: "Terms of use", support: "Support and feedback",
     about: "About SplitMori", aboutHint: "Version, legal and support", unavailableLink: "Official link not configured", openLinkFailed: "Couldn’t open the link. Try again.",
     appVersion: "App version", build: "Build version", unavailable: "Unavailable", more: "More information", aboutSummary: "A simple, professional way to split expenses",
     storage: "Data storage", localStorage: "On this device", account: "Account", noAccount: "Not required", back: "Back",

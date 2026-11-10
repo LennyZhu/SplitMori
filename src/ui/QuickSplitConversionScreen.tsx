@@ -14,6 +14,7 @@ import {
   type ConversionTarget, type MemberMapping,
 } from "../services/quickSplitConversion.ts";
 import { formatResultMoney } from "../services/quickSplitResult.ts";
+import { usePro } from "./ProContext.ts";
 import { colors, Icon } from "./visuals.tsx";
 
 const modeLabels = { equal: "平均分攤", treat: "請客", individual: "各自消費", custom: "自訂分攤" } as const;
@@ -238,6 +239,7 @@ export function MemberPicker({ title, members, labels, selected, onSelect, onClo
 function conversionError(code: DomainErrorCode): string {
   switch (code) {
     case "ACTIVITY_COMPLETED": return "活動已完成，請返回選擇其他活動。";
+    case "EXPENSE_EDIT_LIMIT": return "目前有多於一個進行中的活動。請先完成其他活動或確認 Pro 狀態。";
     case "ACTIVITY_NOT_FOUND": return "找不到目標活動，請返回重新選擇。";
     case "CURRENCY_MISMATCH": return "幣種不一致，請返回重新選擇活動。";
     case "QUICK_HISTORY_NOT_FOUND": return "找不到來源記錄，請返回重新讀取。";
@@ -267,6 +269,7 @@ export function memberLabels(members: readonly { id: string; displayName: string
 function ConfirmConversion({ history, activityId, onBack, onJoined }: {
   history: QuickHistoryRecord; activityId: string; onBack: () => void; onJoined: (id: string) => void;
 }) {
+  const { hasProAccess } = usePro();
   const read = useCallback(async () => createActivityRepository(await getLocalDatabase()).getActivity(activityId), [activityId]);
   const { state, retry } = useConversionRead(read);
   const activity = state.status === "loaded" ? state.value : undefined;
@@ -348,7 +351,7 @@ function ConfirmConversion({ history, activityId, onBack, onJoined }: {
     setSaving(true);
     try {
       attempt.current ??= { requestId: uuid.v4(), occurredAt: Date.now() };
-      const service = createQuickSplitConversionService(await getLocalDatabase());
+      const service = createQuickSplitConversionService(await getLocalDatabase(), hasProAccess);
       const result = await service.convertQuickHistory({
         ...attempt.current, historyId: history.id, activityId, expenseName: name, memberMapping,
         merchantPayment: { memberId: payerId, ...preview.value.total },

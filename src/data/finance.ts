@@ -8,6 +8,7 @@ import { allocateProportionalRefund, remainingRefundShares } from "../domain/ref
 import { failure, type Result } from "../domain/result.ts";
 import { suggestTransfers, type TransferSuggestion } from "../domain/settlement.ts";
 import type { Allocation } from "../domain/split.ts";
+import { freeAccess, type ProAccess } from "../services/proEntitlement.ts";
 import type { ActivityStatus } from "./activities.ts";
 import type { LocalDatabase, SQLiteConnection, SQLiteReader } from "./database.ts";
 import {
@@ -281,10 +282,10 @@ async function readActivity(connection: SQLiteReader, id: string): Promise<Activ
   return { ...activity, memberIds: members.map(({ memberId }) => memberId) };
 }
 
-export function expenseEditBlocker(status: ActivityStatus, activeCount: number, mode: FinanceExpense["splitMode"]):
+export function expenseEditBlocker(status: ActivityStatus, activeCount: number, mode: FinanceExpense["splitMode"], hasProAccess = false):
   "ACTIVITY_COMPLETED" | "EXPENSE_EDIT_LIMIT" | "UNSUPPORTED_EXPENSE_EDIT" | undefined {
   if (status === "completed") return "ACTIVITY_COMPLETED";
-  if (activeCount > 1) return "EXPENSE_EDIT_LIMIT";
+  if (activeCount > 1 && !hasProAccess) return "EXPENSE_EDIT_LIMIT";
   if (mode === "custom") return "UNSUPPORTED_EXPENSE_EDIT";
 }
 
@@ -622,7 +623,7 @@ function projectRecordedEvent(
 
 async function recordInTransaction(
   transaction: SQLiteConnection, activityId: string, occurredAt: number, event: FinanceEvent, allowRetry = true,
-  expectedBalances?: ExpectedTransferBalances, expectedRefundLedger?: string,
+  expectedBalances?: ExpectedTransferBalances, expectedRefundLedger?: string, hasProAccess: ProAccess = freeAccess,
 ): Promise<Result<StoredFinanceEvent>> {
   const id = eventId(event);
   if (typeof id !== "string" || id.trim() === "") {
@@ -651,6 +652,7 @@ async function recordInTransaction(
   }
   if (event.kind === "memberTransfer" && occurredAt > Date.now()) return failure("INVALID_EVENT_TIME", "occurredAt");
   if (event.kind === "expense") {
+    if (activity.activeCount > 1 && !hasProAccess()) return failure("EXPENSE_EDIT_LIMIT", "activityId");
     const invalid = validateSplitSnapshot(event.expense);
     if (invalid) return invalid;
   }
@@ -691,15 +693,15 @@ async function recordInTransaction(
 
 /** Requires an existing write transaction. A caller-owned receipt handles retries. */
 export async function insertNewExpenseInTransaction(
-  transaction: SQLiteConnection, activityId: string, occurredAt: number, expense: FinanceExpense,
+  transaction: SQLiteConnection, activityId: string, occurredAt: number, expense: FinanceExpense, hasProAccess: ProAccess = freeAccess,
 ): Promise<Result<StoredExpense>> {
-  const result = await recordInTransaction(transaction, activityId, occurredAt, { kind: "expense", expense }, false);
+  const result = await recordInTransaction(transaction, activityId, occurredAt, { kind: "expense", expense }, false, undefined, undefined, hasProAccess);
   if (!result.ok) return result;
   if (result.value.kind !== "expense") throw new Error("Expected a stored expense");
   return { ok: true, value: result.value };
 }
 
-export function createFinanceRepository(database: LocalDatabase) {
+export function createFinanceRepository(database: LocalDatabase, hasProAccess: ProAccess = freeAccess) {
   function readLedger<T>(
     activityId: string,
     project: (activity: ActivityContext, events: StoredFinanceEvent[], revisions: StoredExpenseRevision[],
@@ -714,7 +716,8 @@ export function createFinanceRepository(database: LocalDatabase) {
   }
 
   function record(activityId: string, occurredAt: number, event: FinanceEvent, expectedBalances?: ExpectedTransferBalances): Promise<Result<StoredFinanceEvent>> {
-    return withStorage(() => database.write((transaction) => recordInTransaction(transaction, activityId, occurredAt, event, true, expectedBalances)));
+    return withStorage(() => database.write((transaction) =>
+      recordInTransaction(transaction, activityId, occurredAt, event, true, expectedBalances, undefined, hasProAccess)));
   }
 
   async function voidFinancialEvent(
@@ -767,7 +770,7 @@ export function createFinanceRepository(database: LocalDatabase) {
       return failure("EXPENSE_VERSION_CONFLICT", "expectedVersion");
     }
     const mode = current.expense.splitMode === "custom" ? "custom" : proposed.splitMode;
-    const blocker = expenseEditBlocker(activity.status, activity.activeCount, expectedVersion === undefined ? "equal" : mode);
+    const blocker = expenseEditBlocker(activity.status, activity.activeCount, expectedVersion === undefined ? "equal" : mode, hasProAccess());
     if (blocker) return failure(blocker, "activityId");
     const replacement = correctionReplacement(current.expense, proposed);
     const invalid = validateSplitSnapshot(replacement);

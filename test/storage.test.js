@@ -27,6 +27,7 @@ import { createAppPreferencesStore } from "../src/services/appPreferences.ts";
 import { loadExpenseCorrectionPreview, loadExpenseDetail, saveReviewedExpenseCorrection, summarizeCorrectionBalances } from "../src/services/expenseDetail.ts";
 import { createExpenseEditor, expenseDateInput, expenseDateTimestamp, hydrateExpenseEditor, prepareExpenseEdit, prepareNewExpense } from "../src/services/expenseEditor.ts";
 import { inspectRepaymentDraft } from "../src/services/memberRepayment.ts";
+import { createProEntitlement } from "../src/services/proEntitlement.ts";
 import {
   inspectMerchantRefundDraft, loadMerchantRefundPreview, loadMerchantRefundVoidPreview, saveReviewedMerchantRefund,
 } from "../src/services/merchantRefund.ts";
@@ -1708,6 +1709,61 @@ test("reopen is rejected by the current Free slot while a completed ledger remai
   const before = await loadActivityDetail("trip", database);
   await assert.rejects(activities.reopenActivity("trip"), (error) => error instanceof ActiveActivityLimitError && error.blocker.id === "active");
   assert.deepEqual(await loadActivityDetail("trip", database), before);
+}));
+
+test("S12 Pro creates and reopens concurrent activities; downgrade protects expenses and preserves existing history", withFinance(
+  async (finance, _activities, database) => {
+    let pro = true;
+    const hasProAccess = () => pro;
+    const activities = createActivityRepository(database, hasProAccess);
+    const entitledFinance = createFinanceRepository(database, hasProAccess);
+    const another = { id: "second", name: "Second", currency: "HKD", members: [{ id: "new", displayName: "New" }] };
+    await activities.createActivity(another);
+    await activities.completeActivity(another.id);
+    assert.equal((await activities.reopenActivity(another.id)).status, "active");
+    assert.equal(await activities.getCreationBlocker(), null);
+    valueOf(await entitledFinance.createExpense("trip", 100, expense()));
+    const request = correction(8000);
+    const preview = valueOf(await entitledFinance.previewExpenseCorrection("trip", "dinner", request.proposed, 1));
+    const before = valueOf(await finance.getActivityLedger("trip"));
+    pro = false;
+    await assert.rejects(activities.createActivity({ ...another, id: "third" }), ActiveActivityLimitError);
+    assert.equal((await entitledFinance.createExpense("trip", 110, expense("late"))).error.code, "EXPENSE_EDIT_LIMIT");
+    assert.equal((await entitledFinance.commitReviewedExpenseCorrection("trip", {
+      ...request, expectedLedger: preview.ledgerToken,
+    })).error.code, "EXPENSE_EDIT_LIMIT");
+    valueOf(await createQuickSplitRepository(database).saveQuickHistory("history", quickInput()));
+    const conversions = createQuickSplitConversionService(database, hasProAccess);
+    assert.equal((await conversions.convertQuickHistory(conversionRequest())).error.code, "EXPENSE_EDIT_LIMIT");
+    assert.deepEqual(valueOf(await finance.getActivityLedger("trip")), before);
+    valueOf(await finance.recordMemberTransfer("trip", 120, repayment));
+    await activities.completeActivity(another.id);
+    await assert.rejects(activities.reopenActivity(another.id), ActiveActivityLimitError);
+    valueOf(await conversions.convertQuickHistory(conversionRequest()));
+    assert.equal((await activities.listActivities()).length, 2);
+  },
+));
+
+test("S12 restoring a multi-activity backup preserves the ledger without granting the destination Pro", withRestore(async ({
+  source, live, activities, finance, service, exportSource, prepare,
+}) => {
+  await createActivityRepository(source, () => true).createActivity({
+    id: "another", name: "Another", currency: "HKD", members: [{ id: "new", displayName: "New" }],
+  });
+  valueOf(await createFinanceRepository(source, () => true).createExpense("trip", 100, expense()));
+  const before = valueOf(await finance.getActivityLedger("trip"));
+  const entitlement = createProEntitlement({
+    readEntitlement: async () => "free", subscribe: () => () => {},
+  }, "test.lifetime-pro", { load: async () => true, save: async () => {} });
+  const preview = await prepare(await exportSource());
+  assert.deepEqual(await service.restoreBackup({ confirmation: preview.confirmation, confirmed: true }), { status: "restored" });
+  entitlement.start();
+  await entitlement.refresh();
+  assert.equal(entitlement.hasProAccess(), false);
+  assert.equal((await activities.getCreationBlocker()).activeCount, 2);
+  assert.deepEqual(valueOf(await createFinanceRepository(live).getActivityLedger("trip")), before);
+  assert.equal((await createFinanceRepository(live, entitlement.hasProAccess)
+    .createExpense("trip", 200, expense("new-expense"))).error.code, "EXPENSE_EDIT_LIMIT");
 }));
 
 test("batch members persist after reopening and leave two original expenses and balances intact", withTestFile(async (path) => {

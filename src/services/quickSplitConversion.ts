@@ -6,6 +6,7 @@ import type { MerchantPayment } from "../domain/balance.ts";
 import { validateMinorAmount, validateMoney, type Currency, type Money } from "../domain/money.ts";
 import { failure, type Result } from "../domain/result.ts";
 import { validateMemberIds, type Allocation } from "../domain/split.ts";
+import { freeAccess, type ProAccess } from "./proEntitlement.ts";
 
 export type MemberMapping = { readonly quickMemberId: string; readonly activityMemberId: string };
 
@@ -110,7 +111,7 @@ function mapExpense(history: QuickHistoryRecord, activity: ActivityDetail, reque
   } };
 }
 
-export function createQuickSplitConversionService(database: LocalDatabase) {
+export function createQuickSplitConversionService(database: LocalDatabase, hasProAccess: ProAccess = freeAccess) {
   return {
     getSource(historyId: string): Promise<ConversionSource | null> {
       return database.read(async (connection) => {
@@ -182,7 +183,7 @@ export function createQuickSplitConversionService(database: LocalDatabase) {
           const expense = mapExpense(history, activity, request);
           if (!expense.ok) return expense;
 
-          const event = await insertNewExpenseInTransaction(transaction, activityId, occurredAt, expense.value);
+          const event = await insertNewExpenseInTransaction(transaction, activityId, occurredAt, expense.value, hasProAccess);
           if (!event.ok) return event;
           const receipt: QuickSplitConversionReceipt = {
             requestId, historyId, activityId, memberMapping, event: event.value,

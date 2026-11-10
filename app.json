@@ -3,21 +3,59 @@
     "name": "SplitMori",
     "slug": "splitmori",
     "version": "1.0.0",
-    "platforms": ["ios", "android"],
+    "extra": {
+      "lifetimeProProductId": "com.zhushunli.splitmori.pro.lifetime",
+      "eas": {
+        "projectId": "4fde99a1-04c3-44db-8791-bc88fae5dab5"
+      }
+    },
+    "platforms": [
+      "ios",
+      "android"
+    ],
+    "ios": {
+      "bundleIdentifier": "com.zhushunli.splitmori",
+      "infoPlist": {
+        "CFBundleLocalizations": [
+          "zh-HK",
+          "en",
+          "zh-HK",
+          "en"
+        ],
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
     "plugins": [
-      ["expo-localization", { "supportedLocales": ["zh-HK", "en"] }],
-      ["expo-media-library", {
-        "photosPermission": false,
-        "savePhotosPermission": "允許 SplitMori 將結算圖儲存到相簿。 Allow SplitMori to save settlement images to Photos.",
-        "granularPermissions": []
-      }]
+      [
+        "expo-localization",
+        {
+          "supportedLocales": [
+            "zh-HK",
+            "en"
+          ]
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": false,
+          "savePhotosPermission": "允許 SplitMori 將結算圖儲存到相簿。 Allow SplitMori to save settlement images to Photos.",
+          "granularPermissions": []
+        }
+      ]
     ],
     "android": {
       "blockedPermissions": [
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE",
         "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
+      ],
+      "permissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
       ]
-    }
+    },
+    "owner": "homeypaw"
   }
 }

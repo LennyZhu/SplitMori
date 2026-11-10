@@ -1,0 +1,15 @@
+{
+  "cli": {
+    "requireCommit": false
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "node": "24.22.2",
+      "ios": {
+        "simulator": false
+      }
+    }
+  }
+}

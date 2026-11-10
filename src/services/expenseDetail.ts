@@ -4,6 +4,7 @@ import { createFinanceRepository, expenseEditBlocker, type FinanceExpense, type 
 import { failure, type Failure } from "../domain/result.ts";
 import type { ActivityEventBalances } from "../domain/balance.ts";
 import { withActivityReadSnapshot } from "./activityList.ts";
+import { freeAccess, type ProAccess } from "./proEntitlement.ts";
 
 export type ExpenseDetailData = NonNullable<Awaited<ReturnType<typeof loadExpenseDetail>>>;
 
@@ -32,16 +33,19 @@ export function loadExpenseDetail(activityId: string, expenseId: string, databas
     return {
       activity, expense, expenseDate: expense.expenseDate ?? occurredAt, currentVersion, versions: history.value,
       refunds: refunds.filter(({ id }) => !voided.has(id)), voidedRefundCount: refundVoids.length, refundHistory,
+      activeCount: active?.activeCount ?? 0,
       editBlocker: expenseEditBlocker(activity.status, active?.activeCount ?? 0, expense.splitMode),
     };
   });
 }
 
-export function loadExpenseCorrectionPreview(activityId: string, expense: FinanceExpense, version: number, database?: LocalDatabase) {
+export function loadExpenseCorrectionPreview(
+  activityId: string, expense: FinanceExpense, version: number, database?: LocalDatabase, hasProAccess: ProAccess = freeAccess,
+) {
   return withActivityReadSnapshot(database, async (snapshot) => {
     const activity = await createActivityRepository(snapshot).getActivity(activityId);
     if (!activity) return failure("ACTIVITY_NOT_FOUND", "activityId");
-    const preview = await createFinanceRepository(snapshot).previewExpenseCorrection(activityId, expense.id, expense, version);
+    const preview = await createFinanceRepository(snapshot, hasProAccess).previewExpenseCorrection(activityId, expense.id, expense, version);
     return preview.ok ? { ok: true, value: { ...preview.value, activity } } as const : preview;
   });
 }
@@ -52,11 +56,11 @@ type CorrectionSaveOutcome =
 
 export async function saveReviewedExpenseCorrection(
   activityId: string, request: ReviewedExpenseCorrectionRequest,
-  { verifyOnly = false, database }: { verifyOnly?: boolean; database?: LocalDatabase } = {},
+  { verifyOnly = false, database, hasProAccess = freeAccess }: { verifyOnly?: boolean; database?: LocalDatabase; hasProAccess?: ProAccess } = {},
 ): Promise<CorrectionSaveOutcome> {
   let finance: ReturnType<typeof createFinanceRepository>;
   try {
-    finance = createFinanceRepository(database ?? await getLocalDatabase());
+    finance = createFinanceRepository(database ?? await getLocalDatabase(), hasProAccess);
   } catch {
     return { status: verifyOnly ? "unknown" : "notSaved" };
   }

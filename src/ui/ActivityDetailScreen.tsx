@@ -7,6 +7,7 @@ import { getLocalDatabase } from "../data/database.ts";
 import { loadActivityDetail, type ActivityDetailData } from "../services/activityDetail.ts";
 import { formatResultMoney } from "../services/quickSplitResult.ts";
 import { ActivityQuotaSheet } from "./ActivityQuotaSheet.tsx";
+import { usePro } from "./ProContext.ts";
 import { colors, EmptyActivityMark, Icon, type IconName } from "./visuals.tsx";
 
 const dateFormatter = new Intl.DateTimeFormat("zh-HK", { year: "numeric", month: "long", day: "numeric" });
@@ -59,6 +60,7 @@ export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAdd
   onManageMembers: () => void;
   onViewSettlement: (tab?: "transfers") => void;
 }) {
+  const { hasProAccess } = usePro();
   const [data, setData] = useState<ActivityDetailData | null>();
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -104,7 +106,7 @@ export function ActivityDetailScreen({ activityId, onBack, onViewExisting, onAdd
     setWorking(true);
     setActionError(undefined);
     try {
-      const repository = createActivityRepository(await getLocalDatabase());
+      const repository = createActivityRepository(await getLocalDatabase(), hasProAccess);
       const updated = await (completing ? repository.completeActivity(activityId) : repository.reopenActivity(activityId));
       if (!mounted.current) return;
       // Keep the newly committed status even if refreshing the ledger fails.

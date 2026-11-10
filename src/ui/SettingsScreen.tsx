@@ -4,6 +4,8 @@ import { Linking, Text, View } from "react-native";
 import type { Currency } from "../domain/money.ts";
 import { currencyLabels, type AppLanguage, type AppPreferences, type LanguagePreference } from "../services/appPreferences.ts";
 import { AppLanguageContext } from "./AppLanguageContext.ts";
+import { usePro, useProSnapshot } from "./ProContext.ts";
+import { proCopy } from "./proCopy.ts";
 import { SettingsBackupScreen } from "./SettingsBackupScreen.tsx";
 import { languageNames, languageOptions, settingsCopy } from "./settingsCopy.ts";
 import { SettingsGroup, SettingsNote, SettingsPage, SettingsRow, SettingsValue, settingsStyles as styles } from "./SettingsUi.tsx";
@@ -34,6 +36,9 @@ export function SettingsScreen({ preferences, systemLanguage, saving, preference
 }) {
   const language = useContext(AppLanguageContext);
   const copy = settingsCopy(language);
+  const purchaseCopy = proCopy(language);
+  const { openPro } = usePro();
+  const { status, lastKnownPro } = useProSnapshot();
   const [page, setPage] = useState<"main" | "language" | "currency" | "backup" | "about">("main");
   const [linkError, setLinkError] = useState(false);
   const main = () => { setLinkError(false); setPage("main"); };
@@ -66,8 +71,9 @@ export function SettingsScreen({ preferences, systemLanguage, saving, preference
           <SettingsRow title={copy.backup} detail={copy.backupSubtitle} icon="database" onPress={() => setPage("backup")} />
         </SettingsGroup>
         <SettingsGroup title={copy.purchases}>
-          <SettingsRow title={copy.pro} detail={copy.proSubtitle} icon="crown" disabled />
-          <SettingsRow title={copy.restorePurchases} detail={copy.purchasePending} icon="refresh" disabled divider />
+          <SettingsRow title={purchaseCopy.title} detail={lastKnownPro && (status === "loading" || status === "unknown")
+            ? purchaseCopy.lastKnown : purchaseCopy[status]} icon="crown" onPress={() => openPro()} />
+          <SettingsRow title={purchaseCopy.restore} icon="refresh" onPress={() => openPro(true)} divider />
           {legal("privacyPolicyUrl", copy.privacy, "shield", true)}
           {legal("supportUrl", copy.support, "help", true)}
           <SettingsRow title={copy.about} detail={version ? `${copy.appVersion} ${version}` : copy.aboutHint} icon="info"

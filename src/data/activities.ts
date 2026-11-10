@@ -1,4 +1,5 @@
 import { isCurrency, type Currency } from "../domain/money.ts";
+import { freeAccess, type ProAccess } from "../services/proEntitlement.ts";
 import type { LocalDatabase, SQLiteConnection, SQLiteReader } from "./database.ts";
 
 export type ActivityStatus = "active" | "completed";
@@ -64,10 +65,10 @@ function readCreationBlocker(connection: SQLiteReader) {
   `);
 }
 
-async function requireActiveActivitySlot(transaction: SQLiteConnection) {
+async function requireActiveActivitySlot(transaction: SQLiteConnection, hasProAccess: ProAccess) {
   const blocker = await readCreationBlocker(transaction);
   // Central write-time eligibility check for creating or reopening an activity.
-  if (blocker) throw new ActiveActivityLimitError(blocker);
+  if (blocker && !hasProAccess()) throw new ActiveActivityLimitError(blocker);
 }
 
 function requireText(value: string, label: string): string {
@@ -114,7 +115,7 @@ function requireActivity(activity: Activity | null, id: string): Activity {
   return activity;
 }
 
-export function createActivityRepository(database: LocalDatabase) {
+export function createActivityRepository(database: LocalDatabase, hasProAccess: ProAccess = freeAccess) {
   function addMembers(activityId: string, input: readonly NewMember[]): Promise<ActivityMember[]> {
     const requested = input.map((member) => ({ ...member }));
     return database.write(async (transaction) => {
@@ -161,7 +162,7 @@ export function createActivityRepository(database: LocalDatabase) {
     return database.write(async (transaction) => {
       const current = requireActivity(await selectActivity(transaction, id), id);
       if (current.status === status) return current;
-      if (status === "active") await requireActiveActivitySlot(transaction);
+      if (status === "active") await requireActiveActivitySlot(transaction, hasProAccess);
       const activity = await transaction.getFirstAsync<Activity>(`
         UPDATE activities SET status = ?, updated_at = MAX(updated_at + 1, ?) WHERE id = ?
         RETURNING ${activityColumns}
@@ -171,7 +172,10 @@ export function createActivityRepository(database: LocalDatabase) {
   }
 
   return {
-    getCreationBlocker: () => database.read(readCreationBlocker),
+    getCreationBlocker: () => database.read(async (connection) => {
+      const blocker = await readCreationBlocker(connection);
+      return hasProAccess() ? null : blocker;
+    }),
 
     createActivity(input: NewActivity): Promise<ActivityDetail> {
       return database.write(async (transaction) => {
@@ -179,7 +183,7 @@ export function createActivityRepository(database: LocalDatabase) {
         const name = requireText(input.name, "Activity name");
         if (!isCurrency(input.currency)) throw new Error("Unsupported activity currency");
         if (input.members.length === 0) throw new Error("An activity needs at least one member");
-        await requireActiveActivitySlot(transaction);
+        await requireActiveActivitySlot(transaction, hasProAccess);
 
         const now = Date.now();
         const activity: Activity = {

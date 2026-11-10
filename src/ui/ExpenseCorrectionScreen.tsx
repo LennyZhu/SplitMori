@@ -1,7 +1,7 @@
 import { uuid } from "expo";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from "react-native";
-import type { FinanceExpense, ReviewedExpenseCorrectionRequest } from "../data/finance.ts";
+import { expenseEditBlocker, type FinanceExpense, type ReviewedExpenseCorrectionRequest } from "../data/finance.ts";
 import { calculateCharges } from "../domain/charges.ts";
 import type { Failure } from "../domain/result.ts";
 import type { TransferSuggestion } from "../domain/settlement.ts";
@@ -13,6 +13,7 @@ import { formatResultMoney } from "../services/quickSplitResult.ts";
 import { ButtonPair, Card, Compare, Heading, Notice, Row, financeReviewStyles } from "./FinanceReviewUi.tsx";
 import { CreateExpenseScreen } from "./CreateExpenseScreen.tsx";
 import { MerchantRefundScreen, merchantRefundCopy } from "./MerchantRefundScreen.tsx";
+import { usePro, useProSnapshot } from "./ProContext.ts";
 import { ConversionButton, ConversionPage, ConversionReadError, memberLabels } from "./QuickSplitConversionScreen.tsx";
 import { colors, Icon } from "./visuals.tsx";
 
@@ -312,7 +313,11 @@ function History({ data, saved, money, nameFor }: {
 export function ExpenseCorrectionScreen({ activityId, expenseId, onBack, onViewSettlement }: {
   activityId: string; expenseId: string; onBack: () => void; onViewSettlement: () => void;
 }) {
-  const [data, setData] = useState<ExpenseDetailData | null>();
+  const { hasProAccess } = usePro();
+  const pro = useProSnapshot();
+  const [loadedData, setData] = useState<ExpenseDetailData | null>();
+  const data = loadedData && { ...loadedData,
+    editBlocker: expenseEditBlocker(loadedData.activity.status, loadedData.activeCount, loadedData.expense.splitMode, pro.hasProAccess) };
   const [page, setPage] = useState<"detail" | "edit" | "history">("detail");
   const [refundRoute, setRefundRoute] = useState<"register" | "history">();
   const [saved, setSaved] = useState(false);
@@ -346,7 +351,7 @@ export function ExpenseCorrectionScreen({ activityId, expenseId, onBack, onViewS
 
   async function openPreview(proposed: FinanceExpense) {
     if (!data) return "請先重新讀取費用。";
-    const result = await loadExpenseCorrectionPreview(activityId, proposed, data.currentVersion);
+    const result = await loadExpenseCorrectionPreview(activityId, proposed, data.currentVersion, undefined, hasProAccess);
     if (!result.ok) return correctionError(result.error);
     request.current = undefined;
     setBlocked(false);
@@ -374,7 +379,7 @@ export function ExpenseCorrectionScreen({ activityId, expenseId, onBack, onViewS
       occurredAt: Date.now(), proposed: preview.expense.after, reviewedRefundIds: preview.expense.refunds.map(({ id }) => id),
     };
     try {
-      const result = await saveReviewedExpenseCorrection(activityId, request.current, { verifyOnly: retry === "verify" });
+      const result = await saveReviewedExpenseCorrection(activityId, request.current, { verifyOnly: retry === "verify", hasProAccess });
       if (result.status === "saved") {
         setReview(undefined);
         setSaved(true);

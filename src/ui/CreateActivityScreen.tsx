@@ -10,6 +10,7 @@ import {
 import { getLocalDatabase } from "../data/database.ts";
 import type { Currency } from "../domain/money.ts";
 import { CurrencyPicker, currencyName } from "./CurrencyPicker.tsx";
+import { usePro } from "./ProContext.ts";
 import { colors, Icon } from "./visuals.tsx";
 
 const dateFormat = new Intl.DateTimeFormat("zh-HK", { year: "numeric", month: "long", day: "numeric" });
@@ -18,6 +19,7 @@ const newMember = (): NewMember => ({ id: uuid.v4(), displayName: "" });
 export function CreateActivityScreen({ onBack, onCreated, onBlocked, defaultCurrency }: {
   defaultCurrency: Currency; onBack: () => void; onCreated: (activity: Activity) => void; onBlocked: (blocker: ActivityCreationBlocker) => void;
 }) {
+  const { hasProAccess } = usePro();
   const [name, setName] = useState("");
   const [currency, setCurrency] = useState(defaultCurrency);
   const [members, setMembers] = useState<readonly NewMember[]>(() => [newMember(), newMember()]);
@@ -85,7 +87,7 @@ export function CreateActivityScreen({ onBack, onCreated, onBlocked, defaultCurr
     setValidation(undefined);
     setSaving(true);
     try {
-      const repository = createActivityRepository(await getLocalDatabase());
+      const repository = createActivityRepository(await getLocalDatabase(), hasProAccess);
       const activity = await repository.createActivity({ id: uuid.v4(), name: trimmedName, currency, members: initialMembers });
       if (mounted.current) onCreated(activity);
     } catch (cause) {

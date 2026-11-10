@@ -1,12 +1,13 @@
 import { registerRootComponent } from "expo";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ActivityIndicator, BackHandler, Pressable, StatusBar, StyleSheet, Text, View } from "react-native";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ActivityIndicator, AppState, BackHandler, Keyboard, Pressable, StatusBar, StyleSheet, Text, View } from "react-native";
 import { initialWindowMetrics, SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { createActivityRepository, type ActivityCreationBlocker } from "./src/data/activities.ts";
 import { DatabaseInitializationError, getLocalDatabase } from "./src/data/database.ts";
 import type { TransferSuggestion } from "./src/domain/settlement.ts";
 import type { AppLanguage } from "./src/services/appPreferences.ts";
 import type { QuickSplitPreview } from "./src/services/quickSplitEditor.ts";
+import { proEntitlement } from "./src/services/storeKitExpo.ts";
 import { ActivityDetailScreen } from "./src/ui/ActivityDetailScreen.tsx";
 import { ActivityListScreen } from "./src/ui/ActivityListScreen.tsx";
 import { ActivityMembersScreen } from "./src/ui/ActivityMembersScreen.tsx";
@@ -20,6 +21,8 @@ import { CreateActivityScreen } from "./src/ui/CreateActivityScreen.tsx";
 import { CreateExpenseScreen } from "./src/ui/CreateExpenseScreen.tsx";
 import { ExpenseCorrectionScreen } from "./src/ui/ExpenseCorrectionScreen.tsx";
 import { HomeScreen } from "./src/ui/HomeScreen.tsx";
+import { ProContext } from "./src/ui/ProContext.ts";
+import { ProPaywall } from "./src/ui/ProPaywall.tsx";
 import { QuickHistoryListScreen, QuickHistoryScreen } from "./src/ui/QuickHistoryScreen.tsx";
 import { QuickSplitConversionScreen } from "./src/ui/QuickSplitConversionScreen.tsx";
 import { QuickSplitResultScreen } from "./src/ui/QuickSplitResultScreen.tsx";
@@ -89,9 +92,12 @@ function backRoute(route: Route): Route {
   return { name: "home" };
 }
 
-function TabBar({ active, language, onSelect }: { active: Tab; language: AppLanguage; onSelect: (tab: Tab) => void }) {
+function TabBar({ active, language, onSelect, obscured }: {
+  active: Tab; language: AppLanguage; onSelect: (tab: Tab) => void; obscured: boolean;
+}) {
   return (
-    <SafeAreaView edges={["bottom", "left", "right"]} style={styles.tabDock}>
+    <SafeAreaView edges={["bottom", "left", "right"]} style={styles.tabDock}
+      accessibilityElementsHidden={obscured} importantForAccessibility={obscured ? "no-hide-descendants" : "auto"}>
       <View accessibilityRole="tablist" style={styles.tabCapsule}>
         {tabs.map(({ name, title, icon }) => {
           const selected = active === name;
@@ -120,6 +126,15 @@ function App() {
   const [ledgerEpoch, setLedgerEpoch] = useState(0);
   const [route, setRoute] = useState<Route>({ name: "home" });
   const [creationBlocker, setCreationBlocker] = useState<ActivityCreationBlocker | null>(null);
+  const [proOpen, setProOpen] = useState(false);
+  const openPro = useCallback((restore = false) => {
+    Keyboard.dismiss();
+    setProOpen(true);
+    void proEntitlement.loadProduct();
+    if (restore) void proEntitlement.restore();
+    else void proEntitlement.refresh();
+  }, []);
+  const closePro = useCallback(() => setProOpen(false), []);
   const entryCheck = useRef<object>(undefined);
   const isHome = route.name === "home";
   const quickRoute = route.name === "quickConversion" ? route.previous : route;
@@ -183,6 +198,17 @@ function App() {
   }, [route]);
 
   useEffect(() => {
+    proEntitlement.start();
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state === "active") void proEntitlement.refresh();
+    });
+    return () => {
+      subscription.remove();
+      proEntitlement.stop();
+    };
+  }, []);
+
+  useEffect(() => {
     let current = true;
     // Opening through the host resolves any durable restore marker before pages read the ledger.
     void getLocalDatabase().catch((error: unknown) => {
@@ -198,6 +224,7 @@ function App() {
     setCreationBlocker(null);
     setRoute({ name: "settings", restored: true });
     setLedgerEpoch((epoch) => epoch + 1);
+    void proEntitlement.refresh();
   }
 
   async function startActivityCreation(origin: ActivityOrigin) {
@@ -206,7 +233,7 @@ function App() {
     entryCheck.current = request;
     let blocker: ActivityCreationBlocker | null = null;
     try {
-      blocker = await createActivityRepository(await getLocalDatabase()).getCreationBlocker();
+      blocker = await createActivityRepository(await getLocalDatabase(), proEntitlement.hasProAccess).getCreationBlocker();
     } catch {
       // The form can still open. Its transaction will enforce eligibility and report storage failures.
     }
@@ -226,19 +253,21 @@ function App() {
   }
 
   useEffect(() => {
-    if (isHome || route.name === "settings") return;
+    if (proOpen || isHome || route.name === "settings") return;
     const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
       setRoute(backRoute);
       return true;
     });
     return () => subscription.remove();
-  }, [isHome, route.name]);
+  }, [isHome, proOpen, route.name]);
 
   return (
     <AppLanguageContext.Provider value={language}>
+    <ProContext.Provider value={{ hasProAccess: proEntitlement.hasProAccess, openPro }}>
       <SafeAreaProvider initialMetrics={initialWindowMetrics} style={styles.app}>
         <StatusBar barStyle="dark-content" />
-        <SafeAreaView key={ledgerEpoch} edges={activeTab ? ["top", "left", "right"] : ["top", "bottom", "left", "right"]} style={styles.main}>
+        <SafeAreaView key={ledgerEpoch} edges={activeTab ? ["top", "left", "right"] : ["top", "bottom", "left", "right"]}
+          accessibilityElementsHidden={proOpen} importantForAccessibility={proOpen ? "no-hide-descendants" : "auto"} style={styles.main}>
           {!preferences || !ledgerReady ? (
             <View style={styles.loading}><ActivityIndicator color={colors.ink} accessibilityLabel={settingsCopy(language).working} /></View>
           ) : route.name === "home" ? (
@@ -309,10 +338,14 @@ function App() {
               onReturnToSettings={() => setRoute({ name: "settings" })} />
           ) : null}
         </SafeAreaView>
-        {activeTab && <TabBar active={activeTab} language={language} onSelect={(tab) => setRoute({ name: tab })} />}
+        {activeTab && <TabBar active={activeTab} language={language} obscured={proOpen} onSelect={(tab) => setRoute({ name: tab })} />}
         {creationBlocker && <ActivityQuotaSheet blocker={creationBlocker}
           onClose={() => setCreationBlocker(null)} onView={() => openExistingActivity(creationBlocker)} />}
+        {proOpen && <SafeAreaView style={styles.proOverlay} accessibilityViewIsModal>
+          <ProPaywall onClose={closePro} />
+        </SafeAreaView>}
       </SafeAreaProvider>
+    </ProContext.Provider>
     </AppLanguageContext.Provider>
   );
 }
@@ -336,6 +369,7 @@ const styles = StyleSheet.create({
   selectedTabText: { color: tabColors.selected, fontWeight: "600" },
   pressed: { opacity: 0.65 },
   loading: { flex: 1, alignItems: "center", justifyContent: "center" },
+  proOverlay: { ...StyleSheet.absoluteFill, backgroundColor: colors.page },
 });
 
 registerRootComponent(App);

@@ -16,6 +16,7 @@ import {
 import type { EditorField, EditorMember, QuickSplitEditorState } from "../services/quickSplitEditor.ts";
 import { formatResultMoney } from "../services/quickSplitResult.ts";
 import { SplitModeSelector } from "./SplitModeSelector.tsx";
+import { usePro } from "./ProContext.ts";
 import { validationMessage } from "./splitEditorMessages.ts";
 import { colors, Icon } from "./visuals.tsx";
 
@@ -30,6 +31,7 @@ const editorSections: Record<EditorField, FormSection> = {
 function storageMessage(code: DomainErrorCode) {
   switch (code) {
     case "ACTIVITY_COMPLETED": return "活動已完成，請先重新開啟再新增費用。";
+    case "EXPENSE_EDIT_LIMIT": return "目前有多於一個進行中的活動。請先完成其他活動或確認 Pro 狀態。";
     case "ACTIVITY_NOT_FOUND": return "找不到這個活動。";
     case "MEMBER_NOT_PARTICIPATING": return "活動成員資料已變更，請返回活動詳情後再試。";
     case "CURRENCY_MISMATCH": return "活動幣種已變更，請返回活動詳情後再試。";
@@ -92,6 +94,7 @@ type EditExpenseForm = {
 export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
   activityId: string; onBack: () => void;
 } & ({ onSaved: () => void; edit?: never } | { onSaved?: never; edit: EditExpenseForm })) {
+  const { hasProAccess } = usePro();
   const [activity, setActivity] = useState<ActivityDetail | null | undefined>(edit?.activity);
   const [initial] = useState(() => edit && hydrateExpenseEditor(edit.activity, edit.original));
   const [editor, setEditor] = useState<QuickSplitEditorState | undefined>(initial);
@@ -225,7 +228,7 @@ export function CreateExpenseScreen({ activityId, onBack, onSaved, edit }: {
         if (mounted.current) setSaveError(message);
         return;
       }
-      const repository = createFinanceRepository(await getLocalDatabase());
+      const repository = createFinanceRepository(await getLocalDatabase(), hasProAccess);
       const result = await repository.createExpense(activityId, occurredAt, expense.value);
       if (!mounted.current) return;
       if (result.ok) onSaved?.();
